@@ -76,8 +76,10 @@ PageRoot edits local files and renders user-controlled HTML, so its default poli
   delivery interrupts an uncommitted close; after close commits it is stored
   only as the latest validated path in a private one-shot handoff, then passes
   the same mailbox validation again only after the next launch owns the
-  single-instance lock. Classification of that path is read-only until the user
-  confirms. The renderer receives only `requestId` and display facts; it cannot
+  single-instance lock. Classification itself is read-only; the existing open
+  intent lets ProjectWorkflow commit an ordinary import/continue using that
+  Prepared request. Deleting the original still requires explicit consent.
+  The renderer receives only `requestId` and display facts; it cannot
   submit a filesystem path, source key or trash target. Optional deletion of a
   newly imported original is a one-shot Main `shell.trashItem` after Canvas
   verification, and only when the file still hashes the same, is a regular

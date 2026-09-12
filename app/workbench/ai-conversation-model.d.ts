@@ -251,3 +251,15 @@ export function sidebarTurnPresentation(messages?: readonly SidebarMessage[]): {
 export function sidebarNarrationParagraphs(text: unknown): string[];
 
 export function sidebarProcessRows(messages: readonly SidebarMessage[]): { message: SidebarMessage; count: number }[];
+
+export function sidebarConversationPresentation(
+  snapshot: import("../application/conversation-session.js").ConversationSessionSnapshot | null,
+  context: Readonly<{ projectId: string; documentId: string; draftReadOnly: boolean }>,
+): Readonly<{
+  title: string;
+  messages: readonly unknown[];
+  draftText: string;
+  draftAvailable: boolean;
+  loading: boolean;
+  turns: readonly unknown[];
+}>;

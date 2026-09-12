@@ -18,6 +18,7 @@ import {
   projectAppliedEventToWorkbenchTabs,
 } from "../app/application/workbench-tabs-session.js";
 import { stopBridgeOrNotifyCloseAborted } from "../desktop/close-recovery.mjs";
+import { createExternalFileOpenMailbox } from "../desktop/external-file-open.mjs";
 
 const OLD_PATH = "/tmp/project-workflow-old.html";
 const RENAMED_PATH = "/tmp/project-workflow-renamed.html";
@@ -2240,7 +2241,7 @@ test("confirmed external open retries only its failed ack and never commits twic
       },
       async ackExternal(requestId) {
         ackCount += 1;
-        if (ackCount <= 2) throw new Error("ack unavailable");
+        if (ackCount <= 4) throw new Error("ack unavailable");
         return { acknowledged: true, requestId };
       },
     },
@@ -2250,18 +2251,29 @@ test("confirmed external open retries only its failed ack and never commits twic
     requestId: "external_confirm_ack",
     sourcePath: A_PATH,
   });
-  await waitFor(() => harness.workflow.getSnapshot().openConfirmation?.requestId === "external_confirm_ack");
-  const first = await harness.workflow.confirmExternalOpen({
-    requestId: "external_confirm_ack",
-    action: "import-new",
-  });
-  assert.equal(first.code, "EXTERNAL_OPEN_ACK_REJECTED");
+  await waitFor(() => harness.events.some((event) => (
+    event.type === "project-open-prepared-settled" && event.outcome.code === "EXTERNAL_OPEN_ACK_REJECTED"
+  )));
   assert.equal(commitCount, 1);
   assert.equal(harness.workflow.getSnapshot().externalOpen.status, "awaiting-confirmation");
+  const committedEpoch = harness.projectSession.epoch;
+  assert.equal(await harness.workflow.retryExternalOpen({
+    requestId: "external_confirm_ack",
+  }), null);
+  assert.equal(commitCount, 1);
+  assert.equal(harness.projectSession.epoch, committedEpoch);
+  assert.equal(harness.workflow.getSnapshot().openConfirmation.requestId, "external_confirm_ack");
+  assert.equal(harness.events.filter((event) => (
+    event.type === "external-open-ack-failed"
+    && event.requestId === "external_confirm_ack"
+    && event.confirmation === true
+  )).length, 2);
   const retried = await harness.workflow.retryExternalOpen({ requestId: "external_confirm_ack" });
   assert.equal(retried.status, "succeeded");
+  assert.equal(retried.value.acknowledged, true);
   assert.equal(commitCount, 1);
-  assert.equal(ackCount, 3);
+  assert.equal(harness.projectSession.epoch, committedEpoch);
+  assert.equal(ackCount, 5);
   assert.equal(harness.workflow.getSnapshot().externalOpen.status, "idle");
   assert.equal(harness.workflow.getSnapshot().openConfirmation, null);
 });
@@ -3301,15 +3313,7 @@ test("startup confirmation commits without fencing a nonexistent Canvas", async 
 
   const started = await harness.workflow.openProject({ kind: "startup" });
   assert.equal(started.status, "succeeded");
-  assert.equal(started.value.awaitingConfirmation, true);
-  assert.equal(harness.projectSession.epoch, 0);
-  assert.equal(fenced, 0);
-
-  const confirmed = await harness.workflow.confirmExternalOpen({
-    requestId: "req_startup_new",
-    action: "import-new",
-  });
-  assert.equal(confirmed.status, "succeeded");
+  assert.equal(started.value.opened, true);
   assert.equal(ackCount, 0);
   assert.equal(fenced, 0);
   await waitFor(
@@ -3321,8 +3325,7 @@ test("startup confirmation commits without fencing a nonexistent Canvas", async 
   assert.equal(harness.documentSession.html, A_HTML);
 });
 
-test("a local Start confirmation cancel or commit failure never publishes the retained Controller", async (t) => {
-  let commitShouldFail = false;
+test("a failed local Start import remains cancellable without publishing the retained Controller", async (t) => {
   let appliedCount = 0;
   let canceledCount = 0;
   const harness = createHarness({
@@ -3343,8 +3346,9 @@ test("a local Start confirmation cancel or commit failure never publishes the re
         return { canceled: true };
       },
       async commitPrepared() {
-        if (commitShouldFail) throw new Error("commit rejected");
-        return { name: "A", sourcePath: A_PATH, html: A_HTML, sha256: sha256(A_HTML) };
+        throw Object.assign(new Error("commit response lost"), {
+          code: "PROJECT_SERVICE_UNAVAILABLE",
+        });
       },
     },
   });
@@ -3354,25 +3358,20 @@ test("a local Start confirmation cancel or commit failure never publishes the re
   });
   t.after(unsubscribe);
 
-  await harness.workflow.openProject({ kind: "local" });
+  assert.equal((await harness.workflow.openProject({ kind: "local" })).status, "rejected");
   const canceled = await harness.workflow.cancelExternalOpen({ requestId: "req_local_start" });
   assert.equal(canceled.status, "succeeded");
   assert.equal(canceledCount, 1);
   assert.equal(harness.projectSession.epoch, 0);
   assert.equal(appliedCount, 0);
 
-  commitShouldFail = true;
-  await harness.workflow.openProject({ kind: "local" });
-  const failed = await harness.workflow.confirmExternalOpen({
-    requestId: "req_local_start",
-    action: "import-new",
-  });
+  const failed = await harness.workflow.openProject({ kind: "local" });
   assert.equal(failed.status, "rejected");
   assert.equal(harness.projectSession.epoch, 0);
   assert.equal(appliedCount, 0);
 });
 
-test("a new-external picker result shows confirmation without switching", async (t) => {
+test("a new-external picker result imports and opens in the same operation", async (t) => {
   let fenced = 0;
   let committed = null;
   const harness = createHarness({
@@ -3419,13 +3418,8 @@ test("a new-external picker result shows confirmation without switching", async 
 
   const opened = await harness.workflow.openProject({ kind: "local" });
   assert.equal(opened.status, "succeeded");
-  assert.equal(opened.value.awaitingConfirmation, true);
-  assert.equal(fenced, 0);
-  assert.equal(
-    harness.workflow.getSnapshot().openConfirmation?.classification,
-    "new-external",
-  );
-  assert.equal(harness.projectSession.sourcePath, OLD_PATH);
+  assert.equal(opened.value.opened, true);
+  assert.ok(fenced > 0);
 
   assert.equal(
     (await harness.workflow.confirmExternalOpen({
@@ -3435,11 +3429,6 @@ test("a new-external picker result shows confirmation without switching", async 
     "rejected",
   );
 
-  const confirmed = await harness.workflow.confirmExternalOpen({
-    requestId: "req_new",
-    action: "import-new",
-  });
-  assert.equal(confirmed.status, "succeeded");
   assert.deepEqual(committed, {
     requestId: "req_new",
     action: "import-new",
@@ -3451,6 +3440,7 @@ test("a new-external picker result shows confirmation without switching", async 
 test("canvas failure after import keeps the published project and never trashes", async (t) => {
   let finalized = 0;
   let rolledBack = 0;
+  let allowCommit = false;
   const harness = createHarness({
     projectOpen: {
       async openLocal() {
@@ -3464,6 +3454,11 @@ test("canvas failure after import keeps the published project and never trashes"
         };
       },
       async commitPrepared() {
+        if (!allowCommit) {
+          throw Object.assign(new Error("temporary commit failure"), {
+            code: "PROJECT_SERVICE_UNAVAILABLE",
+          });
+        }
         return {
           name: "page-V1.html",
           sourcePath: A_PATH,
@@ -3492,7 +3487,8 @@ test("canvas failure after import keeps the published project and never trashes"
     };
   };
 
-  await harness.workflow.openProject({ kind: "local" });
+  assert.equal((await harness.workflow.openProject({ kind: "local" })).status, "rejected");
+  allowCommit = true;
   harness.workflow.setExternalOpenDeleteOriginal({
     requestId: "req_canvas_fail",
     deleteOriginal: true,
@@ -3502,12 +3498,13 @@ test("canvas failure after import keeps the published project and never trashes"
     action: "import-new",
     deleteOriginal: true,
   });
-  assert.equal(confirmed.status, "succeeded");
+  assert.equal(confirmed.status, "rejected");
+  assert.equal(confirmed.code, "EXTERNAL_OPEN_CANVAS_REJECTED");
   assert.equal(canvasCalls, 2);
   assert.equal(finalized, 0);
   assert.equal(rolledBack, 0);
   assert.equal(harness.projectSession.sourcePath, A_PATH);
-  assert.equal(harness.workflow.getSnapshot().openConfirmation, null);
+  assert.equal(harness.workflow.getSnapshot().openConfirmation.requestId, "req_canvas_fail");
   assert.equal(
     harness.events.some((event) => event.type === "external-open-canvas-failed"),
     true,
@@ -3561,11 +3558,7 @@ test("canvas confirmation recovers after one failed acknowledgement", async (t) 
     return succeeded({ ready: true });
   };
 
-  await harness.workflow.openProject({ kind: "local" });
-  const confirmed = await harness.workflow.confirmExternalOpen({
-    requestId: "req_canvas_retry",
-    action: "import-new",
-  });
+  const confirmed = await harness.workflow.openProject({ kind: "local" });
   assert.equal(confirmed.status, "succeeded");
   assert.equal(canvasCalls, 2);
   assert.equal(finalized, 1);
@@ -3611,18 +3604,7 @@ test("continue-current opens the bound project without importing again", async (
   });
   t.after(() => harness.workflow.dispose());
 
-  await harness.workflow.openProject({ kind: "local" });
-  assert.equal(
-    harness.workflow.setExternalOpenDeleteOriginal({
-      requestId: "req_known",
-      deleteOriginal: true,
-    }).status,
-    "rejected",
-  );
-  const confirmed = await harness.workflow.confirmExternalOpen({
-    requestId: "req_known",
-    action: "continue-current",
-  });
+  const confirmed = await harness.workflow.openProject({ kind: "local" });
   assert.equal(confirmed.status, "succeeded");
   assert.deepEqual(committed, {
     requestId: "req_known",
@@ -3662,4 +3644,568 @@ test("catalog stops after one reread when authority keeps changing", async (t) =
   assert.equal((await h.workflow.refreshRegisteredProjects()).status, "stale");
   assert.equal(revision, 2);
   assert.equal(h.events.some((event) => event.type === "project-catalog-loaded"), false);
+});
+
+function preparedDescriptor(requestId, classification = "new-external") {
+  return { openKind: "confirmation", requestId, classification, sourceFileName: "page.html" };
+}
+
+for (const kind of ["local", "recent", "startup", "external"]) {
+  test(`${kind} automatically converges one same-request new-to-known reclassification`, async (t) => {
+    const requestId = `reclassified_${kind}`;
+    const commits = [];
+    const acknowledgements = [];
+    const h = createHarness({ initialProject: false, projectOpen: {
+      openLocal: async () => preparedDescriptor(requestId),
+      openRecent: async () => preparedDescriptor(requestId),
+      getActive: async () => preparedDescriptor(requestId),
+      acceptExternal: async () => preparedDescriptor(requestId),
+      commitPrepared: async (input) => {
+        commits.push(input);
+        if (commits.length === 1) throw Object.assign(new Error("already imported"), {
+          code: "OPEN_INTENT_RECLASSIFIED",
+          details: { confirmation: preparedDescriptor(requestId, "known-external") },
+        });
+        return { name: "A", sourcePath: A_PATH, html: A_HTML, sha256: sha256(A_HTML) };
+      },
+      finalizePrepared: async () => ({ disposition: "kept" }),
+      ackExternal: async (id) => { acknowledgements.push(id); },
+    } });
+    t.after(() => h.workflow.dispose());
+    if (kind === "external") {
+      h.workflow.acceptExternalProject({ requestId, sourcePath: A_PATH });
+      await waitFor(() => h.events.some((event) => event.type === "project-open-prepared-settled"));
+      await waitFor(() => h.workflow.getSnapshot().externalOpen.status === "idle");
+    } else {
+      assert.equal((await h.workflow.openProject({ kind, sourcePath: A_PATH })).value.opened, true);
+    }
+    assert.deepEqual(commits, [
+      { requestId, action: "import-new" }, { requestId, action: "continue-current" },
+    ]);
+    assert.deepEqual(acknowledgements, kind === "external" ? [requestId] : []);
+    assert.equal(h.projectSession.sourcePath, A_PATH);
+    assert.equal(h.workflow.getSnapshot().openConfirmation, null);
+    assert.equal(h.events.some((event) => event.type === "project-open-confirmation-presented"), false);
+  });
+}
+
+for (const next of [
+  preparedDescriptor("another_request", "known-external"),
+  preparedDescriptor("reclass_invalid", "new-external"),
+]) {
+  test(`reclassification cannot replace request or repeat classification: ${next.requestId}/${next.classification}`, async (t) => {
+    let commits = 0;
+    const h = createHarness({ projectOpen: {
+      openLocal: async () => preparedDescriptor("reclass_invalid"),
+      commitPrepared: async () => {
+        commits += 1;
+        throw Object.assign(new Error("invalid reclassification"), {
+          code: "OPEN_INTENT_RECLASSIFIED", confirmation: next,
+        });
+      },
+    } });
+    t.after(() => h.workflow.dispose());
+    assert.equal((await h.workflow.openProject({ kind: "local" })).status, "rejected");
+    assert.equal(commits, 1);
+    assert.equal(h.projectSession.sourcePath, OLD_PATH);
+    assert.equal(h.workflow.getSnapshot().openConfirmation, null);
+  });
+}
+
+test("repeated reclassification stops after two commits and clears deletion consent", async (t) => {
+  const commits = [];
+  let firstFailure = true;
+  const h = createHarness({ projectOpen: {
+    openLocal: async () => preparedDescriptor("reclass_bounded"),
+    commitPrepared: async (input) => {
+      if (firstFailure) {
+        throw Object.assign(new Error("temporary failure"), {
+          code: "PROJECT_SERVICE_UNAVAILABLE",
+        });
+      }
+      commits.push(input);
+      throw Object.assign(new Error("already imported"), {
+        code: "OPEN_INTENT_RECLASSIFIED",
+        confirmation: preparedDescriptor("reclass_bounded", "known-external"),
+      });
+    },
+  } });
+  t.after(() => h.workflow.dispose());
+  await h.workflow.openProject({ kind: "local" });
+  firstFailure = false;
+  h.workflow.setExternalOpenDeleteOriginal({ requestId: "reclass_bounded", deleteOriginal: true });
+  const result = await h.workflow.confirmExternalOpen({ requestId: "reclass_bounded", action: "import-new", deleteOriginal: true });
+  assert.equal(result.code, "OPEN_INTENT_RECLASSIFIED");
+  assert.deepEqual(commits, [
+    { requestId: "reclass_bounded", action: "import-new", deleteOriginal: true },
+    { requestId: "reclass_bounded", action: "continue-current" },
+  ]);
+  assert.equal(h.workflow.getSnapshot().openConfirmation, null);
+  assert.equal(h.projectSession.sourcePath, OLD_PATH);
+});
+
+test("unknown Prepared commit retries the same receipt without another import", async (t) => {
+  const ids = [];
+  let imports = 0;
+  let receipt = null;
+  let lostResponses = 0;
+  let finalizes = 0;
+  const h = createHarness({ projectOpen: {
+    openLocal: async () => preparedDescriptor("lost_response"),
+    commitPrepared: async ({ requestId }) => {
+      ids.push(requestId);
+      if (!receipt) {
+        imports += 1;
+        receipt = { name: "A", sourcePath: A_PATH, html: A_HTML, sha256: sha256(A_HTML) };
+      }
+      if (lostResponses < 2) {
+        lostResponses += 1;
+        throw Object.assign(new Error("response lost after commit"), { code: "IPC_TIMEOUT" });
+      }
+      return receipt;
+    },
+    finalizePrepared: async () => { finalizes += 1; return { disposition: "kept" }; },
+  } });
+  t.after(() => h.workflow.dispose());
+  assert.equal((await h.workflow.openProject({ kind: "local" })).status, "rejected");
+  assert.equal(h.projectSession.sourcePath, OLD_PATH);
+  assert.equal(h.events.filter((event) => (
+    event.type === "project-open-failed" && event.requestId === "lost_response"
+  )).length, 1);
+  assert.equal((await h.workflow.retryExternalOpen({ requestId: "lost_response" })).status, "rejected");
+  assert.equal(h.workflow.getSnapshot().openConfirmation.requestId, "lost_response");
+  assert.equal(h.events.filter((event) => (
+    event.type === "project-open-failed" && event.requestId === "lost_response"
+  )).length, 2);
+  assert.equal((await h.workflow.retryExternalOpen({ requestId: "lost_response" })).status, "succeeded");
+  assert.deepEqual(ids, ["lost_response", "lost_response", "lost_response"]);
+  assert.equal(imports, 1);
+  assert.equal(finalizes, 1);
+  assert.equal(h.projectSession.sourcePath, A_PATH);
+});
+
+for (const stop of ["cancel", "dispose"]) {
+  test(`${stop} during preparation prevents a late ordinary import`, async (t) => {
+    let release;
+    let commits = 0;
+    const h = createHarness({ projectOpen: {
+      openLocal: async () => preparedDescriptor("prepare_stop"),
+      commitPrepared: async () => { commits += 1; },
+      cancelPrepared: async () => ({ canceled: true }),
+    } });
+    t.after(() => h.workflow.dispose());
+    h.workflow.prepareSwitch = () => new Promise((resolve) => { release = resolve; });
+    const opening = h.workflow.openProject({ kind: "local" });
+    await waitFor(() => Boolean(release));
+    if (stop === "cancel") assert.equal((await h.workflow.cancelExternalOpen({ requestId: "prepare_stop" })).status, "succeeded");
+    else h.workflow.dispose();
+    release(succeeded());
+    assert.equal((await opening).status, "stale");
+    assert.equal(commits, 0);
+    assert.equal(h.projectSession.sourcePath, OLD_PATH);
+  });
+}
+
+test("ordinary import holds its commit against duplicate confirm and cancellation", async (t) => {
+  let release;
+  let commits = 0;
+  const h = createHarness({ projectOpen: {
+    openLocal: async () => preparedDescriptor("commit_busy"),
+    commitPrepared: () => { commits += 1; return new Promise((resolve) => { release = resolve; }); },
+  } });
+  t.after(() => h.workflow.dispose());
+  const opening = h.workflow.openProject({ kind: "local" });
+  await waitFor(() => Boolean(release));
+  assert.equal((await h.workflow.confirmExternalOpen({ requestId: "commit_busy", action: "import-new" })).code, "EXTERNAL_OPEN_BUSY");
+  assert.equal((await h.workflow.cancelExternalOpen({ requestId: "commit_busy" })).code, "EXTERNAL_OPEN_BUSY");
+  release({ name: "A", sourcePath: A_PATH, html: A_HTML, sha256: sha256(A_HTML) });
+  assert.equal((await opening).status, "succeeded");
+  assert.equal(commits, 1);
+});
+
+test("ordinary external opens keep FIFO through Canvas finalization and ACK", async (t) => {
+  const calls = [];
+  let release;
+  const h = createHarness({ initialProject: false, projectOpen: {
+    acceptExternal: async (requestId) => {
+      calls.push(`accept:${requestId}`);
+      return preparedDescriptor(requestId);
+    },
+    commitPrepared: async ({ requestId }) => {
+      calls.push(`commit:${requestId}`);
+      return { name: "A", sourcePath: A_PATH, html: A_HTML, sha256: sha256(A_HTML) };
+    },
+    finalizePrepared: async (requestId) => {
+      calls.push(`finalize:${requestId}`);
+      if (requestId === "fifo_first") await new Promise((resolve) => { release = resolve; });
+      return { disposition: "kept" };
+    },
+    ackExternal: async (requestId) => { calls.push(`ack:${requestId}`); },
+  } });
+  t.after(() => h.workflow.dispose());
+  h.workflow.acceptExternalProject({ requestId: "fifo_first", sourcePath: A_PATH });
+  h.workflow.acceptExternalProject({ requestId: "fifo_second", sourcePath: B_PATH });
+  await waitFor(() => Boolean(release));
+  assert.deepEqual(calls, ["accept:fifo_first", "commit:fifo_first", "finalize:fifo_first"]);
+  release();
+  await waitFor(() => h.workflow.getSnapshot().externalOpen.status === "idle");
+  assert.deepEqual(calls, [
+    "accept:fifo_first", "commit:fifo_first", "finalize:fifo_first", "ack:fifo_first",
+    "accept:fifo_second", "commit:fifo_second", "finalize:fifo_second", "ack:fifo_second",
+  ]);
+});
+
+test("source changes reject an ordinary import without reclassification or publication", async (t) => {
+  let commits = 0;
+  let cancels = 0;
+  const h = createHarness({ projectOpen: {
+    openLocal: async () => preparedDescriptor("source_changed"),
+    commitPrepared: async () => {
+      commits += 1;
+      throw Object.assign(new Error("source changed"), { code: "OPEN_INTENT_SOURCE_CHANGED" });
+    },
+    cancelPrepared: async () => { cancels += 1; return { canceled: true }; },
+  } });
+  t.after(() => h.workflow.dispose());
+  assert.equal((await h.workflow.openProject({ kind: "local" })).code, "OPEN_INTENT_SOURCE_CHANGED");
+  assert.equal(commits, 1);
+  assert.equal(cancels, 1);
+  assert.equal(h.projectSession.sourcePath, OLD_PATH);
+  assert.equal(h.workflow.getSnapshot().openConfirmation, null);
+  const failure = h.events.findLast((event) => event.type === "project-open-failed");
+  assert.equal(Object.hasOwn(failure, "requestId"), false);
+  assert.equal((await h.workflow.retryExternalOpen({ requestId: "source_changed" })).status, "stale");
+});
+
+test("dispose during commit rolls back a late receipt without publishing or trashing", async () => {
+  let release;
+  const calls = [];
+  const h = createHarness({ projectOpen: {
+    openLocal: async () => preparedDescriptor("dispose_commit"),
+    commitPrepared: () => new Promise((resolve) => { release = resolve; }),
+    rollbackPrepared: async (id) => { calls.push(`rollback:${id}`); },
+    finalizePrepared: async () => { calls.push("finalize"); },
+  } });
+  const opening = h.workflow.openProject({ kind: "local" });
+  await waitFor(() => Boolean(release));
+  h.workflow.dispose();
+  const disposedConfirmation = h.workflow.getSnapshot().openConfirmation;
+  release({ name: "A", sourcePath: A_PATH, html: A_HTML, sha256: sha256(A_HTML) });
+  assert.equal((await opening).code, "WORKBENCH_NAVIGATION_STALE_APPLICATION");
+  assert.deepEqual(calls, ["rollback:dispose_commit"]);
+  assert.equal(h.projectSession.sourcePath, OLD_PATH);
+  assert.deepEqual(h.workflow.getSnapshot().openConfirmation, disposedConfirmation);
+});
+
+test("a stale preparation releases the surviving request for an explicit retry", async (t) => {
+  let release;
+  let commits = 0;
+  const h = createHarness({ projectOpen: {
+    openLocal: async () => preparedDescriptor("prepare_epoch_change"),
+    commitPrepared: async () => { commits += 1;
+      return { name: "A", sourcePath: A_PATH, html: A_HTML, sha256: sha256(A_HTML) }; },
+    finalizePrepared: async () => ({ disposition: "kept" }),
+  } });
+  t.after(() => h.workflow.dispose());
+  h.workflow.prepareSwitch = () => new Promise((resolve) => { release = resolve; });
+  const opening = h.workflow.openProject({ kind: "local" });
+  await waitFor(() => Boolean(release));
+  h.projectSession.openLocator(OLD_PATH);
+  release(succeeded());
+  assert.equal((await opening).status, "stale");
+  assert.equal(commits, 0);
+  assert.equal(h.workflow.getSnapshot().openConfirmation.requestId, "prepare_epoch_change");
+  assert.equal(h.workflow.getSnapshot().openConfirmation.busy, false);
+  assert.equal(h.events.some((event) => (
+    event.type === "project-open-failed"
+    && event.requestId === "prepare_epoch_change"
+  )), true);
+  h.workflow.prepareSwitch = async () => succeeded();
+  const retry = await h.workflow.retryExternalOpen({ requestId: "prepare_epoch_change" });
+  assert.equal(retry.status, "succeeded", JSON.stringify(retry));
+  assert.equal(commits, 1);
+});
+
+test("a malformed action retires a retained Prepared intent instead of preserving retry authority", async (t) => {
+  let commits = 0;
+  let cancels = 0;
+  const h = createHarness({ projectOpen: {
+    openLocal: async () => preparedDescriptor("malformed_action"),
+    commitPrepared: async () => {
+      commits += 1;
+      throw Object.assign(new Error("commit response lost"), {
+        code: "PROJECT_SERVICE_UNAVAILABLE",
+      });
+    },
+    cancelPrepared: async () => { cancels += 1; return { canceled: true }; },
+  } });
+  t.after(() => h.workflow.dispose());
+
+  assert.equal((await h.workflow.openProject({ kind: "local" })).status, "rejected");
+  assert.equal(h.workflow.getSnapshot().openConfirmation.requestId, "malformed_action");
+  const malformed = await h.workflow.confirmExternalOpen({
+    requestId: "malformed_action",
+    action: "continue-current",
+  });
+
+  assert.equal(malformed.code, "EXTERNAL_OPEN_ACTION_MISMATCH");
+  assert.equal(commits, 1);
+  assert.equal(cancels, 1);
+  assert.equal(h.workflow.getSnapshot().openConfirmation, null);
+  assert.equal((await h.workflow.retryExternalOpen({ requestId: "malformed_action" })).status, "stale");
+});
+
+test("a missing Prepared commit port reports actionable same-request recovery", async (t) => {
+  const h = createHarness({ projectOpen: {
+    openLocal: async () => preparedDescriptor("commit_port_missing"),
+  } });
+  t.after(() => h.workflow.dispose());
+
+  const outcome = await h.workflow.openProject({ kind: "local" });
+
+  assert.equal(outcome.code, "EXTERNAL_OPEN_COMMIT_UNAVAILABLE");
+  assert.equal(h.workflow.getSnapshot().openConfirmation.requestId, "commit_port_missing");
+  assert.equal(h.events.some((event) => (
+    event.type === "project-open-failed"
+    && event.requestId === "commit_port_missing"
+  )), true);
+});
+
+test("a blocked external Prepared head stays actionable and its queued successor drains after retry", async (t) => {
+  const calls = [];
+  let blockFirstSwitch = true;
+  const h = createHarness({ projectOpen: {
+    acceptExternal: async (requestId) => {
+      calls.push(`accept:${requestId}`);
+      return preparedDescriptor(requestId);
+    },
+    commitPrepared: async ({ requestId }) => {
+      calls.push(`commit:${requestId}`);
+      return requestId === "blocked_external_a"
+        ? { name: "A", sourcePath: A_PATH, html: A_HTML, sha256: sha256(A_HTML) }
+        : { name: "B", sourcePath: B_PATH, html: B_HTML, sha256: sha256(B_HTML) };
+    },
+    finalizePrepared: async () => ({ disposition: "kept" }),
+    ackExternal: async (requestId) => { calls.push(`ack:${requestId}`); },
+  } });
+  t.after(() => h.workflow.dispose());
+  h.workflow.prepareSwitch = async () => {
+    if (blockFirstSwitch) {
+      blockFirstSwitch = false;
+      return { status: "blocked", code: "PROJECT_SWITCH_DRAIN_BLOCKED", reason: "save pending" };
+    }
+    return succeeded({ prepared: true });
+  };
+
+  h.workflow.acceptExternalProject({ requestId: "blocked_external_a", sourcePath: A_PATH });
+  h.workflow.acceptExternalProject({ requestId: "blocked_external_b", sourcePath: B_PATH });
+  await waitFor(() => h.workflow.getSnapshot().externalOpen.status === "awaiting-confirmation");
+
+  assert.deepEqual(calls, ["accept:blocked_external_a"]);
+  assert.equal(h.workflow.getSnapshot().externalOpen.queuedRequestId, "blocked_external_b");
+  assert.equal(h.events.some((event) => (
+    event.type === "project-open-failed"
+    && event.requestId === "blocked_external_a"
+  )), true);
+
+  assert.equal((await h.workflow.retryExternalOpen({ requestId: "blocked_external_a" })).status, "succeeded");
+  await waitFor(
+    () => h.workflow.getSnapshot().externalOpen.status === "idle",
+    `external queue did not drain: ${JSON.stringify({
+      calls,
+      snapshot: h.workflow.getSnapshot(),
+      events: h.events.map((event) => ({ type: event.type, requestId: event.requestId, reason: event.reason })),
+    })}`,
+  );
+  assert.deepEqual(calls, [
+    "accept:blocked_external_a",
+    "commit:blocked_external_a",
+    "ack:blocked_external_a",
+    "accept:blocked_external_b",
+    "commit:blocked_external_b",
+    "ack:blocked_external_b",
+  ]);
+  assert.equal(h.projectSession.sourcePath, B_PATH);
+});
+
+test("replacing an external Prepared confirmation cancels and ACKs its exact FIFO head", async (t) => {
+  const calls = [];
+  let blockExternal = true;
+  const h = createHarness({ projectOpen: {
+    acceptExternal: async (requestId) => {
+      calls.push(`accept:${requestId}`);
+      return preparedDescriptor(requestId);
+    },
+    openLocal: async () => preparedDescriptor("replacement_local"),
+    cancelPrepared: async (requestId) => { calls.push(`cancel:${requestId}`); return { canceled: true }; },
+    ackExternal: async (requestId) => { calls.push(`ack:${requestId}`); return { acknowledged: true, requestId }; },
+    commitPrepared: async ({ requestId }) => {
+      calls.push(`commit:${requestId}`);
+      return { name: "A", sourcePath: A_PATH, html: A_HTML, sha256: sha256(A_HTML) };
+    },
+    finalizePrepared: async () => ({ disposition: "kept" }),
+  } });
+  t.after(() => h.workflow.dispose());
+  h.workflow.prepareSwitch = async () => {
+    if (blockExternal) {
+      blockExternal = false;
+      return { status: "blocked", code: "PROJECT_SWITCH_DRAIN_BLOCKED", reason: "save pending" };
+    }
+    return succeeded({ prepared: true });
+  };
+
+  h.workflow.acceptExternalProject({ requestId: "replacement_external", sourcePath: B_PATH });
+  await waitFor(() => h.workflow.getSnapshot().openConfirmation?.requestId === "replacement_external");
+  assert.equal((await h.workflow.openProject({ kind: "local" })).status, "succeeded");
+  await waitFor(() => h.workflow.getSnapshot().externalOpen.status === "idle");
+
+  assert.ok(calls.indexOf("cancel:replacement_external") >= 0);
+  assert.ok(calls.indexOf("ack:replacement_external") > calls.indexOf("cancel:replacement_external"));
+  assert.equal(h.workflow.getSnapshot().openConfirmation, null);
+});
+
+test("a lost finalize response resumes from the renderer receipt without reapplying project state", async (t) => {
+  let imports = 0;
+  let finalizeCalls = 0;
+  let finalizeSideEffects = 0;
+  const h = createHarness({ projectOpen: {
+    openLocal: async () => preparedDescriptor("finalize_response_lost"),
+    commitPrepared: async () => {
+      imports += 1;
+      return { name: "A", sourcePath: A_PATH, html: A_HTML, sha256: sha256(A_HTML) };
+    },
+    finalizePrepared: async () => {
+      finalizeCalls += 1;
+      if (finalizeSideEffects === 0) {
+        finalizeSideEffects += 1;
+        throw Object.assign(new Error("finalize response lost"), {
+          code: "PROJECT_SERVICE_UNAVAILABLE",
+        });
+      }
+      return { disposition: "kept" };
+    },
+  } });
+  t.after(() => h.workflow.dispose());
+
+  assert.equal((await h.workflow.openProject({ kind: "local" })).status, "rejected");
+  const appliedEpoch = h.projectSession.epoch;
+  const resetCount = h.documentWorkflow.resetCount;
+  const edited = A_HTML.replace("A", "edited after finalize loss");
+  h.documentSession.beginEdit(edited);
+  h.draftSession.activate({
+    epoch: appliedEpoch,
+    projectId: "project_a",
+    documentId: "document_a",
+    sourcePath: A_PATH,
+  }, 7);
+
+  const retried = await h.workflow.retryExternalOpen({ requestId: "finalize_response_lost" });
+
+  assert.equal(retried.status, "succeeded", JSON.stringify(retried));
+  assert.equal(retried.value.alreadyApplied, true);
+  assert.equal(imports, 1);
+  assert.equal(finalizeCalls, 2);
+  assert.equal(finalizeSideEffects, 1);
+  assert.equal(h.events.filter((event) => event.type === "project-applied").length, 1);
+  assert.equal(h.projectSession.epoch, appliedEpoch);
+  assert.equal(h.documentWorkflow.resetCount, resetCount);
+  assert.equal(h.documentSession.html, edited);
+  assert.equal(h.draftSession.revision, 7);
+});
+
+test("a post-apply Canvas failure retries only Canvas and finalization on the same epoch", async (t) => {
+  let imports = 0;
+  let canvasCalls = 0;
+  let finalizes = 0;
+  const h = createHarness({ projectOpen: {
+    openLocal: async () => preparedDescriptor("canvas_stage_retry"),
+    commitPrepared: async () => {
+      imports += 1;
+      return { name: "A", sourcePath: A_PATH, html: A_HTML, sha256: sha256(A_HTML) };
+    },
+    finalizePrepared: async () => { finalizes += 1; return { disposition: "kept" }; },
+  }, documentWorkflow: {
+    async ensureCurrentCanvas() {
+      canvasCalls += 1;
+      return canvasCalls <= 2
+        ? { status: "rejected", code: "DOCUMENT_CANVAS_AUTHORITY_REJECTED", reason: "canvas pending" }
+        : succeeded({ ready: true });
+    },
+  } });
+  t.after(() => h.workflow.dispose());
+
+  const first = await h.workflow.openProject({ kind: "local" });
+  assert.equal(first.status, "rejected");
+  assert.equal(first.code, "EXTERNAL_OPEN_CANVAS_REJECTED");
+  const appliedEpoch = h.projectSession.epoch;
+  const resetCount = h.documentWorkflow.resetCount;
+  const edited = A_HTML.replace("A", "edited during canvas recovery");
+  h.documentSession.beginEdit(edited);
+  h.draftSession.activate({
+    epoch: appliedEpoch,
+    projectId: "project_a",
+    documentId: "document_a",
+    sourcePath: A_PATH,
+  }, 9);
+
+  const retried = await h.workflow.retryExternalOpen({ requestId: "canvas_stage_retry" });
+
+  assert.equal(retried.status, "succeeded", JSON.stringify(retried));
+  assert.equal(retried.value.alreadyApplied, true);
+  assert.equal(imports, 1);
+  assert.equal(canvasCalls, 3);
+  assert.equal(finalizes, 1);
+  assert.equal(h.events.filter((event) => event.type === "project-applied").length, 1);
+  assert.equal(h.projectSession.epoch, appliedEpoch);
+  assert.equal(h.documentWorkflow.resetCount, resetCount);
+  assert.equal(h.documentSession.html, edited);
+  assert.equal(h.draftSession.revision, 9);
+});
+
+test("a lost Main ACK response replays A exactly and drains B without reimport or epoch churn", async (t) => {
+  let nextId = 0;
+  const mailbox = createExternalFileOpenMailbox({
+    createRequestId: () => `ack_receipt_${++nextId}`,
+    platform: "darwin",
+  });
+  const first = mailbox.publish("/Users/demo/A.html");
+  const second = mailbox.publish("/Users/demo/B.html");
+  const commits = [];
+  const ackEpochs = [];
+  let loseFirstResponse = true;
+  const h = createHarness({ initialProject: false, projectOpen: {
+    acceptExternal: async (requestId) => {
+      const begun = mailbox.begin(requestId, async () => preparedDescriptor(requestId));
+      if (!begun) throw new Error("out-of-order accept");
+      return begun;
+    },
+    commitPrepared: async ({ requestId }) => {
+      commits.push(requestId);
+      return requestId === first.requestId
+        ? { name: "A", sourcePath: A_PATH, html: A_HTML, sha256: sha256(A_HTML) }
+        : { name: "B", sourcePath: B_PATH, html: B_HTML, sha256: sha256(B_HTML) };
+    },
+    finalizePrepared: async () => ({ disposition: "kept" }),
+    ackExternal: async (requestId) => {
+      const receipt = mailbox.acknowledge(requestId);
+      if (!receipt) throw Object.assign(new Error("ACK out of order"), { code: "EXTERNAL_OPEN_ACK_OUT_OF_ORDER" });
+      if (requestId === first.requestId) ackEpochs.push(h.projectSession.epoch);
+      if (requestId === first.requestId && loseFirstResponse) {
+        loseFirstResponse = false;
+        throw Object.assign(new Error("ACK response lost"), { code: "PROJECT_SERVICE_UNAVAILABLE" });
+      }
+      return { acknowledged: true, requestId };
+    },
+  } });
+  t.after(() => h.workflow.dispose());
+
+  h.workflow.acceptExternalProject({ requestId: first.requestId, sourcePath: A_PATH });
+  h.workflow.acceptExternalProject({ requestId: second.requestId, sourcePath: B_PATH });
+  await waitFor(() => h.workflow.getSnapshot().externalOpen.status === "idle");
+
+  assert.deepEqual(commits, [first.requestId, second.requestId]);
+  assert.deepEqual(ackEpochs, [1, 1]);
+  assert.equal(h.events.filter((event) => event.type === "project-applied").length, 2);
+  assert.equal(h.projectSession.epoch, 2);
+  assert.equal(mailbox.peek(), null);
 });

@@ -6,6 +6,7 @@ import {
   sidebarAgentLine,
   sidebarReasoningLine,
   conversationLoadedForView,
+  sidebarConversationPresentation,
   conversationReadyForDocument,
   sidebarActionBar,
   sidebarFailureRetryable,
@@ -1089,4 +1090,29 @@ test("process blocks preserve executor boundaries and narration sentences surviv
   ];
   assert.deepEqual(sidebarTurnPresentation(messages).timeline.map(block => block.messages[0].actor), ['pageroot', 'agent', 'pageroot']);
   assert.deepEqual(sidebarNarrationParagraphs('读取资料。生成结果。\n\n版本 1.2 保持原样。'), ['读取资料。', '生成结果。', '版本 1.2 保持原样。']);
+});
+
+
+test("sidebar local facts reject the previous Document before a new load and preserve close draft lock", () => {
+  const context = { projectId: "project_one", documentId: "doc_one", draftReadOnly: false };
+  const messages = [{ text: "private document one history" }];
+  const snapshot = { status: "ready", context, title: "One", messages, draftText: "unsent one", conversation: { turns: [] } };
+  const ready = sidebarConversationPresentation(snapshot, context);
+  assert.equal(ready.messages, messages);
+  assert.equal(ready.draftText, "unsent one");
+  assert.equal(ready.draftAvailable, true);
+  assert.equal(ready.loading, false);
+  for (const changed of [{ ...context, documentId: "doc_two" }, { ...context, projectId: "project_two" }]) {
+    const pending = sidebarConversationPresentation(snapshot, changed);
+    assert.deepEqual(pending.messages, []);
+    assert.equal(pending.draftText, "");
+    assert.equal(pending.draftAvailable, false);
+    assert.equal(pending.loading, true);
+  }
+  const closing = sidebarConversationPresentation(snapshot, { ...context, draftReadOnly: true });
+  assert.equal(closing.draftAvailable, false);
+  assert.equal(closing.messages, messages);
+  assert.equal(closing.draftText, "unsent one");
+  assert.equal(sidebarConversationPresentation(snapshot, context).draftAvailable, true);
+  assert.equal(sidebarConversationPresentation({ ...snapshot, status: "failed" }, context).draftAvailable, false);
 });

@@ -205,14 +205,20 @@ forwards typed workflow events through `subscribeEvents()`; it does not create a
 second mutable store. It owns the unique `DrainCoordinator`, protocol Sessions,
 and Project, Comment, Run, Version and Workbench Tabs workflow composition.
 Capability facets such as `controller.comments`, `controller.runs`,
-`controller.navigation` and the narrow
-`controller.projectCatalog` projection are stable views of this same
+`controller.navigation`, `controller.conversation`, `controller.projectRules`,
+`controller.shell` and the narrow `controller.projectCatalog` projection are stable views of this same
 Controller instance. A facet exposes only `getSnapshot`, `subscribe` and typed
 business commands; it neither stores copied facts nor exposes another
 capability. React capability containers subscribe to facets directly so local
 draft or focus updates do not publish through the Workbench composition root.
-The aggregate contract remains available during migration and for genuinely
-cross-capability presentation.
+The complete aggregate remains current for operation-time reads and existing
+Application coordinators. Workbench renders `controller.shell`, a stable,
+explicit presentation projection: it has no Conversation record/messages/draft,
+comment composer/edit draft text, PROJECT.md text, or Agent narration/clock/byte
+fields. It retains only cross-capability source, identity, lifecycle, errors and
+comment structure (including empty/nonempty composer text). This single previous
+projection reuses owner references; it is not a store, authority cache or stale
+full snapshot. Workbench has no aggregate subscription or comparator fallback.
 
 Comment geometry is a disposable presentation port, not Controller or Session
 state. `HtmlCanvasEditor` publishes source-tagged layout snapshots to one stable
@@ -226,13 +232,20 @@ but it must not subscribe its composition render to comment presentation changes
 open/switch actions and the existing version-tree context. There is no
 user-facing project management panel, `controller.projects` presentation facet
 or `projectPanelPort`. `ProjectRulesSession` and `ProjectRulesWorkflow` retain
-the durable rules facts and safe lifecycle commands, but rules editing,
-version-detail presentation, Finder/export actions and history-preview entry
-points are not exposed through a drawer or a React editor container.
-`RunConversationOutlet` subscribes `controller.runs`; public Agent narration
-and its timestamps therefore commit only the conversation region. Workbench's
-aggregate comparator still publishes run identity, lifecycle, phase and error
-changes needed by cross-capability locks and navigation.
+the durable rules facts and safe lifecycle commands. The existing rules page
+reads their Controller facet; it does not gain version-detail, Finder/export,
+history-preview or other project-management commands.
+`RunConversationOutlet` subscribes `controller.runs` and `controller.conversation`;
+public Agent narration, timestamps, received bytes, messages and draft text update
+only that region. The root conversation hook owns visibility and document-load
+lifecycle, not local facts. Before a new load effect runs, the outlet rejects a
+snapshot from another project/document. Close preparing/ready disables the draft
+through shell lifecycle; the existing Controller command fence and Conversation
+Workflow drain remain authoritative. `ProjectRulesEditorPage` subscribes
+`controller.projectRules` directly and retains its existing local IME/selection
+state; shell never passes filtered full rules text to the editor. Shell continues
+to publish run identity, lifecycle, phase and errors, rules status/composition and
+comment structure needed by cross-capability locks and navigation.
 `WorkbenchTabBarContainer` subscribes `controller.navigation` and owns tab
 commands, keyboard shortcuts and post-close focus restoration. Startup restore,
 Registry reconciliation and tab persistence enter through Controller-owned
@@ -242,8 +255,8 @@ pending-write payload nor a Promise crosses into Workbench.
 
 Workbench owns only cross-capability presentation state and narrow host
 adapters. Capability-local presentation state belongs in its container.
-Workbench receives the aggregate snapshot, stable facets and Controller
-commands, never a business Session or the
+Workbench renders its narrow shell snapshot and stable facets, and uses Controller
+commands plus live aggregate reads within operations, never a business Session or the
 Bridge client. Its direct-Bridge allowance is exactly 0: the checked architecture
 gate permits no `bridgeClient.*` call, generic Bridge-command escape, business
 Session/Workflow construction or Session ref in Workbench. The gate also forbids React,

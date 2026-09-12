@@ -483,6 +483,22 @@ export function conversationReadyForDocument(conversation, projectId, documentId
   );
 }
 
+/** Only the requested Document may supply the sidebar's local draft and history. */
+export function sidebarConversationPresentation(snapshot, context) {
+  const conversation = snapshot?.context?.projectId === context?.projectId
+    && snapshot?.context?.documentId === context?.documentId
+    && context?.projectId && context?.documentId ? snapshot : null;
+  return {
+    title: conversation?.title ?? "",
+    messages: conversation?.messages ?? [],
+    draftText: conversation?.draftText ?? "",
+    draftAvailable: context?.draftReadOnly !== true
+      && conversationReadyForDocument(conversation, context?.projectId, context?.documentId),
+    loading: !conversationLoadedForView(conversation),
+    turns: conversation?.conversation?.turns ?? [],
+  };
+}
+
 /**
  * Whether the conversation stream has settled, so the sidebar may show its
  * loaded content — including the empty state. Loaded is an explicit allowlist:

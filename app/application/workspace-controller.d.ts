@@ -86,6 +86,8 @@ export type {
   ReviewPreparationControllerCapability,
   RunSubmissionControllerCapability,
   WorkspaceControllerSnapshot,
+  WorkspaceShellSnapshot,
+  WorkspaceShellCommentSnapshot,
   WorkspaceSnapshotReader,
 } from "./workspace-controller-capabilities.js";
 
@@ -385,6 +387,9 @@ export function createRuntimeWorkspaceController(
 // production renderer must use createRuntimeWorkspaceController instead.
 export class WorkspaceController {
   constructor(options: WorkspaceControllerConstruction);
+  readonly shell: import("./workspace-controller-capabilities.js").WorkspaceShellCapability;
+  readonly conversation: import("./workspace-controller-capabilities.js").ConversationReaderCapability;
+  readonly projectRules: import("./workspace-controller-capabilities.js").ProjectRulesReaderCapability;
   readonly comments: import("./workspace-controller-capabilities.js").CommentControllerCapability;
   readonly projectCatalog: import("./workspace-controller-capabilities.js").ProjectCatalogControllerCapability;
   readonly runs: import("./workspace-controller-capabilities.js").RunControllerCapability;

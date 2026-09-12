@@ -1,3 +1,4 @@
+import { workspaceShellSnapshot } from "./workspace-shell-snapshot.js";
 import { loadCatalogVersionSummaries } from "./project-catalog-query.js";
 import { createRuntimeBridgeClient, isBridgeRequestError } from "./bridge-client.js";
 import { CommentSession } from "./comment-session.js";
@@ -307,6 +308,12 @@ export class WorkspaceController {
     persistence: null,
   });
   #commentsCapabilityListeners = new Set();
+  #shellSnapshot = null;
+  #shellListeners = new Set();
+  #conversationCapabilitySnapshot = null;
+  #conversationCapabilityListeners = new Set();
+  #projectRulesCapabilitySnapshot = null;
+  #projectRulesCapabilityListeners = new Set();
   #projectCatalogSnapshot = projectCatalogSnapshot();
   #projectCatalogListeners = new Set();
   #summaryGenerations = new Map();
@@ -486,6 +493,30 @@ export class WorkspaceController {
     this.#commentsCapabilitySnapshot = Object.freeze({
       workingCopy: this.#commentSessionSnapshot,
       persistence: null,
+    });
+    this.shell = Object.freeze({
+      getSnapshot: () => this.#shellSnapshot,
+      subscribe: (listener) => {
+        if (typeof listener !== "function") throw new TypeError("Shell listener must be a function.");
+        this.#shellListeners.add(listener);
+        return () => this.#shellListeners.delete(listener);
+      },
+    });
+    this.conversation = Object.freeze({
+      getSnapshot: () => this.#conversationCapabilitySnapshot,
+      subscribe: (listener) => {
+        if (typeof listener !== "function") throw new TypeError("Conversation listener must be a function.");
+        this.#conversationCapabilityListeners.add(listener);
+        return () => this.#conversationCapabilityListeners.delete(listener);
+      },
+    });
+    this.projectRules = Object.freeze({
+      getSnapshot: () => this.#projectRulesCapabilitySnapshot,
+      subscribe: (listener) => {
+        if (typeof listener !== "function") throw new TypeError("Project rules listener must be a function.");
+        this.#projectRulesCapabilityListeners.add(listener);
+        return () => this.#projectRulesCapabilityListeners.delete(listener);
+      },
     });
     this.comments = Object.freeze({
       getSnapshot: () => this.#commentsCapabilitySnapshot,
@@ -781,6 +812,12 @@ export class WorkspaceController {
           if (event?.type === "project-open-confirmation-presented") {
             this.#workbenchNavigationWorkflow?.onConfirmationPresented(event);
           }
+          if (event?.type === "project-open-prepared-started") {
+            this.#workbenchNavigationWorkflow?.onPreparedOpenStarted(event);
+          }
+          if (event?.type === "project-open-prepared-settled") {
+            this.#workbenchNavigationWorkflow?.onPreparedOpenSettled(event);
+          }
           if (event?.type === "project-navigation-terminal-failed") {
             this.#workbenchNavigationWorkflow?.onTerminalFailure(event);
           }
@@ -1067,6 +1104,9 @@ export class WorkspaceController {
     this.#listeners.clear();
     this.#eventListeners.clear();
     this.#commentsCapabilityListeners.clear();
+    this.#shellListeners.clear();
+    this.#conversationCapabilityListeners.clear();
+    this.#projectRulesCapabilityListeners.clear();
     this.#projectCatalogListeners.clear();
     this.#runsCapabilityListeners.clear();
     this.#navigationCapabilityListeners.clear();
@@ -2246,11 +2286,32 @@ export class WorkspaceController {
       workbenchNavigation: this.#workbenchNavigationSnapshot,
       workbenchTabsPersistence: this.#workbenchTabsPersistenceSnapshot,
     });
+    const shell = workspaceShellSnapshot(this.#snapshot, this.#shellSnapshot);
+    if (shell !== this.#shellSnapshot) {
+      this.#shellSnapshot = shell;
+      this.#notifyPresentation(this.#shellListeners);
+    }
+    if (this.#conversationCapabilitySnapshot !== this.#conversationSnapshot) {
+      this.#conversationCapabilitySnapshot = this.#conversationSnapshot;
+      this.#notifyPresentation(this.#conversationCapabilityListeners);
+    }
+    if (this.#projectRulesCapabilitySnapshot !== this.#projectRulesSnapshot) {
+      this.#projectRulesCapabilitySnapshot = this.#projectRulesSnapshot;
+      this.#notifyPresentation(this.#projectRulesCapabilityListeners);
+    }
     for (const listener of this.#listeners) {
       try {
         listener(this.#snapshot);
       } catch {
         // Presentation listeners cannot affect application authority.
+      }
+    }
+  }
+
+  #notifyPresentation(listeners) {
+    for (const listener of listeners) {
+      try { listener(); } catch {
+        // A read-only projection listener cannot change application authority.
       }
     }
   }

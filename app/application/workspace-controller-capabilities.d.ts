@@ -80,6 +80,44 @@ export type WorkspaceControllerSnapshot = Readonly<{
   workbenchTabsPersistence: WorkbenchTabsPersistenceSnapshot | null;
 }>;
 
+/** Render-only shell projection. Local text and full capability snapshots are absent. */
+export type WorkspaceShellCommentSnapshot<TComment = unknown, TEvent = unknown, TAttachment = unknown, TTarget = unknown> = Readonly<{
+  comments: TComment[];
+  changeEvents: TEvent[];
+  deletedCommentIds: string[];
+  composerTarget: TTarget | null;
+  composerCommentId: string | null;
+  composerAttachments: TAttachment[];
+  composerHasText: boolean;
+  editSession: Readonly<{ commentId: string; baselineText: string; baselineAttachments: TAttachment[]; draftAttachments: TAttachment[] }> | null;
+}>;
+export type WorkspaceShellSnapshot = Readonly<Pick<WorkspaceControllerSnapshot,
+  "projectSession" | "document" | "run" | "versionSession" | "version" | "project" |
+  "editRuntime" | "workbenchTabs" | "documentSurfaceCache"
+> & {
+  commentSession: WorkspaceShellCommentSnapshot | null;
+  comment: Readonly<{ attachmentUploadCount: number; draftError: string }> | null;
+  projectRules: Omit<ProjectRulesSnapshot, "content" | "savedContent" | "path"> | null;
+  runSession: (Pick<RunSessionSnapshot,
+    "activeRun" | "recentOutcome" | "activeLocked" | "activeSubmission" | "submissionPending" |
+    "activeHandoffMayBeRunning" | "activeHandoffManaged"
+  > & { activeHandoff: Omit<NonNullable<RunSessionSnapshot["activeHandoff"]>,
+    "visibleText" | "visibleTextUpdates" | "textTruncated" | "startedAt" | "lastActivityAt" | "receivedBytes" | "updatedAt"
+  > | null }) | null;
+}>;
+export type WorkspaceShellCapability = Readonly<{
+  getSnapshot(): WorkspaceShellSnapshot;
+  subscribe(listener: () => void): () => void;
+}>;
+export type ConversationReaderCapability = Readonly<{
+  getSnapshot(): ConversationSessionSnapshot | null;
+  subscribe(listener: () => void): () => void;
+}>;
+export type ProjectRulesReaderCapability = Readonly<{
+  getSnapshot(): ProjectRulesSnapshot | null;
+  subscribe(listener: () => void): () => void;
+}>;
+
 export interface WorkspaceSnapshotReader {
   getSnapshot(): WorkspaceControllerSnapshot;
 }

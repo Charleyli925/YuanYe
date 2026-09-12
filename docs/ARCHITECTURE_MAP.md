@@ -20,7 +20,10 @@ React views
         -> typed Bridge client
 ```
 
-Workbench renders a snapshot and dispatches product intent. It does not import
+Workbench renders the explicit stable `controller.shell` projection and dispatches
+product intent. Conversation and PROJECT.md regions subscribe their existing
+Controller reader facets; comments and runs retain their local facets. Full
+aggregate reads remain current for operations, but are not the shell render subscription. It does not import
 the Bridge client, construct Sessions, or own debounce, polling, or drain.
 
 The top mode switch owns its geometry and material states in `app/styles/top-toolbar.css`.
@@ -48,10 +51,10 @@ sidebar's Grid row and column before positioning it against the right edge.
 | Canvas edit runtime | `EditAuthorRuntimeSession` owns one scoped exact resource grant; Main's library store owns only verified immutable CDN bytes and reviewed same-version packaged pins; source HTML remains authoritative | `HtmlCanvasEditor` ends proven text/style/same-parent reorder projections in place, rejects element copy when the selected live subtree is not wholly source-backed, and rebuilds only resource, structural, program-identity or failed-projection boundaries; `DocumentWorkflow` persists complete HTML; test-only `runtime-continuity-probe.js` records frame/visual samples after enable | `edit-runtime-contract.js`, `HtmlCanvasEditor.tsx`, `runtime-continuity-probe.js`, `desktop/edit-runtime-protocol.mjs`, `desktop/edit-runtime-library-store.mjs`, `desktop/edit-runtime-bootstrap.mjs` |
 | Preview | disposable preview session | Desktop preview protocol | `desktop/` preview owner, `HtmlInteractionPreview` |
 | Project open / switch / close | `ProjectSession` | `ProjectWorkflow` | `project-workflow.js`, `project/open-intent.js`, `project/switch-plan.js`, `project/close-plan.js`, `project/source-locator-plan.js` |
-| External open | Main mailbox + `ExternalFileOpenSession` + `ProjectApplicationSession` | `ProjectWorkflow` | `desktop/prepared-html-open.mjs`, Workbench auto-confirm of `openConfirmation` |
+| External open | Main mailbox + `ExternalFileOpenSession` + `ProjectApplicationSession` | `ProjectWorkflow` | `desktop/prepared-html-open.mjs`; ProjectWorkflow drives ordinary Prepared opens through finalization/ACK in the same operation; Navigation waits for that settlement; Workbench only confirms explicit original deletion |
 | Close and drain | unique `DrainCoordinator`; tab layout is best-effort metadata | `ProjectWorkflow` close op and bounded Electron handshake | `app/application/project-workflow.js`, `desktop/close-recovery.mjs` |
 | Packaging and release | exact Git Tree | release workflows | `docs/RELEASING.md` |
-| Conversation handoff | `ConversationRepository` / `ConversationSession` | `ConversationWorkflow` | `app/workbench/AiConversationSidebar.tsx` |
+| Conversation handoff | `ConversationRepository` / `ConversationSession` | `ConversationWorkflow` | `controller.conversation`, `run-conversation-outlet.tsx`, `AiConversationSidebar.tsx`; root hook owns visibility/load lifecycle only |
 | Agent session Token | Coordinator owns the live session Token in process memory; Main `desktop/agent-session-credential-store.mjs` owns optional `safeStorage` ciphertext after an explicit remember | Catalog/Workbench persist or clear only through narrow IPC; never plaintext, logs, GET responses or `ui-preferences.json` | `desktop/agent-session-credential-store.mjs`, `shared/agent-vendor-key-url.mjs` |
 
 Repository catalog queries share one query-local census of candidate project

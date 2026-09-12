@@ -30,7 +30,12 @@ export type GlobalInterruption =
       sourcePath?: string;
     }
   | { kind: "external-open-unavailable"; detail?: string }
-  | { kind: "project-open-failed"; detail?: string; recent?: boolean }
+  | {
+      kind: "project-open-failed";
+      detail?: string;
+      recent?: boolean;
+      requestId?: string;
+    }
   | {
       kind: "attachment-rejected";
       detail: string;
@@ -65,6 +70,7 @@ export type GlobalInterruptionPresentation = {
     | "retry-export"
     | null;
   actionLabel: string | null;
+  actionRequestId?: string;
   usageKey: string;
 };
 

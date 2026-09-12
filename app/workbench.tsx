@@ -6,6 +6,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type ClipboardEvent,
   type CSSProperties,
 } from "react";
@@ -71,7 +72,7 @@ import {
 } from "./application/workspace-controller.js";
 import type {
   WorkspaceController,
-  WorkspaceControllerSnapshot,
+  WorkspaceShellCommentSnapshot,
 } from "./application/workspace-controller.js";
 import type {
   NavigationControllerCapability,
@@ -100,7 +101,6 @@ import {
 } from "./application/review-analysis-session.js";
 import type { PageViewContext } from "./lib/page-view-context.js";
 import type { ProjectSessionSnapshot } from "./application/project-session.js";
-import type { ProjectRulesSnapshot } from "./application/project-rules-session.js";
 import type { RunSessionSnapshot } from "./application/run-session.js";
 import type { VersionSessionSnapshot } from "./application/version-session.js";
 import {
@@ -185,9 +185,6 @@ import {
   type CommentRailContainerContext,
   type CommentRailHostActions,
 } from "./workbench/comment-rail-contract";
-import {
-  sameWorkbenchRenderSnapshot,
-} from "./workbench/workspace-render-snapshot.js";
 import {
   WorkbenchHeaderView,
 } from "./workbench/file-header-view";
@@ -330,18 +327,6 @@ const INITIAL_PROJECT_SESSION_SNAPSHOT: ProjectSessionSnapshot = {
   documentId: "",
   registered: false,
 };
-const INITIAL_PROJECT_RULES_SNAPSHOT: ProjectRulesSnapshot = {
-  open: false,
-  path: "PROJECT.md",
-  content: "",
-  savedContent: "",
-  loading: false,
-  error: "",
-  saving: false,
-  saveError: "",
-  compositionActive: false,
-  editorGeneration: 0,
-};
 const INITIAL_VERSION_SNAPSHOT: VersionSessionSnapshot<Version> = {
   versions: [],
   latestVersionId: null,
@@ -439,6 +424,9 @@ function documentEditFailureReason(outcome: DocumentEditOutcome): string {
   }
   return outcome.reason;
 }
+
+const emptyShellSnapshot = () => null;
+const subscribeEmptyShell = () => () => {};
 
 export default function Workbench() {
   const [globalSidebarOpen, setGlobalSidebarOpen] = useState(false);
@@ -538,23 +526,24 @@ export default function Workbench() {
   const pendingSidebarHistoryRef = useRef<ProjectVersionSummary | null>(null);
   const overlayReturnFocusRef = useRef<HTMLElement | null>(null);
 
-  const [workspaceControllerSnapshot, setWorkspaceControllerSnapshotState] =
-    useState<WorkspaceControllerSnapshot | null>(null);
   const [workspaceController, setWorkspaceController] =
     useState<WorkspaceController | null>(null);
+  const shellSnapshot = useSyncExternalStore(
+    workspaceController?.shell.subscribe ?? subscribeEmptyShell,
+    workspaceController?.shell.getSnapshot ?? emptyShellSnapshot,
+    emptyShellSnapshot,
+  );
   const runCapability = workspaceController
     ? workspaceController.runs as RunControllerCapability
     : null;
   const navigationCapability = workspaceController
     ? workspaceController.navigation as NavigationControllerCapability
     : null;
-  const workbenchTabsSnapshot = workspaceControllerSnapshot?.workbenchTabs
+  const workbenchTabsSnapshot = shellSnapshot?.workbenchTabs
     ?? INITIAL_WORKBENCH_TABS_SNAPSHOT;
   const activeWorkbenchTab = workbenchTabsSnapshot.tabs.find(
     (tab) => tab.tabId === workbenchTabsSnapshot.activeTabId,
   ) || workbenchTabsSnapshot.tabs[0];
-  const projectRulesSnapshot = workspaceControllerSnapshot?.projectRules
-    ?? INITIAL_PROJECT_RULES_SNAPSHOT;
   const settingsPageActive = activeWorkbenchTab?.kind === "settings";
   const startPageActive = activeWorkbenchTab?.kind === "start"
     && desktopHostReady
@@ -563,7 +552,7 @@ export default function Workbench() {
   const documentRuntimeTabId = activeWorkbenchTab?.kind === "document"
     ? activeWorkbenchTab.tabId
     : workbenchTabsSnapshot.runtimeOwnerTabId;
-  const documentSurfaceCacheSnapshot = workspaceControllerSnapshot?.documentSurfaceCache
+  const documentSurfaceCacheSnapshot = shellSnapshot?.documentSurfaceCache
     ?? INITIAL_DOCUMENT_SURFACE_CACHE_SNAPSHOT;
   const [importedCanvasBase, setImportedCanvasBase] = useState<{
     managedSourcePath: string;
@@ -598,24 +587,21 @@ export default function Workbench() {
     () => currentControllerSnapshot()?.runSession ?? INITIAL_RUN_SNAPSHOT,
     [currentControllerSnapshot],
   );
-  const documentSnapshot = workspaceControllerSnapshot?.document
+  const documentSnapshot = shellSnapshot?.document
     ?? INITIAL_DOCUMENT_SNAPSHOT;
   const externalFileOpenSnapshot =
-    workspaceControllerSnapshot?.project?.externalOpen
+    shellSnapshot?.project?.externalOpen
     ?? INITIAL_EXTERNAL_FILE_OPEN_SNAPSHOT;
   const openConfirmation =
-    workspaceControllerSnapshot?.project?.openConfirmation || null;
+    shellSnapshot?.project?.openConfirmation || null;
   useEffect(() => {
-    if (!workspaceController || !openConfirmation || openConfirmation.busy) return;
-    if (autoConfirmedOpenRequestRef.current === openConfirmation.requestId) return;
-    autoConfirmedOpenRequestRef.current = openConfirmation.requestId;
-    if (openConfirmation.deleteOriginal === true) {
-      if (!window.confirm("成功导入后会将原文件移至废纸篓。确定继续吗？")) {
-        void workspaceController.cancelExternalOpen({
-          requestId: openConfirmation.requestId,
-        });
-        return;
-      }
+    if (!workspaceController || !openConfirmation || openConfirmation.busy
+      || openConfirmation.deleteOriginal !== true) return;
+    if (confirmedOriginalDeletionRef.current === openConfirmation.requestId) return;
+    confirmedOriginalDeletionRef.current = openConfirmation.requestId;
+    if (!window.confirm("成功导入后会将原文件移至废纸篓。确定继续吗？")) {
+      void workspaceController.cancelExternalOpen({ requestId: openConfirmation.requestId });
+      return;
     }
     void workspaceController.confirmExternalOpen({
       requestId: openConfirmation.requestId,
@@ -626,7 +612,7 @@ export default function Workbench() {
     });
   }, [openConfirmation, workspaceController]);
   const projectApplicationSnapshot =
-    workspaceControllerSnapshot?.project?.projectApplication
+    shellSnapshot?.project?.projectApplication
     ?? INITIAL_PROJECT_APPLICATION_SNAPSHOT;
   const html = documentSnapshot.html;
   const sourceSha256 = documentSnapshot.persistedSourceSha256;
@@ -636,7 +622,7 @@ export default function Workbench() {
   const persistState = documentSnapshot.persistState;
   const persistError = documentSnapshot.persistError;
   const [projectName, setProjectName] = useState(WELCOME_PROJECT.name);
-  const projectSnapshot = workspaceControllerSnapshot?.projectSession
+  const projectSnapshot = shellSnapshot?.projectSession
     ?? INITIAL_PROJECT_SESSION_SNAPSHOT;
   const { sourcePath, projectId, documentId } = projectSnapshot;
   // The first durable import changes the ProjectSession source from the
@@ -651,38 +637,21 @@ export default function Workbench() {
   )
     ? importedCanvasBase.externalSourcePath
     : sourcePath || undefined;
-  const commentCapabilitySnapshot = workspaceController
-    ? (workspaceController.comments as CommentRailCapability).getSnapshot()
-    : null;
-  const commentSnapshot = (
-    commentCapabilitySnapshot?.workingCopy
-    ?? workspaceControllerSnapshot?.commentSession as CommentSessionSnapshot<
-      CommentItem,
-      DirectEditEvent,
-      CommentAttachment,
-      HtmlCanvasSelection,
-      CommentEditSession
-    > | null
-  ) ?? INITIAL_COMMENT_SNAPSHOT;
-  const draftTarget = commentSnapshot.composerTarget;
-  const draft = commentSnapshot.composerDraft;
-  const draftCommentId = commentSnapshot.composerCommentId;
-  const draftAttachments = commentSnapshot.composerAttachments;
-  const comments = commentSnapshot.comments;
-  const changeEvents = commentSnapshot.changeEvents;
-  const commentEditSession = commentSnapshot.editSession;
+  const commentSnapshot = shellSnapshot?.commentSession as WorkspaceShellCommentSnapshot<
+    CommentItem, DirectEditEvent, CommentAttachment, HtmlCanvasSelection
+  > | null;
+  const draftTarget = commentSnapshot?.composerTarget ?? null;
+  const draftCommentId = commentSnapshot?.composerCommentId ?? null;
+  const draftAttachments = commentSnapshot?.composerAttachments ?? INITIAL_COMMENT_SNAPSHOT.composerAttachments;
+  const comments = commentSnapshot?.comments ?? INITIAL_COMMENT_SNAPSHOT.comments;
+  const changeEvents = commentSnapshot?.changeEvents ?? INITIAL_COMMENT_SNAPSHOT.changeEvents;
+  const commentEditSession = commentSnapshot?.editSession ?? null;
   const [attachmentObjectUrls, setAttachmentObjectUrls] = useState<Record<string, string>>({});
-  const attachmentUploadCount =
-    commentCapabilitySnapshot?.persistence?.attachmentUploadCount
-    ?? workspaceControllerSnapshot?.comment?.attachmentUploadCount
-    ?? 0;
-  const draftPersistError =
-    commentCapabilitySnapshot?.persistence?.draft.error
-    ?? workspaceControllerSnapshot?.comment?.draft.error
-    ?? "";
-  const runSnapshot = workspaceControllerSnapshot?.runSession
+  const attachmentUploadCount = shellSnapshot?.comment?.attachmentUploadCount ?? 0;
+  const draftPersistError = shellSnapshot?.comment?.draftError ?? "";
+  const runSnapshot = shellSnapshot?.runSession
     ?? INITIAL_RUN_SNAPSHOT;
-  const agentCatalogSnapshot = workspaceControllerSnapshot?.run?.agentCatalog ?? null;
+  const agentCatalogSnapshot = shellSnapshot?.run?.agentCatalog ?? null;
   const catalogDisplaySelection = agentCatalogSnapshot?.displaySelection
     ?? agentCatalogSnapshot?.selected
     ?? null;
@@ -749,7 +718,7 @@ export default function Workbench() {
       selection: provider.selection,
     }),
   );
-  const qoderAvailability = workspaceControllerSnapshot?.run?.qoderAvailability
+  const qoderAvailability = shellSnapshot?.run?.qoderAvailability
     ?? INITIAL_QODER_AVAILABILITY;
   const agentCards = agentProviderCardsFromCatalog(agentCatalogSnapshot);
   const workspacePreferencesController = useWorkspacePreferences(
@@ -760,11 +729,11 @@ export default function Workbench() {
   const workspacePreferences = workspacePreferencesSnapshot.workspace;
   const [previewAttachment, setPreviewAttachment] = useState<CommentAttachment | null>(null);
   const [historyCreationConfirmation, setHistoryCreationConfirmation] = useState<string | null>(null);
-  const historyCreation = workspaceControllerSnapshot?.version?.creation;
+  const historyCreation = shellSnapshot?.version?.creation;
   const [handoffPreviewOpen, setHandoffPreviewOpen] = useState(false);
   const [projectRegistrationError, setProjectRegistrationError] = useState("");
   const versionSnapshot = (
-    workspaceControllerSnapshot?.versionSession as VersionSessionSnapshot<Version> | null
+    shellSnapshot?.versionSession as VersionSessionSnapshot<Version> | null
   ) ?? INITIAL_VERSION_SNAPSHOT;
   const versions = versionSnapshot.versions;
   const latestVersionId = versionSnapshot.latestVersionId;
@@ -797,8 +766,7 @@ export default function Workbench() {
   }, []);
   const aiConversation = useAiConversation({
     controllerRef: workspaceControllerRef,
-    conversation: workspaceControllerSnapshot?.conversation ?? null,
-    draftReadOnly: ["preparing", "ready"].includes(workspaceControllerSnapshot?.project?.close.phase || ""),
+    draftReadOnly: ["preparing", "ready"].includes(shellSnapshot?.project?.close.phase || ""),
     qoderAvailability,
     agentDisplayName,
     executionDisplayName,
@@ -816,9 +784,6 @@ export default function Workbench() {
     reasoningChoices: [],
     selectedReasoningId,
     // The header's mode comes from Request authority, not from a local guess.
-    activeRun: runSnapshot.activeRun,
-    activeHandoff: runSnapshot.activeHandoff,
-    submissionPending: runSnapshot.submissionPending,
     // Review is the same workbench with a different Canvas: the thread stays
     // docked and read-only instead of disappearing and coming back.
     reviewing: Boolean(presentedReadyReviewSession),
@@ -842,7 +807,7 @@ export default function Workbench() {
     onOpenAgentSettings: openAgentSettings,
   });
   const revealAiConversation = aiConversation.reveal;
-  const editRuntimeSnapshot = workspaceControllerSnapshot?.editRuntime ?? null;
+  const editRuntimeSnapshot = shellSnapshot?.editRuntime ?? null;
   const {
     runtimePhase: editRuntimePhase,
     runtimeRenderPending: editRuntimeRenderPending,
@@ -893,9 +858,9 @@ export default function Workbench() {
     || versionTransitioningRef.current
     || renameTransitioningRef.current
   ), []);
-  const versionTransitioning = (workspaceControllerSnapshot?.version?.navigation.phase || "idle") !== "idle";
+  const versionTransitioning = (shellSnapshot?.version?.navigation.phase || "idle") !== "idle";
   const renameTransitioning =
-    workspaceControllerSnapshot?.project?.rename?.phase === "renaming";
+    shellSnapshot?.project?.rename?.phase === "renaming";
   const viewTransitioning = sourceTransitioning || versionTransitioning || renameTransitioning;
   const bridgeConnectionReady = useRuntimeBridgeConnectionReady();
   useEffect(() => {
@@ -1358,7 +1323,6 @@ export default function Workbench() {
     });
     workspaceControllerRef.current = controller;
     setWorkspaceController(controller);
-    setWorkspaceControllerSnapshotState(controller.getSnapshot());
     return () => {
       if (workspaceControllerRef.current === controller) {
         workspaceControllerRef.current = null;
@@ -1422,13 +1386,13 @@ export default function Workbench() {
     && !projectRegistrationError,
   );
   const projectHydrating =
-    workspaceControllerSnapshot?.project?.hydration.phase === "hydrating"
-    || workspaceControllerSnapshot?.project?.open.phase === "opening"
+    shellSnapshot?.project?.hydration.phase === "hydrating"
+    || shellSnapshot?.project?.open.phase === "opening"
     || projectApplicationSnapshot.status !== "idle"
     || projectRegistrationPending;
   const projectLoadError =
-    workspaceControllerSnapshot?.project?.hydration.phase === "failed"
-      ? workspaceControllerSnapshot.project.hydration.error
+    shellSnapshot?.project?.hydration.phase === "failed"
+      ? shellSnapshot.project.hydration.error
       : projectRegistrationError || null;
   const [startupIssue, setStartupIssue] = useState<StartupIssue | null>(null);
   const [workspaceIssue, setWorkspaceIssue] = useState<WorkspaceIssue | null>(null);
@@ -1451,7 +1415,7 @@ export default function Workbench() {
   const [pendingExit, setPendingExit] = useState(false);
   const [fileStatusNotice, setFileStatusNotice] = useState<string | null>(null);
   const [openHtmlError, setOpenHtmlError] = useState<string | null>(null);
-  const autoConfirmedOpenRequestRef = useRef<string | null>(null);
+  const confirmedOriginalDeletionRef = useRef<string | null>(null);
   const [interruption, setInterruption] = useState<GlobalInterruption | null>(null);
   const [pausedNoticeIdentity, setPausedNoticeIdentity] =
     useState<string | null>(null);
@@ -1474,16 +1438,6 @@ export default function Workbench() {
   );
   useEffect(() => {
     if (!workspaceController) return undefined;
-    const setWorkspaceControllerSnapshot = (
-      snapshot: WorkspaceControllerSnapshot,
-    ) => {
-      setWorkspaceControllerSnapshotState((current) => (
-        sameWorkbenchRenderSnapshot(current, snapshot) ? current : snapshot
-      ));
-    };
-    const unsubscribeSnapshot = workspaceController.subscribe(
-      setWorkspaceControllerSnapshot,
-    );
     const unsubscribe = workspaceController.subscribeEvents((event) => {
       if (event.type === "registration-published") {
         const registrationEvent = event as Readonly<{
@@ -1527,6 +1481,23 @@ export default function Workbench() {
         return;
       }
       if (event.type === "external-open-ack-failed") {
+        const ackEvent = event as Readonly<{
+          confirmation?: boolean;
+          requestId?: unknown;
+          reason?: unknown;
+        }>;
+        const requestId = typeof ackEvent.requestId === "string"
+          ? ackEvent.requestId
+          : "";
+        if (ackEvent.confirmation === true && requestId) {
+          setInterruption({
+            kind: "project-open-failed",
+            detail: String(
+              ackEvent.reason || "HTML 已完成打开，但下一个 Finder 请求尚未解锁。",
+            ),
+            requestId,
+          });
+        }
         return;
       }
       if (event.type === "external-open-canvas-failed") {
@@ -1839,6 +1810,9 @@ export default function Workbench() {
           kind: "project-open-failed",
           detail: message,
           recent: projectEvent.kind === "recent",
+          ...(typeof projectEvent.requestId === "string" && projectEvent.requestId
+            ? { requestId: projectEvent.requestId }
+            : {}),
         });
         return;
       }
@@ -1914,7 +1888,6 @@ export default function Workbench() {
     });
     return () => {
       unsubscribe();
-      unsubscribeSnapshot();
     };
   }, [
     commentCanvasPort,
@@ -2384,7 +2357,7 @@ export default function Workbench() {
     viewMode === "current"
     && !interactionLocked
     && draftTarget
-    && (draft.trim() || draftAttachments.length > 0),
+    && (commentSnapshot?.composerHasText || draftAttachments.length > 0),
   );
   const composerOpen = commentCanvasPort.getSnapshot().composerOpen;
   useEffect(() => {
@@ -5720,6 +5693,24 @@ export default function Workbench() {
   const handleInterruptionAction = () => {
     const actionId = presentedInterruption?.actionId;
     const current = interruptionRef.current;
+    if (
+      actionId === "retry-project-open"
+      && presentedInterruption?.actionRequestId
+      && workspaceController
+    ) {
+      const requestId = presentedInterruption.actionRequestId;
+      void workspaceController.retryExternalOpen({ requestId }).then((outcome) => {
+        const latest = interruptionRef.current;
+        if (
+          outcome?.status === "succeeded"
+          && latest?.kind === "project-open-failed"
+          && latest.requestId === requestId
+        ) {
+          setInterruption(null);
+        }
+      });
+      return;
+    }
     setInterruption(null);
     switch (actionId) {
       case "reveal-imported-project":
@@ -5943,7 +5934,7 @@ export default function Workbench() {
   const agentAccess = {
     cards: agentCards,
     documentId: documentId ?? "",
-    recovery: workspaceControllerSnapshot?.run?.accessRepair ?? null,
+    recovery: shellSnapshot?.run?.accessRepair ?? null,
     bindings: {
       onCopyGuidance: copyAgentGuidance,
       onStartLogin: startAgentLogin,
@@ -6015,6 +6006,8 @@ export default function Workbench() {
       sidebar={aiConversation.visible && runCapability ? (
         <RunConversationOutlet
           capability={runCapability}
+          conversationCapability={workspaceController!.conversation}
+          conversationContext={aiConversation.context}
           sidebarProps={{
             ...aiConversation.sidebarProps,
             onAction: handleAiDecision,
@@ -6565,7 +6558,7 @@ export default function Workbench() {
           onRemoveRememberedKey={(selection) => manageAgentAccess("remove-key", selection)}
           onReconnectProvider={(selection) => manageAgentAccess("reconnect", selection)}
           onOpenVendorApiKeyPage={openVendorApiKeyPage}
-          providerAccessImpact={workspaceControllerSnapshot?.run?.providerAccessImpact ?? {}}
+          providerAccessImpact={shellSnapshot?.run?.providerAccessImpact ?? {}}
           onSelectAgentModel={selectSettingsAgentModel}
           onSelectAgentReasoning={selectSettingsAgentReasoning}
         />
@@ -6581,7 +6574,7 @@ export default function Workbench() {
       {projectRulesPageActive ? (
         <ProjectRulesEditorPage
           activeTabId={activeWorkbenchTab.tabId}
-          snapshot={projectRulesSnapshot}
+          capability={workspaceController!.projectRules}
           runLocked={runSnapshot.activeLocked || runInProgress}
           onChange={updateProjectRules}
           onBeginComposition={beginProjectRulesComposition}
@@ -6772,6 +6765,8 @@ export default function Workbench() {
             />
             <RunConversationOutlet
               capability={runCapability}
+              conversationCapability={workspaceController!.conversation}
+              conversationContext={aiConversation.context}
               sidebarProps={{
                 ...aiConversation.sidebarProps,
                 onAction: handleAiDecision,

@@ -648,8 +648,8 @@
     {
       "id": "comment-capability-boundary",
       "patterns": [
-        "^app/workbench/(?:comment-rail-container|comment-rail-state|comment-canvas-port|workspace-render-snapshot)\\.(?:d\\.ts|js|tsx)$",
-        "^tests/(?:comment-canvas-port|workbench-render-snapshot)\\.test\\.mjs$"
+        "^app/workbench/(?:comment-rail-container|comment-rail-state|comment-canvas-port)\\.(?:d\\.ts|js|tsx)$",
+        "^tests/comment-canvas-port\\.test\\.mjs$"
       ],
       "suites": [
         "typecheck",
@@ -659,7 +659,6 @@
       "nodeTests": [
         "tests/comment-canvas-port.test.mjs",
         "tests/comment-session.test.mjs",
-        "tests/workbench-render-snapshot.test.mjs",
         "tests/workspace-controller.test.mjs"
       ]
     },
@@ -740,7 +739,8 @@
       "id": "project-rules-workflow",
       "patterns": [
         "^app/application/project-rules-(?:session|workflow)\\.(?:js|d\\.ts)$",
-        "^tests/project-rules-(?:session|workflow)\\.test\\.mjs$"
+        "^tests/project-rules-(?:session|workflow)\\.test\\.mjs$",
+        "^app/workbench/project-rules-editor\\.tsx$"
       ],
       "suites": [
         "typecheck",
@@ -750,14 +750,15 @@
         "tests/project-rules-session.test.mjs",
         "tests/project-rules-workflow.test.mjs",
         "tests/project-workflow.test.mjs",
-        "tests/drain-coordinator.test.mjs"
+        "tests/workbench-navigation-workflow.test.mjs",
+        "tests/drain-coordinator.test.mjs",
+        "tests/workspace-controller.test.mjs"
       ]
     },
     {
       "id": "project-surface-boundary",
       "patterns": [
-        "^app/workbench/(?:workbench-sidebar-container|project-version-tree|project-sidebar-state|workspace-render-snapshot)\\.(?:d\\.ts|js|tsx|ts)$",
-        "^tests/workbench-render-snapshot\\.test\\.mjs$"
+        "^app/workbench/(?:workbench-sidebar-container|project-version-tree|project-sidebar-state)\\.(?:d\\.ts|js|tsx|ts)$"
       ],
       "suites": [
         "typecheck",
@@ -766,7 +767,6 @@
       "nodeTests": [
         "tests/project-rules-session.test.mjs",
         "tests/project-rules-workflow.test.mjs",
-        "tests/workbench-render-snapshot.test.mjs",
         "tests/workspace-controller.test.mjs",
         "tests/project-sidebar-state.test.mjs"
       ]
@@ -828,7 +828,8 @@
       "id": "workspace-controller",
       "patterns": [
         "^app/application/workspace-controller(?:-codecs)?\\.(?:js|d\\.ts)$",
-        "^tests/workspace-controller\\.test\\.mjs$"
+        "^tests/workspace-controller\\.test\\.mjs$",
+        "^app/application/workspace-shell-snapshot\\.(?:js|d\\.ts)$"
       ],
       "suites": [
         "typecheck",
@@ -847,7 +848,8 @@
         "tests/version-session.test.mjs",
         "tests/version-workflow.test.mjs",
         "tests/source-history-session.test.mjs",
-        "tests/run-workflow.test.mjs"
+        "tests/run-workflow.test.mjs",
+        "tests/conversation-workflow.test.mjs"
       ]
     },
     {
@@ -1044,7 +1046,6 @@
       ],
       "nodeTests": [
         "tests/ai-conversation-sidebar.test.mjs",
-        "tests/workbench-render-snapshot.test.mjs",
         "tests/workspace-controller.test.mjs"
       ]
     },

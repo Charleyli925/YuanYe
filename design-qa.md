@@ -57,6 +57,50 @@ Cause and repair: recoverDraft published deleted IDs before recovered comments, 
 
 Root inspected `output/design-qa/ai-review-comment.png`: the existing before-pane marker and comment bubble remain readable, and the per-document AI draft remains separate and unsent. This capture follows the original horizontal-scroll check, so the target text is outside its horizontal viewport; it does not certify a fully visible page comparison. The complete original Review/comment/adoption assertions passed. Evidence is rebuilt source Electron with synthetic fixtures, not a private-corpus rerun, real vendor run or installed-app replacement. Original failure and diagnostic artifacts are retained outside Git. Result: scoped comment persistence, recovery, submission and Review acceptance passed.
 
+## 2026-09-12 — M3 shell 与局部输入订阅
+
+- Mode / scope: DESIGN CHANGE + AI EXPERIENCE LENS；基线 `353fb6c3`，批准的 M3 第三步。保留既有 UI、会话草稿的文档保存/关闭 drain 与 PROJECT.md IME/选择状态，不实现聊天入口或新 Request purpose；同包包含普通打开协调和身份类型；Document 离开边界在独立已交付包。
+- 实现：Workbench 通过 `useSyncExternalStore` 消费既有 Controller 的显式 shell 展示投影。投影没有完整 Conversation、评论输入正文、规则正文或 Agent narration/时钟/字节字段；并非保留旧 full snapshot 再忽略更新。删除根全量订阅、`sameWorkbenchRenderSnapshot` 与镜像测试。实时 aggregate 继续供操作期读取和原有 Application 协调。
+- 局部消费者：RunConversationOutlet 同时订阅 runs 与 conversation；root hook 只保留显示偏好、文档加载生命周期、设置/动作。Rules page 直接订阅 projectRules，保留本地 IME/光标处理；comments 原有 facet/Canvas port 不变。
+
+| 状态 / 触发 | 可观察结果 | 证据 / 限制 |
+| --- | --- | --- |
+| 连续 Agent narration / clock / bytes | 40 次 runs 通知，shell 0 次，shell 引用不变且不含这些字段 | 真实 Controller + RunSession Node 计数；非性能耗时测量 |
+| 会话草稿连续输入 | 20 次局部更新不通知 shell；flush 保存原文档最后文本 | Controller + ConversationSession/Workflow，写入 DTO 独立断言 |
+| 切文档 / 旧返回 / 销毁 | 新区域不显示旧消息或草稿；旧 load 拒绝；unsubscribe/dispose 不续发 | Controller 及 sidebar presentation 负例；真实 UI 切换待验 |
+| 关闭输入锁 | 历史与草稿继续可读，输入禁用；取消关闭后恢复 | presentation Boolean 与原 Controller 命令 fence 保留；完整关闭 UI 待验 |
+| 评论正文与结构 | 文本内部更新留局部；空/非空、目标、保存评论、附件或编辑身份变化通知 shell | Controller 计数与省略正文的类型断言 |
+| PROJECT.md 输入 / 组合 / 保存 / 恢复 | 正文仅局部；composition、保存状态与 restore generation 保留通知 | Controller + ProjectRules Session/Workflow；IME 保存被阻止、结束后成功；真实 native IME/caret 待验 |
+
+- 验证：定向 Node 101/101（workspace-controller、conversation-workflow、project-rules-session、project-rules-workflow、ai-conversation-sidebar）；test-gate-selection / capability-context-locate 48/48；typecheck（含 architecture）通过；所改四个 React 文件定向 ESLint 通过。既有预算 advisory 不改阈值。
+- 首错保留：首两次新增 Conversation fixture 分别缺少 DraftSession 要求的 `saveDraft`、误把实际扁平 draft-write DTO 当成嵌套 draft，均在 fixture 修正；没有修改产品保护来通过。原始日志保留供根验收。
+- 同包纳入 M3 的小型身份类型收口：Workbench 重导出应用层 ProjectContext；未登记 locator、无 managed 路由的已登记身份、完整 OpenTarget 分开，原始登记 DTO 与展示 snapshot 保留宽兼容。无 runtime 更改，不从类型假定非空 ID 或凭 snapshot 建立权威。组合 typecheck/architecture 和 ProjectSession 7/7 通过；两部分此前均独立源码复审无 P0/P1。
+- 组合验证：OPEN/SHELL/IDENTITY 共38文件组合时只发生文档与测试映射冲突，根按当前合同合并；304/304相关Node和typecheck/architecture通过。独立组合源码复审发现 Prepared open 重试 P1，本轮已修复：commit/ACK 失败的同一现有动作只携带不透明 requestId，优先重放同一 receipt/ACK；无 requestId 仍重新选择。重复 commit 回执丢失与 ACK 失败均保留恢复出口，且分别保持 import/commit 次数为1。修复后 GlobalInterruption/ProjectWorkflow/Navigation/Controller 定向 Node 171/171，typecheck/architecture、所改文件 ESLint 与 `git diff --check` 通过；只有既存架构预算 advisory。
+- 真实 Electron：Agent setup 精确用例最终 1/1 通过（53.1s），并先证明第二段 narration 在合成前尚未出现；随后真实 run narration 局部更新穿过 `compositionstart`/`compositionend`，更新前后为同一草稿 textarea，焦点与尾部 caret 保持；`PROJECT.md` 精确用例 1/1 通过（2.6s），保留 sameElement/focus/caret/composition/Cmd+S 逐字节断言。两条首次沙箱运行分别因 `listen EPERM 127.0.0.1` 与 Electron launch/kill EPERM 在产品断言前失败，同一命令在允许环境复跑通过。这些是真实 Chromium composition 与局部订阅证据，不是 Apple 输入法候选窗验收。
+- 最终门禁：`npm run task:finish -- --base origin/main` 报告 `2026-09-12T15-26-09-056Z-task` 通过；typecheck、lint（0 error，30 个既存 warning）、Node targeted 894/894、Node core 1895/1895、Browser 26/26、Electron 61/61、AI 15/15，所有选测均 0 failed / 0 skipped / 0 not executed。独立最终源码复审在四项 receipt/ACK/取消与 renderer staged-receipt P1 修复后无 P0/P1。
+- 剩余边界：没有 Profiler 或毫秒性能结论；真实 Electron 组合事件不等同 Apple 输入法候选窗实机验收。未打包；本包不改变 Canvas 的 Source HTML 语义，未重复运行私人 HTML 语料。
+
+## 2026-09-12 — M3 普通外部打开由工作流收口
+
+- Mode / truth: DESIGN CHANGE；基线 `353fb6c3`，批准的复杂度规划 M3 第一步。普通导入/继续已由原 Workbench effect 自动驱动，本次移入 ProjectWorkflow 同操作；不增加确认界面；Document 离开边界保持独立包，本包同时收敛 shell 订阅。
+- 当前合同冲突：旧 `IMPORT_CONFIRMATION_PRD` 要求普通首次/再次打开弹框，与基线 Workbench 自动确认不符。v1.4 明确取代普通模态要求，保留 A/B/C 分类、文件身份/Hash、原子导入与显式删除权限；旧 UI 文案标为历史资料。
+- 旅程范围：选择本地 HTML / recent / startup / 系统外部交付 → 分类 → 当前项目安全收口 → Prepared commit → 发布项目 → Canvas / 可选删除 / ACK → 释放导航。默认保留原稿；真实删除仍使用原 native confirm，不重做 UI。
+
+| 状态/触发 | 可观察结果 | 本次证据 |
+| --- | --- | --- |
+| 普通导入或继续 | 一个操作完成；不等待 React 第二次提交 | ProjectWorkflow local/recent/startup/external Node 矩阵 |
+| 并发同源 C→B | 同请求最多两次 commit，第二次只继续，删除同意清零 | 精确 commit payload 与次数断言；换 ID/相同分类/重复重分类负例 |
+| commit 响应未知 | 原请求重放已有回执，仅一次 import | lost-response fixture；真实 Prepared Store 幂等测试 |
+| 首个项目已显示但 finalize/ACK 未结束 | 后续导航与 close 等待；Tab 与 Controller 对齐 | Navigation held-settlement；实际两外部请求 FIFO 测试 |
+| ACK 失败后重试 | 仅 ACK，不重做项目应用，不索取新应用回执 | ProjectWorkflow 与 Navigation ACK-only 测试 |
+| 取消/销毁/源变化 | 迟到执行不复活 FIFO，源变化不重试导入；销毁后仅 rollback 不发布或 finalize | ExternalFileOpenSession + ProjectWorkflow 负例 |
+| 新 Canvas 失败或显式删除 | Canvas 失败不 finalize/trash；删除同意不跨 C→B | 既有删除/Canvas 负例及更新的自动打开测试 |
+
+- 定向 Node：`node --test tests/project-workflow.test.mjs tests/workbench-navigation-workflow.test.mjs tests/external-file-open-session.test.mjs` 最终 147/147；`node --test tests/prepared-html-open.test.mjs tests/external-file-open.test.mjs tests/workspace-controller.test.mjs tests/workbench-navigation-session.test.mjs` 49/49。`npm run typecheck`（含 architecture check）通过；既有大小 advisory 未修改阈值。
+- 首错留存：第一轮 116/117，关闭期间 executor 迟到返回可复活已取消队首；加 await 后 generation + active requestId 核对及取消/完成回归后通过。第三/四轮新增 dispose 测试错误假设销毁会清空或冻结整个最终快照；调整为公开边界断言：不发布源、不 finalize、确认不复活。所有首次失败日志保留供根验收，不以重跑掩盖产品失败。
+- 独立审查新增P1：prepareSwitch等待中epoch变化会留下同请求busy=true，重试一直被拒绝。根已用延迟prepare+同路径新epoch复现，修复为stale出口仅清理仍存活同request的busy；取消/销毁不重建确认。修复后Project/Navigation/ExternalSession/Workspace共176/176通过，显式同ID重试只提交一次。既有外部导航15秒receipt计时与Prepared慢提交的P2记录后续，本包不扩改。
+- 最终组合证据：同一完成门禁已覆盖 Browser 26/26、Electron 61/61 与 AI 15/15，其中项目首次导入、Registry 恢复、历史版本打开及外部冷启动优先级均通过；Node targeted/core 共 2789 条通过并覆盖普通打开的 receipt/ACK/FIFO 负例。显式删除确认仍沿用既有原生确认边界；未单独声明连续系统级多文件投递的人工视觉验收，也未打包或作性能实测。
+
 
 ## 2026-09-08 — 独立服务配置与接入恢复
 

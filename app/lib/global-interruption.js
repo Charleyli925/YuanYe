@@ -65,6 +65,10 @@ export function globalInterruptionPresentation(interruption) {
         dismissMs: null,
         actionId: "retry-project-open",
         actionLabel: interruption.recent ? "重新选择位置" : "重新选择",
+        actionRequestId: typeof interruption.requestId === "string"
+          && interruption.requestId
+          ? interruption.requestId
+          : undefined,
         usageKey: "project-open-error",
       };
     case "attachment-rejected":

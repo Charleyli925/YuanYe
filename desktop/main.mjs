@@ -1233,7 +1233,9 @@ function publicMailboxRequest(request) {
   return publicExternalOpenRequest(request);
 }
 
-async function fetchBridgePost(pathname, body) {
+async function fetchBridgePost(pathname, body, {
+  unknownOnTransient = false,
+} = {}) {
   if (!bridgePort) {
     throw new ProjectFileError(
       "BRIDGE_NOT_READY",
@@ -1251,9 +1253,15 @@ async function fetchBridgePost(pathname, body) {
   });
   const payload = await response.json().catch(() => null);
   if (!response.ok) {
+    const mutationOutcomeUnknown = unknownOnTransient
+      && (response.status === 408 || response.status >= 500);
     throw new ProjectFileError(
-      payload?.error?.code || "BRIDGE_REQUEST_FAILED",
-      payload?.error?.message || "项目记录服务暂时无法完成这次操作。",
+      mutationOutcomeUnknown
+        ? "PREPARED_OPEN_COMMIT_UNKNOWN"
+        : payload?.error?.code || "BRIDGE_REQUEST_FAILED",
+      mutationOutcomeUnknown
+        ? "导入请求的结果暂时无法确认，请重试同一次打开。"
+        : payload?.error?.message || "项目记录服务暂时无法完成这次操作。",
       payload?.error?.details && typeof payload.error.details === "object"
         ? payload.error.details
         : {},
@@ -1743,10 +1751,19 @@ async function openHtml() {
 }
 
 async function importExternalViaBridge(sourcePath, expectedSourceSha256) {
-  const workspace = await fetchBridgePost("/project/ensure", {
-    sourcePath,
-    expectedSourceSha256,
-  });
+  let workspace;
+  try {
+    workspace = await fetchBridgePost("/project/ensure", {
+      sourcePath,
+      expectedSourceSha256,
+    }, { unknownOnTransient: true });
+  } catch (cause) {
+    if (cause instanceof ProjectFileError) throw cause;
+    throw new ProjectFileError(
+      "PREPARED_OPEN_COMMIT_UNKNOWN",
+      "导入请求的结果暂时无法确认，请重试同一次打开。",
+    );
+  }
   const registeredSourcePath = typeof workspace?.sourcePath === "string"
     ? workspace.sourcePath
     : "";
@@ -1826,10 +1843,23 @@ async function commitPreparedHtmlOpenOperation(payload) {
   if (existing?.state === "committed" || existing?.state === "finalized") {
     return replayCommittedProject(existing);
   }
-  const intent = preparedHtmlOpenStore.beginCommit(requestId, {
-    action,
-    deleteOriginal,
-  });
+  let intent;
+  try {
+    intent = preparedHtmlOpenStore.beginCommit(requestId, {
+      action,
+      deleteOriginal,
+    });
+  } catch (error) {
+    if ([
+      "EXTERNAL_OPEN_ACTION_INVALID",
+      "EXTERNAL_OPEN_ACTION_MISMATCH",
+      "EXTERNAL_OPEN_ACTION_UNSUPPORTED",
+      "EXTERNAL_OPEN_DELETE_NOT_ALLOWED",
+    ].includes(String(error?.code || ""))) {
+      preparedHtmlOpenStore.cancel(requestId);
+    }
+    throw error;
+  }
   try {
     const previousActivePath = await currentActivePath();
     const current = await readHtmlProject(intent.sourcePath);
@@ -1913,6 +1943,12 @@ async function commitPreparedHtmlOpenOperation(payload) {
     return taggedProject(project);
   } catch (error) {
     preparedHtmlOpenStore.failCommit(requestId);
+    if (
+      error?.code !== "OPEN_INTENT_RECLASSIFIED"
+      && error?.code !== "PREPARED_OPEN_COMMIT_UNKNOWN"
+    ) {
+      preparedHtmlOpenStore.cancel(requestId);
+    }
     throw error;
   }
 }

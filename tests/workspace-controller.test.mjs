@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
+import { ConversationSession } from "../app/application/conversation-session.js";
 import { CommentSession } from "../app/application/comment-session.js";
 import { DocumentSession } from "../app/application/document-session.js";
 import { DraftSession } from "../app/application/draft-session.js";
@@ -144,6 +145,7 @@ function createHarness({
   projectSource = null,
   editRuntimePort = null,
   initialDocument = null,
+  conversationSession = null,
   controllerCodecs = codecs,
 } = {}) {
   const projectSession = new ProjectSession();
@@ -173,6 +175,7 @@ function createHarness({
   const events = [];
   const controller = new WorkspaceController({
     bridgeClient: client,
+    conversationSession,
     projectSession,
     documentSession,
     commentSession,
@@ -274,7 +277,7 @@ function createProjectRulesHarness() {
     },
     clock: { now: () => 1_726_000_000_000 },
   });
-  return { context, controller, runSession, get persisted() { return persisted; } };
+  return { context, controller, runSession, commentSession, documentSession, projectSession, get persisted() { return persisted; } };
 }
 
 test("workspace controller accepts its injected test Session set and publishes canonical authority", async () => {
@@ -1106,4 +1109,166 @@ test("runtime retry awaits save authority and never follows a changed document",
       }
     } finally { harness.controller.dispose(); }
   });
+});
+
+
+test("shell omits comment drafts while saved content and composer structure remain observable", (t) => {
+  const h = createHarness();
+  t.after(() => h.controller.dispose());
+  const shell = h.controller.shell;
+  const updates = [];
+  const unsubscribe = shell.subscribe(() => updates.push(shell.getSnapshot()));
+  const initial = shell.getSnapshot();
+  assert.equal(shell.getSnapshot(), initial);
+  assert.equal("conversation" in initial, false);
+  assert.equal("composerDraft" in initial.commentSession, false);
+  h.commentSession.update({ composerTarget: { id: "paragraph" }, composerCommentId: "draft_1", composerDraft: "first" });
+  assert.equal(updates.length, 1);
+  assert.equal(shell.getSnapshot().commentSession.composerHasText, true);
+  const withDraft = shell.getSnapshot();
+  h.commentSession.setComposerDraft("first second");
+  assert.equal(shell.getSnapshot(), withDraft);
+  assert.equal(updates.length, 1);
+  assert.equal(h.controller.comments.getSnapshot().workingCopy.composerDraft, "first second");
+  h.commentSession.setComposerDraft(" ");
+  assert.equal(updates.length, 2);
+  assert.equal(shell.getSnapshot().commentSession.composerHasText, false);
+  h.commentSession.update({ comments: [{ commentId: "saved", content: "saved content" }] });
+  assert.equal(updates.length, 3);
+  const attachments = [];
+  h.commentSession.update({ editSession: { commentId: "saved", baselineText: "saved content", baselineAttachments: attachments, draftText: "new", draftAttachments: attachments } });
+  const editing = shell.getSnapshot();
+  assert.equal("draftText" in editing.commentSession.editSession, false);
+  h.commentSession.update({ editSession: { ...h.commentSession.snapshot.editSession, draftText: "new text" } });
+  assert.equal(shell.getSnapshot(), editing);
+  h.commentSession.update({ editSession: { ...h.commentSession.snapshot.editSession, draftAttachments: [{ attachmentId: "new" }] } });
+  assert.notEqual(shell.getSnapshot(), editing);
+  const beforeUnsubscribe = updates.length;
+  unsubscribe();
+  h.commentSession.reset();
+  assert.equal(updates.length, beforeUnsubscribe);
+  let afterDispose = 0;
+  shell.subscribe(() => { afterDispose += 1; });
+  h.controller.dispose();
+  h.commentSession.setComments([{ commentId: "late" }]);
+  assert.equal(afterDispose, 0);
+});
+
+test("Agent text, clock and bytes notify only the run facet; phase, error and lifecycle notify shell", (t) => {
+  const h = createProjectRulesHarness();
+  t.after(() => h.controller.dispose());
+  const run = { sourcePath: SOURCE_PATH, requestId: "request_shell", attemptId: "attempt_shell", status: "processing" };
+  h.runSession.setActiveRun(run);
+  const handoff = { ...run, mode: "managed-agent", status: "running", phase: "agent-message", visibleText: "first" };
+  h.runSession.publishHandoff(handoff);
+  const initial = h.controller.shell.getSnapshot();
+  let shellUpdates = 0;
+  let runUpdates = 0;
+  h.controller.shell.subscribe(() => { shellUpdates += 1; });
+  h.controller.runs.subscribe(() => { runUpdates += 1; });
+  for (let index = 1; index <= 40; index += 1) {
+    h.runSession.publishHandoff({ ...handoff, visibleText: `message ${index}`, visibleTextUpdates: [{ id: "message", text: `message ${index}` }], receivedBytes: index, lastActivityAt: String(index), updatedAt: String(index) });
+  }
+  assert.equal(runUpdates, 40);
+  assert.equal(shellUpdates, 0);
+  assert.equal(h.controller.shell.getSnapshot(), initial);
+  assert.equal("visibleText" in initial.runSession.activeHandoff, false);
+  assert.equal("receivedBytes" in initial.runSession.activeHandoff, false);
+  assert.equal(h.controller.runs.getSnapshot().session.activeHandoff.visibleText, "message 40");
+  h.runSession.publishHandoff({ ...handoff, phase: "validating" });
+  assert.equal(shellUpdates, 1);
+  h.runSession.publishHandoff({ ...handoff, status: "failed", errorCode: "AGENT_FAILED", errorMessage: "failed" });
+  assert.equal(shellUpdates, 2);
+  assert.equal(h.controller.shell.getSnapshot().runSession.activeHandoff.errorCode, "AGENT_FAILED");
+  h.runSession.clearActiveRun();
+  assert.equal(shellUpdates, 3);
+});
+
+test("conversation facet retains exact owner facts through draft writes, document replacement and disposal", async (t) => {
+  const session = new ConversationSession();
+  const saved = [];
+  const h = createHarness({ conversationSession: session, bridgeClient: {
+    async saveDraft() { return {}; },
+    async ensureProject() { return registrationPayload(); },
+    async workspace() { return registrationPayload(); },
+    async saveConversationDraft(body) { saved.push(body); return { draft: { conversationId: body.conversationId, text: body.text, intent: body.intent } }; },
+  } });
+  t.after(() => h.controller.dispose());
+  const a = { projectId: "project_conversation", documentId: "doc_a", sourcePath: SOURCE_PATH };
+  const b = { ...a, documentId: "doc_b", sourcePath: NEXT_SOURCE_PATH };
+  const record = { ...a, conversationId: "conversation_a", title: "A", messages: [{ text: "A history" }], turns: [] };
+  const initial = h.controller.shell.getSnapshot();
+  let shellUpdates = 0;
+  let localUpdates = 0;
+  h.controller.shell.subscribe(() => { shellUpdates += 1; });
+  const unsubscribe = h.controller.conversation.subscribe(() => { localUpdates += 1; });
+  session.beginLoad(a);
+  session.publish(a, { conversation: record, draft: { text: "first", intent: "modify" } });
+  const loaded = h.controller.conversation.getSnapshot();
+  assert.equal(loaded, h.controller.getSnapshot().conversation);
+  assert.equal(h.controller.conversation.getSnapshot(), loaded);
+  for (let index = 0; index < 20; index += 1) h.controller.updateConversationDraftText(`draft ${index}`);
+  assert.equal(h.controller.shell.getSnapshot(), initial);
+  assert.equal(shellUpdates, 0);
+  assert.equal(localUpdates, 22);
+  assert.equal(h.controller.conversation.getSnapshot().draftText, "draft 19");
+  assert.equal(await h.controller.flushConversationDraft(), true);
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0].sourcePath, SOURCE_PATH);
+  assert.equal(saved[0].text, "draft 19");
+  session.beginLoad(b);
+  const switched = h.controller.conversation.getSnapshot();
+  assert.equal(switched.context.documentId, "doc_b");
+  assert.deepEqual(switched.messages, []);
+  assert.equal(switched.draftText, "");
+  assert.equal(session.publish(a, { conversation: record }), false);
+  assert.equal(h.controller.conversation.getSnapshot(), switched);
+  session.fail(b, new Error("load failed"));
+  assert.equal(h.controller.conversation.getSnapshot().status, "failed");
+  unsubscribe();
+  const beforeUnsubscribe = localUpdates;
+  session.deactivate();
+  assert.equal(localUpdates, beforeUnsubscribe);
+  h.controller.dispose();
+  const disposed = h.controller.conversation.getSnapshot();
+  session.beginLoad(a);
+  assert.equal(h.controller.conversation.getSnapshot(), disposed);
+});
+
+test("PROJECT.md content stays local while composition, save and restore notify shell", async (t) => {
+  const h = createProjectRulesHarness();
+  t.after(() => h.controller.dispose());
+  await h.controller.openProjectRules({ context: h.context });
+  const rules = h.controller.projectRules;
+  const initial = h.controller.shell.getSnapshot();
+  let shellUpdates = 0;
+  let localUpdates = 0;
+  h.controller.shell.subscribe(() => { shellUpdates += 1; });
+  const unsubscribe = rules.subscribe(() => { localUpdates += 1; });
+  h.controller.updateProjectRules({ content: "# New" });
+  h.controller.updateProjectRules({ content: "# New rules" });
+  assert.equal(localUpdates, 2);
+  assert.equal(shellUpdates, 0);
+  assert.equal(h.controller.shell.getSnapshot(), initial);
+  assert.equal("content" in initial.projectRules, false);
+  assert.equal("savedContent" in initial.projectRules, false);
+  assert.equal(rules.getSnapshot().content, "# New rules");
+  assert.equal(rules.getSnapshot(), h.controller.getSnapshot().projectRules);
+  const target = {};
+  h.controller.beginProjectRulesComposition({ target, baselineValue: "# New rules" });
+  assert.equal(rules.getSnapshot().compositionActive, true);
+  assert.equal(h.controller.shell.getSnapshot().projectRules.compositionActive, true);
+  assert.equal((await h.controller.saveProjectRules()).status, "blocked");
+  h.controller.finishProjectRulesComposition({ target });
+  assert.equal(rules.getSnapshot().compositionActive, false);
+  assert.equal((await h.controller.saveProjectRules()).status, "succeeded");
+  assert.equal(h.persisted, "# New rules");
+  h.controller.updateProjectRules({ content: "unsaved" });
+  h.controller.restoreProjectRules();
+  assert.equal(rules.getSnapshot().content, "# New rules");
+  assert.equal(shellUpdates > 0, true);
+  unsubscribe();
+  const beforeUnsubscribe = localUpdates;
+  h.controller.updateProjectRules({ content: "later" });
+  assert.equal(localUpdates, beforeUnsubscribe);
 });

@@ -601,12 +601,7 @@ export type RecoveryIdentity = {
   editRevision: number;
   token: string;
 };
-export type ProjectContext = {
-  epoch: number;
-  projectId: string;
-  documentId: string;
-  sourcePath: string;
-};
+export type { ProjectContext } from "../application/project-session.js";
 export type PendingDraft = DraftSnapshot<CommentItem, DirectEditEvent>;
 export type BackgroundProjectResult = {
   state: "processing" | "ready" | "no-change" | "error" | "conflict";

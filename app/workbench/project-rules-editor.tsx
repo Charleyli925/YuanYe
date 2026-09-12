@@ -5,6 +5,7 @@ import {
   useEffect,
   useRef,
   useState,
+  useSyncExternalStore,
   type KeyboardEvent,
 } from "react";
 import { ArrowCounterClockwiseIcon } from "@phosphor-icons/react/dist/csr/ArrowCounterClockwise";
@@ -15,13 +16,14 @@ import { QuotesIcon } from "@phosphor-icons/react/dist/csr/Quotes";
 import { TextBIcon } from "@phosphor-icons/react/dist/csr/TextB";
 import { TextHIcon } from "@phosphor-icons/react/dist/csr/TextH";
 import { TextItalicIcon } from "@phosphor-icons/react/dist/csr/TextItalic";
+import type { ProjectRulesReaderCapability } from "../application/workspace-controller-capabilities.js";
 import type { ProjectRulesSnapshot } from "../application/project-rules-session.js";
 
 type MarkdownFormat = "heading" | "bold" | "italic" | "list" | "quote" | "code";
 
 export type ProjectRulesEditorPageProps = Readonly<{
   activeTabId: string;
-  snapshot: ProjectRulesSnapshot;
+  capability: ProjectRulesReaderCapability;
   runLocked: boolean;
   onChange(content: string): void;
   onBeginComposition(input: { target: HTMLTextAreaElement; baselineValue: string }): void;
@@ -80,9 +82,14 @@ function statusLabel(snapshot: ProjectRulesSnapshot, runLocked: boolean, dirty: 
   return "已保存";
 }
 
+const EMPTY_RULES: ProjectRulesSnapshot = Object.freeze({
+  open: false, path: "PROJECT.md", content: "", savedContent: "", loading: false,
+  error: "", saving: false, saveError: "", compositionActive: false, editorGeneration: 0,
+});
+
 export default function ProjectRulesEditorPage({
   activeTabId,
-  snapshot,
+  capability,
   runLocked,
   onChange,
   onBeginComposition,
@@ -91,6 +98,9 @@ export default function ProjectRulesEditorPage({
   onSave,
   onRetry,
 }: ProjectRulesEditorPageProps) {
+  const snapshot = useSyncExternalStore(
+    capability.subscribe, capability.getSnapshot, capability.getSnapshot,
+  ) ?? EMPTY_RULES;
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const previousGenerationRef = useRef(snapshot.editorGeneration);
   const [editorContent, setEditorContent] = useState(snapshot.content);
