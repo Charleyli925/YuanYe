@@ -153,8 +153,8 @@ import {
   attachmentFromRecord,
   canLocateTarget,
   canSaveCommentTarget,
-  commentSourceAnchor,
   commentVisualHintForSelection,
+  commentVisualTarget,
   commentEditSessionHasChanges,
   commentHasContent,
   commentsFromRecords,
@@ -2423,12 +2423,9 @@ export default function Workbench() {
       hasDraft?: boolean;
     }>();
     for (const comment of visibleCommentItems) {
-      const sourceTarget = commentSourceAnchor(comment) || comment.target;
-      const visualHint = comment.visualHint
-        || commentVisualHintForSelection(comment.target);
-      const markerTarget = visualHint
-        ? { ...sourceTarget, visualHint }
-        : sourceTarget;
+      const sourceTarget = comment.sourceAnchor;
+      const visualHint = comment.visualHint;
+      const markerTarget = commentVisualTarget(comment);
       const markerKey = commentMarkerGroupKey(markerTarget);
       const current = grouped.get(markerKey);
       if (current) {
@@ -2454,9 +2451,7 @@ export default function Workbench() {
     if ((hasCommentDraft || composerOpen) && draftTarget) {
       const sourceTarget = draftTarget.commentAnchor ?? draftTarget;
       const visualHint = commentVisualHintForSelection(draftTarget);
-      const markerTarget = visualHint
-        ? { ...sourceTarget, visualHint }
-        : sourceTarget;
+      const markerTarget = visualHint ? { ...sourceTarget, visualHint } : sourceTarget;
       const markerKey = commentMarkerGroupKey(markerTarget);
       const current = grouped.get(markerKey);
       if (current) {
@@ -3405,7 +3400,7 @@ export default function Workbench() {
     const settledComments = currentCommentSessionSnapshot();
     const activeTargets = [
       ...settledComments.comments.map((comment) => (
-        commentSourceAnchor(comment) || comment.target
+        comment.sourceAnchor
       )),
       ...settledComments.changeEvents.map((event) => event.target),
       ...(settledComments.composerTarget
@@ -3439,16 +3434,8 @@ export default function Workbench() {
       };
       const nextComments = settledComments.comments.map((comment) => ({
         ...comment,
-        target: (() => {
-          const sourceTarget = refreshedTarget(
-            commentSourceAnchor(comment) || comment.target,
-          );
-          const visualHint = comment.visualHint
-            || commentVisualHintForSelection(comment.target);
-          return visualHint ? { ...sourceTarget, visualHint } : sourceTarget;
-        })(),
         sourceAnchor: refreshedTarget(
-          commentSourceAnchor(comment) || comment.target,
+          comment.sourceAnchor,
         ),
       }));
       const nextEvents = settledComments.changeEvents.map((event) => ({
@@ -4026,7 +4013,7 @@ export default function Workbench() {
       const comment = currentComments.comments.find(
         (item) => item.commentId === itemId,
       );
-      if (comment) queueReviewPairReveal(comment.target, itemId);
+      if (comment) queueReviewPairReveal(commentVisualTarget(comment), itemId);
     }
   }, [
     commentCanvasPort,
@@ -4336,11 +4323,11 @@ export default function Workbench() {
     const comment = (outcome.value as { comment: CommentItem }).comment;
     commentCanvasPort.setComposerOpen(false);
     updateFocusedComment(comment.commentId);
-    queueReviewPairReveal(comment.target, comment.commentId);
+    queueReviewPairReveal(commentVisualTarget(comment), comment.commentId);
     captureUsageEvent("comment_saved", {
-      target_level: comment.target.level === "insertion"
+      target_level: comment.sourceAnchor.level === "insertion"
         ? "insertion"
-        : comment.target.level === "part" ? "part" : "module",
+        : comment.sourceAnchor.level === "part" ? "part" : "module",
       has_text: Boolean(comment.text),
       attachment_count: countBucket((comment.attachments ?? []).length),
       has_image: (comment.attachments ?? []).some((attachment) => attachment.kind === "image"),
@@ -4404,7 +4391,7 @@ export default function Workbench() {
     // Move focus first. The presentation port is observed synchronously, so
     // publishing `editingCommentId` while the previously focused card is still
     // current can make the clean-edit guard retire this brand-new session.
-    queueReviewCommentFocus(comment.target, comment.commentId);
+    queueReviewCommentFocus(commentVisualTarget(comment), comment.commentId);
     commentCanvasPort.setEditingCommentId(comment.commentId);
     if (focusText) {
       commentCanvasPort.requestCommentEditFocus(
@@ -4442,7 +4429,7 @@ export default function Workbench() {
       forgetAttachmentObjectUrl(attachment.attachmentId);
     }
     if (revealComment && current) {
-      queueReviewCommentFocus(current.target, current.commentId);
+      queueReviewCommentFocus(commentVisualTarget(current), current.commentId);
     }
   }, [
     attachmentUploadCount,
@@ -4468,15 +4455,15 @@ export default function Workbench() {
       return;
     }
     const located = editorRef.current?.select(
-      current.target,
+      commentVisualTarget(current),
       { showToolbar: false },
     );
-    const nextTarget = located || current.target;
+    const nextTarget = located || commentVisualTarget(current);
     commentCanvasPort.setSelection(nextTarget);
     const targetLayouts = commentCanvasPort.getSnapshot().targetLayouts;
     const targetVisible = (
-      current.target.tagName === "body"
-      || targetLayouts[current.target.id]?.status === "visible"
+      current.sourceAnchor.tagName === "body"
+      || targetLayouts[current.sourceAnchor.id]?.status === "visible"
     );
     commentEditResumePendingRef.current = targetVisible
       ? null
@@ -4519,7 +4506,7 @@ export default function Workbench() {
     for (const attachment of removedAttachments) {
       forgetAttachmentObjectUrl(attachment.attachmentId);
     }
-    queueReviewCommentFocus(current.target, current.commentId);
+    queueReviewCommentFocus(commentVisualTarget(current), current.commentId);
   }, [
     attachmentUploadCount,
     cancelCommentEdit,
@@ -4547,7 +4534,7 @@ export default function Workbench() {
     }
     if (deleted) {
       updateFocusedComment(null);
-      queueReviewPairReveal(deleted.target, "");
+      queueReviewPairReveal(commentVisualTarget(deleted), "");
     }
   }, [
     commentCanvasPort,
@@ -4573,7 +4560,7 @@ export default function Workbench() {
       return () => window.cancelAnimationFrame(frame);
     }
     const targetStatus = commentCanvasPort.getSnapshot()
-      .targetLayouts[editedComment.target.id]?.status;
+      .targetLayouts[editedComment.sourceAnchor.id]?.status;
     const presentation = commentCanvasPort.getSnapshot();
     const leftEditingContext = (
       canvasMode !== "edit"
@@ -4622,13 +4609,13 @@ export default function Workbench() {
       return;
     }
     const targetVisible = (
-      current.target.tagName === "body"
-      || commentCanvasPort.getSnapshot().targetLayouts[current.target.id]?.status === "visible"
+      current.sourceAnchor.tagName === "body"
+      || commentCanvasPort.getSnapshot().targetLayouts[current.sourceAnchor.id]?.status === "visible"
     );
     if (!targetVisible) return;
     commentEditResumePendingRef.current = null;
     commentCanvasPort.setEditingCommentId(current.commentId);
-    queueReviewCommentFocus(current.target, current.commentId);
+    queueReviewCommentFocus(commentVisualTarget(current), current.commentId);
     commentCanvasPort.requestCommentEditFocus(current.commentId);
   }, [
     canvasMode,
@@ -4648,15 +4635,15 @@ export default function Workbench() {
     );
     if (!current) return;
     const presentation = commentCanvasPort.getSnapshot();
-    const targetStatus = presentation.targetLayouts[current.target.id]?.status;
+    const targetStatus = presentation.targetLayouts[current.sourceAnchor.id]?.status;
     const pendingId = commentEditResumePendingRef.current;
     if (
       pendingId === session.commentId
-      && (current.target.tagName === "body" || targetStatus === "visible")
+      && (current.sourceAnchor.tagName === "body" || targetStatus === "visible")
     ) {
       commentEditResumePendingRef.current = null;
       commentCanvasPort.setEditingCommentId(current.commentId);
-      queueReviewCommentFocus(current.target, current.commentId);
+      queueReviewCommentFocus(commentVisualTarget(current), current.commentId);
       commentCanvasPort.requestCommentEditFocus(current.commentId);
       return;
     }
@@ -4716,15 +4703,14 @@ export default function Workbench() {
     const sourceTarget = target.commentAnchor ?? target;
     const visualHint = commentVisualHintForSelection(target);
     const matchesTarget = (comment: CommentItem) => {
-      const commentAnchor = commentSourceAnchor(comment) || comment.target;
+      const commentAnchor = comment.sourceAnchor;
       const sourceMatches = Boolean(
         commentAnchor.elementId
         && sourceTarget.elementId
         && commentAnchor.elementId === sourceTarget.elementId,
       );
       if (!sourceMatches) return false;
-      const commentHint = comment.visualHint
-        || commentVisualHintForSelection(comment.target);
+      const commentHint = comment.visualHint;
       if (!visualHint || !commentHint) return !visualHint && !commentHint;
       return visualHint.kind === commentHint.kind
         && visualHint.relativePath === commentHint.relativePath;
@@ -4734,7 +4720,7 @@ export default function Workbench() {
       (comment) => comment.commentId === currentFocusedId && matchesTarget(comment),
     );
     const nextComment = focusedMatch || visibleCommentItems.find(matchesTarget);
-    if (!nextComment || !canLocateTarget(commentSourceAnchor(nextComment) || nextComment.target)) {
+    if (!nextComment || !canLocateTarget(nextComment.sourceAnchor)) {
       updateFocusedComment(null);
       return;
     }
@@ -4793,7 +4779,7 @@ export default function Workbench() {
         const firstUnsafe = unsafeTargets[0];
         if (firstUnsafe) {
           updateFocusedComment(firstUnsafe.commentId);
-          queueReviewPairReveal(firstUnsafe.target, firstUnsafe.commentId);
+          queueReviewPairReveal(commentVisualTarget(firstUnsafe), firstUnsafe.commentId);
         }
         return;
       }
@@ -5776,7 +5762,7 @@ export default function Workbench() {
             const comment = currentComments.comments.find(
               (item) => item.commentId === current.target.commentId,
             );
-            if (comment) focusCommentTarget(comment.target, comment.commentId);
+            if (comment) focusCommentTarget(commentVisualTarget(comment), comment.commentId);
           }
         }
         return;

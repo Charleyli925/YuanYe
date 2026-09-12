@@ -282,7 +282,7 @@ test("workspace controller accepts its injected test Session set and publishes c
   harness.commentSession.update({
     comments: [{
       commentId: "comment_1",
-      target: { id: "target_1", selector: "main" },
+      sourceAnchor: { id: "target_1", selector: "main" },
     }],
     composerTarget: { id: "target_2", selector: "main > p" },
   });
@@ -303,7 +303,7 @@ test("workspace controller accepts its injected test Session set and publishes c
   assert.equal(harness.versionSession.snapshot.versions[0].id, "V1");
   assert.equal(harness.draftSession.isActive(context), true);
   assert.equal(harness.sourceHistorySession.isActive(context), true);
-  assert.equal(harness.commentSession.comments[0].target.selector, "main[data-rebound]");
+  assert.equal(harness.commentSession.comments[0].sourceAnchor.selector, "main[data-rebound]");
   assert.equal(
     harness.commentSession.composerTarget.selector,
     "main > p[data-rebound]",

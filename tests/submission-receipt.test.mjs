@@ -1,4 +1,7 @@
 import { writeLegacyNoChangeOutcome } from "./helpers/legacy-v4-no-change.mjs";
+
+import { loadWorkbenchModel } from "./helpers/workbench-model-loader.mjs";
+const { commentsFromRecords, persistedComment } = await loadWorkbenchModel("comment-model");
 import { submissionRequestMatches } from "../bridge/project-file-repository/submission.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -335,4 +338,39 @@ test("execution tools belong to the Agent while preparation and validation belon
   }
   const conversation = await ensureCurrentConversation({ projectRoot: path.join(value.target.projectRootPath, '.pageroot'), projectId: value.target.projectId, documentId: value.target.documentId });
   assert.deepEqual(conversation.messages.filter(message => message.messageId.startsWith('message_owner_')).map(message => message.actor), ['pageroot','agent','agent','agent','pageroot','pageroot']);
+});
+
+test("canonical renderer comments keep frozen compatibility and newer requirements through adoption and restart", async (t) => {
+  const value = await setup(t);
+  const raw = value.input.comments[0];
+  raw.target.futureTarget = { retained: true };
+  raw.futureComment = "retained";
+  const submitted = commentsFromRecords([raw, { ...raw, commentId: "comment_unchanged" }]);
+  assert.ok(submitted.every((comment) => !Object.hasOwn(comment, "target")));
+  value.input.comments = submitted.map(persistedComment);
+  value.input.targets = value.input.comments.map((comment) => comment.target);
+  const receipt = await prepareRecordedRequest(value);
+  const annotationsPath = path.join(value.target.projectRootPath, ".pageroot", "requests", receipt.requestId, "input", "annotations", "records.json");
+  const frozenAnnotations = await readFile(annotationsPath, "utf8");
+  const decodedAgain = commentsFromRecords(JSON.parse(JSON.stringify(value.input.comments)));
+  const edited = { ...decodedAgain[0], text: "Keep later edit", updatedAt: "2026-09-12T00:00:00.000Z" };
+  const added = { ...decodedAgain[1], commentId: "comment_next_round", text: "New requirement" };
+  await value.repository.saveDraft({ target: value.target, operationId: "draftop_codec_retention_0001",
+    expectedDraftRevision: 0, comments: [edited, decodedAgain[1], added].map(persistedComment), changeEvents: [] });
+  const html = (await readFile(value.target.exactSourcePath, "utf8")).replaceAll(">V1<", ">V2<");
+  const ready = await value.repository.completeRequest({ target: value.target, requestId: receipt.requestId, attemptId: receipt.attemptId, html });
+  const result = await value.repository.promoteCandidate({ target: value.target, candidateId: ready.candidate.candidateId,
+    decisionOperationId: `promote_${ready.candidate.candidateId}`, expectedSourceSha256: value.target.sourceSha256 });
+  const restarted = new ProjectFileRepository({ projectsRoot: value.projects });
+  await restarted.initialize();
+  const workspace = await restarted.workspace({ sourcePath: result.target.exactSourcePath });
+  const retained = commentsFromRecords(workspace.draft.comments);
+  assert.deepEqual(retained.map((comment) => comment.commentId), [edited.commentId, added.commentId]);
+  assert.ok(retained.every((comment) => !Object.hasOwn(comment, "target")));
+  assert.ok(retained.every((comment) => comment.futureComment === "retained"));
+  assert.deepEqual(persistedComment(retained[0]).target.futureTarget, { retained: true });
+  assert.equal(await readFile(annotationsPath, "utf8"), frozenAnnotations);
+  const archivedComments = JSON.parse(frozenAnnotations).comments;
+  assert.equal(archivedComments.length, 2);
+  assert.ok(archivedComments.every((comment) => comment.target && comment.sourceAnchor));
 });

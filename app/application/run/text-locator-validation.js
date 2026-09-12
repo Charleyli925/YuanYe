@@ -78,15 +78,15 @@ export function revalidateCommentTextLocators(comments, html) {
     sourceIndex = buildSourceIndex(String(html ?? ""));
   } catch {
     const comment = comments.find((item) => (
-      item?.sourceAnchor?.textLocator || item?.target?.textLocator
+      item?.sourceAnchor?.textLocator
     ));
     return comment ? failed(comment) : { ok: true, comments };
   }
 
   let changed = false;
   const normalized = comments.map((comment) => {
-    const sourceTarget = comment?.sourceAnchor || comment?.target;
-    const locator = sourceTarget?.textLocator || comment?.target?.textLocator;
+    const sourceTarget = comment?.sourceAnchor;
+    const locator = sourceTarget?.textLocator;
     if (locator === undefined || locator === null) return comment;
 
     const elementId = String(sourceTarget?.elementId || "");
@@ -121,16 +121,7 @@ export function revalidateCommentTextLocators(comments, html) {
       ...sourceTarget,
       textLocator: nextTextLocator,
     };
-    const visualHint = comment.visualHint || comment.target?.visualHint;
-    return {
-      ...comment,
-      target: visualHint
-        ? { ...nextSourceTarget, label: visualHint.label, visualHint }
-        : nextSourceTarget,
-      ...(comment.sourceAnchor || sourceTarget
-        ? { sourceAnchor: nextSourceTarget }
-        : {}),
-    };
+    return { ...comment, sourceAnchor: nextSourceTarget };
   });
 
   const failure = normalized.find((item) => item?.ok === false);

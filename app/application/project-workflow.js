@@ -67,12 +67,8 @@ function matchesCloseProjectIdentity(projectSession, context) {
     === String(context.workingCopyId || "");
 }
 
-function commentSourceTarget(comment) {
-  return comment?.sourceAnchor || comment?.target || null;
-}
-
-function commentTargetForDisplay(sourceTarget, comment) {
-  const visualHint = comment?.visualHint || comment?.target?.visualHint;
+function composerTargetForDisplay(sourceTarget, selection) {
+  const visualHint = selection?.visualHint;
   return visualHint
     ? { ...sourceTarget, label: visualHint.label, visualHint }
     : sourceTarget;
@@ -3493,7 +3489,7 @@ export class ProjectWorkflow {
         const rebound = this.#codecs.rebindTargetsPreservingGlobal(
           this.#documentSession.html,
           [
-            ...recovered.comments.map(commentSourceTarget),
+            ...recovered.comments.map((comment) => comment.sourceAnchor),
             ...(recovered.composerTarget
               ? [recovered.composerTarget.commentAnchor || recovered.composerTarget]
               : []),
@@ -3502,12 +3498,8 @@ export class ProjectWorkflow {
         const targets = new Map(rebound.map((target) => [target.id, target]));
         const recoveredComments = recovered.comments.map((comment) => ({
           ...comment,
-          target: commentTargetForDisplay(targets.get(commentSourceTarget(comment)?.id) || {
-            ...commentSourceTarget(comment),
-            resolution: "orphaned",
-          }, comment),
-          sourceAnchor: targets.get(commentSourceTarget(comment)?.id) || {
-            ...commentSourceTarget(comment),
+          sourceAnchor: targets.get(comment.sourceAnchor?.id) || {
+            ...comment.sourceAnchor,
             resolution: "orphaned",
           },
         }));
@@ -3530,7 +3522,7 @@ export class ProjectWorkflow {
           ? recoveredEditSession
           : null;
         const composerTarget = recovered.composerTarget
-          ? commentTargetForDisplay(
+          ? composerTargetForDisplay(
               targets.get(
                 (recovered.composerTarget.commentAnchor || recovered.composerTarget).id,
               ) || {
@@ -3542,6 +3534,7 @@ export class ProjectWorkflow {
           : null;
         this.#commentSession.update({
           comments: recoveredComments,
+          deletedCommentIds: recovered.deletedCommentIds,
           changeEvents: recoveredEvents,
           composerDraft: recovered.composerDraft,
           composerCommentId: recovered.composerCommentId,

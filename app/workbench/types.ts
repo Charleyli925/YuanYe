@@ -461,9 +461,8 @@ export type CommentItem = {
   commentId: string;
   createdAt: string;
   updatedAt: string;
-  target: HtmlCanvasSelection;
-  /** Exact source host used for persistence and cross-version resolution. */
-  sourceAnchor?: HtmlCanvasSelection;
+  /** The only writable source target, including its optional UTF-16 text locator. */
+  sourceAnchor: HtmlCanvasSelection;
   /** Runtime-only visual context; it never grants source authority. */
   visualHint?: HtmlCanvasRuntimeVisualHint;
   text: string;

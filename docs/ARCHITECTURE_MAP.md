@@ -209,6 +209,12 @@ intents; it never owns comment facts. Workbench's aggregate
 subscription may suppress composer-text and edit-text-only revisions; saved
 comments, attachment structure, persistence errors and every non-comment
 capability still invalidate the composition root.
+Saved and historical comments have one writable `sourceAnchor` in the renderer model.
+The existing injected `comment-model` codec alone reads the old `target` alias and
+writes compatible Draft/Request records; application workflows never synchronize a
+second target. `commentVisualTarget` derives Canvas/card presentation from that anchor
+and the bounded hint. Unknown record extensions survive the codec without preserving
+known legacy target fields as a second authority.
 Persistent `sourceAnchor.elementId`, refreshed expected source Hash and optional text locator are
 Comment/Draft facts; `TargetResolver` maps a complete managed Working Copy only by that ID
 and never consults disposable geometry or Runtime DOM. The old heuristic resolver is not an

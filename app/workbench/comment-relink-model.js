@@ -74,6 +74,6 @@ export function commentHasContent(comment) {
 export function unsafeRelinkComments(comments) {
   return comments.filter(
     (comment) => commentHasContent(comment)
-      && !canLocateTarget(comment.sourceAnchor || comment.target),
+      && !canLocateTarget(comment.sourceAnchor),
   );
 }

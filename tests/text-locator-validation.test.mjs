@@ -17,7 +17,7 @@ function comment(locator, overrides = {}) {
   return {
     commentId: "comment_text_locator",
     text: "请检查这段文字",
-    target: {
+    sourceAnchor: {
       id: "target_comment_text_locator",
       elementId: ELEMENT_ID,
       resolution: "exact",
@@ -49,7 +49,7 @@ test("a unique quote after a prefix insertion is refreshed within the same Stabl
   );
 
   assert.equal(result.ok, true);
-  assert.deepEqual(result.comments[0].target.textLocator, {
+  assert.deepEqual(result.comments[0].sourceAnchor.textLocator, {
     ...locator,
     startOffset: 2,
     endOffset: 4,
@@ -72,7 +72,7 @@ test("rewritten, repeated, deleted, or cross-element quotes block submission", (
 
 test("comments without textLocator keep the existing element-comment behavior", () => {
   const comments = [comment(undefined, {
-    target: {
+    sourceAnchor: {
       id: "target_element_only",
       elementId: ELEMENT_ID,
       resolution: "exact",
@@ -82,4 +82,15 @@ test("comments without textLocator keep the existing element-comment behavior", 
 
   assert.equal(result.ok, true);
   assert.equal(result.comments, comments);
+});
+
+test("refresh updates only the source anchor and preserves runtime explanation", () => {
+  const visualHint = { runtimeGenerated: true, kind: "table", label: "数据表" };
+  const input = comment(locator, { visualHint });
+  const result = revalidateCommentTextLocators([input], html("😀目标内容"));
+  assert.equal(result.ok, true);
+  assert.equal(Object.hasOwn(result.comments[0], "target"), false);
+  assert.equal(result.comments[0].sourceAnchor.textLocator.startOffset, 2);
+  assert.equal(result.comments[0].visualHint, visualHint);
+  assert.equal(input.sourceAnchor.textLocator.startOffset, 0);
 });

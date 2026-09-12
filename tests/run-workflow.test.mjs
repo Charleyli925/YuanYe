@@ -141,12 +141,12 @@ function codecs() {
     ),
     commentEditSessionHasChanges: (session) => session?.dirty === true,
     canLocateTarget: (target) => Boolean(target?.id && target?.selector),
-    persistedComment: (comment) => ({ ...comment }),
+    persistedComment: (comment) => ({ ...comment, target: comment.sourceAnchor }),
     persistedChangeEvent: (event) => ({ ...event }),
     persistedTargetRef: (target) => ({ ...target }),
     uniqueTargets: (comments) => {
       const targets = new Map();
-      for (const comment of comments) targets.set(comment.target.id, comment.target);
+      for (const comment of comments) targets.set(comment.sourceAnchor.id, comment.sourceAnchor);
       return [...targets.values()];
     },
     fileStem: (name) => String(name).replace(/\.html?$/iu, "") || "未命名页面",
@@ -183,7 +183,7 @@ function createHarness({
   commentSession.setComments(comments || [{
       commentId: "comment_001",
       text: "把标题改得更清晰",
-      target: {
+      sourceAnchor: {
         id: "target_001",
         selector: "main",
         sourceAnchor: { sourceSha256: sha256(html) },
@@ -420,7 +420,7 @@ test("源页 Agent blocks binary attachments before preflight or Request creatio
     comments: [{
       commentId: "comment_image",
       text: "按图片调整布局",
-      target: {
+      sourceAnchor: {
         id: "target_image",
         selector: "main",
         sourceAnchor: { sourceSha256: sha256(HTML_A) },
@@ -454,7 +454,7 @@ test("源页 Agent keeps text attachments in the ordinary frozen Request", async
     comments: [{
       commentId: "comment_text_attachment",
       text: "按文本要求调整",
-      target: {
+      sourceAnchor: {
         id: "target_text_attachment",
         selector: "main",
         sourceAnchor: { sourceSha256: sha256(HTML_A) },
@@ -490,7 +490,7 @@ test("源页 Agent accepts a known text filename when the browser omits its MIME
     comments: [{
       commentId: "comment_unknown_text_attachment",
       text: "按文本要求调整",
-      target: {
+      sourceAnchor: {
         id: "target_unknown_text_attachment",
         selector: "main",
         sourceAnchor: { sourceSha256: sha256(HTML_A) },
@@ -522,7 +522,7 @@ test("源页 Agent verifies attachment bytes and blocks disguised binary before 
     comments: [{
       commentId: "comment_disguised_binary",
       text: "按文本要求调整",
-      target: {
+      sourceAnchor: {
         id: "target_disguised_binary",
         selector: "main",
         sourceAnchor: { sourceSha256: sha256(HTML_A) },
@@ -567,7 +567,7 @@ test("源页 Agent revalidates the exact comment snapshot after drain before cre
     comments: [{
       commentId: "comment_attachment_swap",
       text: "按附件调整",
-      target,
+      sourceAnchor: target,
       attachments: [{
         attachmentId: "attachment_text_before_drain",
         fileName: "requirements.txt",
@@ -593,7 +593,7 @@ test("源页 Agent revalidates the exact comment snapshot after drain before cre
   harness.commentSession.setComments([{
     commentId: "comment_attachment_swap",
     text: "按附件调整",
-    target,
+    sourceAnchor: target,
     attachments: [{
       attachmentId: "attachment_image_after_drain",
       fileName: "reference.png",
@@ -742,7 +742,7 @@ test("submit refreshes a unique text quote against the final saved HTML before c
     comments: [{
       commentId: "comment_001",
       text: "请检查选中文字",
-      target: {
+      sourceAnchor: {
         id: "target_001",
         elementId,
         selector: "p",
@@ -786,7 +786,7 @@ test("submit blocks a stale or ambiguous text quote without creating a Request",
       comments: [{
         commentId: "comment_001",
         text: "请检查选中文字",
-        target: {
+        sourceAnchor: {
           id: "target_001",
           elementId,
           selector: "p",

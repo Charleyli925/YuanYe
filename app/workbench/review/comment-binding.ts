@@ -153,7 +153,7 @@ export function annotateReviewComments(
   const groups = new Map<Element, CommentItem[]>();
   comments.forEach((comment) => {
     if (!comment.text.trim() && !comment.attachments?.length) return;
-    const sourceTarget = comment.sourceAnchor || comment.target;
+    const sourceTarget = comment.sourceAnchor;
     const element = resolvedCommentElement(
       document,
       sourceIndex,
@@ -182,7 +182,7 @@ export function annotateReviewComments(
           document,
           sourceIndex,
           element,
-          item.sourceAnchor || item.target,
+          item.sourceAnchor,
         ),
         null,
       );

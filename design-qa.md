@@ -36,6 +36,17 @@ Final frozen-source task gate `2026-09-12T10-06-22-251Z-task`: 5/5 steps, Node 4
 
 Scope limits: source Electron with synthetic fixtures, not installed-app or private-corpus acceptance. First-registration failure recovery is covered by real workflow Node checks, not a dedicated Electron case. Supplementary trace contains API events without PNG/screencast; no pixel equivalence or real power-loss claim. Project coordination harness assertions are distinguished from the real Document ACK/recovery integrations.
 
+## 2026-09-12 — Comment recovery publication repair
+
+The first full gate passed Node 772 and Browser 37, then failed the runtime table/SVG/Canvas comment test after returning to the document tab: the helper reported 0 instead of 5 comments. The gate was stopped (15 Electron passes, 1 failure, 1 interrupted, 40 not run; AI not run). No success is claimed for that run.
+
+One diagnostic run retained all original actions/assertions and captured raw HTTP plus synthetic disk snapshots. The same project/document/Working Copy returned HTTP 200 while its Draft advanced from revision 13 / 5 comments to revision 14 / 0; the UI still held 5 cards. No user corpus was involved. Another task's Electron was visible in process inventory during diagnosis, but the defect was independently reproduced using real application modules in memory.
+
+Cause and repair: recoverDraft published deleted IDs before recovered comments, triggering an intermediate empty autosave. It now returns deletion metadata, and ProjectWorkflow publishes the complete recovered aggregate once. The general DraftSession in-flight/no-op interaction remains a separately recorded P2; this repair removes the intermediate writer. A new production-codec regression failed before the repair (2 writes instead of 1), then passed; another covers unapplied local text plus tombstones. Focused Node 93/93 and typecheck/architecture passed. The repaired original runtime table/SVG/Canvas journey and selected-text, orphaned, and global-comment journeys passed once as a focused set (4/4, no retries). Full task gate `2026-09-12T10-15-55-355Z-task` passed 8/8 steps: Node 774/774, Browser 37/37, Electron 57/57, and AI/Review 16/16, with no selected failures, skips, flaky results or missing tests. Source fingerprint stayed unchanged through the gate. Counts overlap across invocations and are not a unique coverage total.
+
+Root inspected `output/design-qa/ai-review-comment.png`: the existing before-pane marker and comment bubble remain readable, and the per-document AI draft remains separate and unsent. This capture follows the original horizontal-scroll check, so the target text is outside its horizontal viewport; it does not certify a fully visible page comparison. The complete original Review/comment/adoption assertions passed. Evidence is rebuilt source Electron with synthetic fixtures, not a private-corpus rerun, real vendor run or installed-app replacement. Original failure and diagnostic artifacts are retained outside Git. Result: scoped comment persistence, recovery, submission and Review acceptance passed.
+
+
 ## 2026-09-08 — 独立服务配置与接入恢复
 
 - Truth: 本批三条真实旅程要求；沿用既有桌面视觉语言，共享控件但分别布局设置页与侧栏。

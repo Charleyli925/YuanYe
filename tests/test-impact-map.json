@@ -940,6 +940,7 @@
         "^app/application/version-session\\.(?:js|d\\.ts)$",
         "^app/workbench/(?:version-model|version-compatibility-decoder)\\.(?:js|ts)$",
         "^shared/direct-edit-compatibility\\.mjs$",
+        "^app/workbench/comment-model\\.ts$",
         "^tests/workspace-ingress\\.test\\.mjs$",
         "^tests/helpers/workbench-model-loader\\.mjs$"
       ],

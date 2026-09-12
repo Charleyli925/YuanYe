@@ -34,6 +34,13 @@ import {
 } from "./workbench-navigation-workflow.js";
 import { reportInternalFailure } from "./internal-failure.js";
 
+function composerTargetForDisplay(sourceTarget, selection) {
+  const visualHint = selection?.visualHint;
+  return visualHint
+    ? { ...sourceTarget, label: visualHint.label, visualHint }
+    : sourceTarget;
+}
+
 function copyLocator({
   operationId,
   epoch,
@@ -76,17 +83,6 @@ function unknown(operationId, reason) {
     operationId: String(operationId),
     reason: String(reason),
   });
-}
-
-function commentSourceTarget(comment) {
-  return comment?.sourceAnchor || comment?.target || null;
-}
-
-function commentTargetForDisplay(sourceTarget, comment) {
-  const visualHint = comment?.visualHint || comment?.target?.visualHint;
-  return visualHint
-    ? { ...sourceTarget, label: visualHint.label, visualHint }
-    : sourceTarget;
 }
 
 function stale(identity) {
@@ -2721,7 +2717,7 @@ export class WorkspaceController {
         const reboundTargets = this.#codecs.rebindTargetsPreservingGlobal(
           canonicalSource,
           [
-            ...this.#commentSession.comments.map(commentSourceTarget),
+            ...this.#commentSession.comments.map((comment) => comment.sourceAnchor),
             ...(
               this.#commentSession.composerTarget
                 ? [this.#commentSession.composerTarget.commentAnchor
@@ -2736,20 +2732,15 @@ export class WorkspaceController {
         this.#commentSession.setComments(
           this.#commentSession.comments.map((comment) => ({
             ...comment,
-            target: commentTargetForDisplay(
-              reboundById.get(commentSourceTarget(comment)?.id)
-                || commentSourceTarget(comment),
-              comment,
-            ),
-            sourceAnchor: reboundById.get(commentSourceTarget(comment)?.id)
-              || commentSourceTarget(comment),
+            sourceAnchor: reboundById.get(comment.sourceAnchor?.id)
+              || comment.sourceAnchor,
           })),
         );
         if (this.#commentSession.composerTarget) {
           const composerTarget = this.#commentSession.composerTarget;
           const sourceTarget = composerTarget.commentAnchor || composerTarget;
           this.#commentSession.setComposerTarget(
-            commentTargetForDisplay(
+            composerTargetForDisplay(
               reboundById.get(sourceTarget.id) || sourceTarget,
               composerTarget,
             ),

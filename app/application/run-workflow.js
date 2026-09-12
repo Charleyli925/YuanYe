@@ -2073,7 +2073,7 @@ export class RunWorkflow {
       );
     }
     const unsafe = comments.find((comment) => {
-      const sourceTarget = comment?.sourceAnchor || comment?.target;
+      const sourceTarget = comment?.sourceAnchor;
       return (
         !this.#codecs.canLocateTarget(sourceTarget)
         || (

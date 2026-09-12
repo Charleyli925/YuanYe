@@ -515,7 +515,12 @@ heuristics are not an official result and are not retained as a shadow path.
 Incomplete identity HTML cannot rebound across a hash change and cannot enable
 direct Canvas edit. Whole-page comments use the body's Stable ID.
 Selected-text locators contain source-backed decoded text offsets and
-never authorize persistence from preview DOM.
+never authorize persistence from preview DOM. Decoded comments carry only one
+writable `sourceAnchor`; `visualHint` and derived Canvas/card targets never replace
+it. The existing comment codec accepts legacy `target` only on record ingress
+and regenerates that compatibility field on egress. Preserved unknown record
+extensions cannot override current identity fields or revive a removed locator;
+known visual hints retain their bounded, DOM-free normalization.
 
 Edit-mode reveal actions use the same trust boundary. They accept only strict
 Tabs whose selected panel is proved by `aria-selected` plus `hidden`, native

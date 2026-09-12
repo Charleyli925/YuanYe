@@ -474,6 +474,14 @@ Rules:
   fact owner. Main, preload and authored frames expose no Review capture or
   screenshot capability.
 - `CommentSession` is a renderer working copy, not durable Draft authority.
+  Each decoded comment has one writable `sourceAnchor` (including its optional
+  UTF-16 `textLocator`) and an optional explanatory `visualHint`; saved-comment
+  visual targets are derived by the presentation adapter. The existing injected
+  `comment-model` codec is the sole compatibility ingress/egress for legacy
+  `target`. It preserves unknown record extensions and emits the current disk /
+  frozen-Request shape without bulk rewriting Drafts or immutable history.
+  Source rebind, deletion/recovery and final text-locator validation update only
+  `sourceAnchor`; composer selections remain transient Canvas targets.
   Runtime state is likewise not a second copy of draft contents: it carries
   lifecycle state and a revisioned pointer to the draft repository.
 - Local recovery records are an outbox/fallback, never an equal authority to an
@@ -739,3 +747,8 @@ or command can grant additional write authority.
 Inline format state counts only characters actually covered by the selection, excluding zero-length boundary text. After semantic identity and materialization checks succeed, an unchanged HTML result may resume the existing native edit session without publishing a write; rejected commands retain their failure path.
 
 Explicit source reload additionally checks the verified physical frame generation: identical source bytes in the previous frame cannot acknowledge recovery. Workbench waits for an admitted author candidate; a settled static/failure outcome uses the existing bounded static rebuild. Frame promotion transfers keyboard focus only when the retiring Canvas owns it, without reconstructing a native caret or taking focus from another input. Commit rollback returns focus only if the failed candidate still owns it.
+
+Comment recovery decoding does not publish deletion metadata separately. The
+existing ProjectWorkflow publishes recovered comments, events, local tombstones
+and composer/edit state together through CommentSession; automatic persistence
+must never observe an intermediate empty comment aggregate during hydration.

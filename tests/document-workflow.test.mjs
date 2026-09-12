@@ -894,7 +894,7 @@ test("DocumentWorkflow reconstructs a missing pending write and rebinds comment 
   harness.commentSession.setComments([{
     commentId: "comment_rebind",
     text: "keep target",
-    target: { id: "target_rebind", selector: "p", resolution: "exact" },
+    sourceAnchor: { id: "target_rebind", selector: "p", resolution: "exact" },
     attachments: [],
   }]);
   harness.documentSession.beginEdit(after);
@@ -903,7 +903,7 @@ test("DocumentWorkflow reconstructs a missing pending write and rebinds comment 
 
   assert.equal(outcome.status, "succeeded");
   assert.equal(harness.documentSession.pendingWrite, null);
-  assert.equal(harness.commentSession.comments[0].target.selector, "[data-rebound]");
+  assert.equal(harness.commentSession.comments[0].sourceAnchor.selector, "[data-rebound]");
   assert.equal(harness.versionSession.snapshot.currentExactVersionId, "version_002");
 });
 

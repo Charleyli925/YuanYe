@@ -15,6 +15,13 @@ import {
 const AUTOSAVE_DELAY_MS = 100;
 const SHA256 = /^sha256:[a-f0-9]{64}$/u;
 
+function composerTargetForDisplay(sourceTarget, selection) {
+  const visualHint = selection?.visualHint;
+  return visualHint
+    ? { ...sourceTarget, label: visualHint.label, visualHint }
+    : sourceTarget;
+}
+
 function isNativeEditCheckpoint(mutation) {
   return Boolean(
     mutation
@@ -105,17 +112,6 @@ function sameOpenRoute(left, right, sameSourcePath) {
     && sameSourcePath(left.exactSourcePath || left.sourcePath, right.exactSourcePath || right.sourcePath)
     && Number(left.sessionEpoch ?? left.epoch) === Number(right.sessionEpoch ?? right.epoch)
   );
-}
-
-function commentSourceTarget(comment) {
-  return comment?.sourceAnchor || comment?.target || null;
-}
-
-function commentTargetForDisplay(sourceTarget, comment) {
-  const visualHint = comment?.visualHint || comment?.target?.visualHint;
-  return visualHint
-    ? { ...sourceTarget, label: visualHint.label, visualHint }
-    : sourceTarget;
 }
 
 function invalidAcknowledgement(message, code) {
@@ -2473,7 +2469,7 @@ export class DocumentWorkflow {
 
   #rebindTargets(html) {
     const targets = [
-      ...this.#commentSession.comments.map(commentSourceTarget),
+      ...this.#commentSession.comments.map((comment) => comment.sourceAnchor),
       ...this.#commentSession.changeEvents.map((event) => event.target),
       ...(this.#commentSession.composerTarget
         ? [this.#commentSession.composerTarget.commentAnchor || this.#commentSession.composerTarget]
@@ -2484,12 +2480,8 @@ export class DocumentWorkflow {
     this.#commentSession.update({
       comments: this.#commentSession.comments.map((comment) => ({
         ...comment,
-        target: commentTargetForDisplay(
-          byId.get(commentSourceTarget(comment)?.id) || commentSourceTarget(comment),
-          comment,
-        ),
-        sourceAnchor: byId.get(commentSourceTarget(comment)?.id)
-          || commentSourceTarget(comment),
+        sourceAnchor: byId.get(comment.sourceAnchor?.id)
+          || comment.sourceAnchor,
       })),
       changeEvents: this.#commentSession.changeEvents.map((event) => ({
         ...event,
@@ -2500,7 +2492,7 @@ export class DocumentWorkflow {
       const composerTarget = this.#commentSession.composerTarget;
       const sourceTarget = composerTarget.commentAnchor || composerTarget;
       this.#commentSession.setComposerTarget(
-        commentTargetForDisplay(
+        composerTargetForDisplay(
           byId.get(sourceTarget.id) || sourceTarget,
           composerTarget,
         ),
@@ -2605,7 +2597,7 @@ export class DocumentWorkflow {
         : null,
     };
     const targets = [
-      ...this.#commentSession.comments.map(commentSourceTarget),
+      ...this.#commentSession.comments.map((comment) => comment.sourceAnchor),
       ...this.#commentSession.changeEvents.map((event) => event.target),
       ...(this.#commentSession.composerTarget
         ? [this.#commentSession.composerTarget.commentAnchor || this.#commentSession.composerTarget]
@@ -2624,15 +2616,8 @@ export class DocumentWorkflow {
     this.#commentSession.update({
       comments: this.#commentSession.comments.map((comment) => ({
         ...comment,
-        target: commentTargetForDisplay(
-          byId.get(commentSourceTarget(comment)?.id) || {
-            ...commentSourceTarget(comment),
-            resolution: "orphaned",
-          },
-          comment,
-        ),
-        sourceAnchor: byId.get(commentSourceTarget(comment)?.id) || {
-          ...commentSourceTarget(comment),
+        sourceAnchor: byId.get(comment.sourceAnchor?.id) || {
+          ...comment.sourceAnchor,
           resolution: "orphaned",
         },
       })),
@@ -2648,7 +2633,7 @@ export class DocumentWorkflow {
       const composerTarget = this.#commentSession.composerTarget;
       const sourceTarget = composerTarget.commentAnchor || composerTarget;
       this.#commentSession.setComposerTarget(
-        commentTargetForDisplay(
+        composerTargetForDisplay(
           byId.get(sourceTarget.id) || {
             ...sourceTarget,
             resolution: "orphaned",
