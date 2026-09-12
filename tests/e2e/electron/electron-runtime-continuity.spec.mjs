@@ -809,6 +809,77 @@ test("a layout-safe format refusal keeps the Runtime text session active", {
   });
 });
 
+test("a partial background fill refusal validates the Kernel result before publication", {
+  tag: ["@gate-smoke", "@smoke-editing"],
+}, async () => {
+  const source = `<!doctype html><html><head><title>Background format refusal</title></head><body>
+  <p data-native-case="background-format-refusal">Background source text</p>
+  <script>
+    parent.__PAGEROOT_BACKGROUND_FORMAT_RUNTIME_COUNT__ =
+      (parent.__PAGEROOT_BACKGROUND_FORMAT_RUNTIME_COUNT__ || 0) + 1;
+  </script></body></html>`;
+  await withRuntimeProject("pageroot-background-format-refusal-e2e-", {
+    "runtime-report.html": source,
+  }, async ({ page, sourcePath }) => {
+    const { frame } = await loadedDiskFrame(page, sourcePath, "background-format-refusal");
+    const editor = page.getByTestId("html-canvas-editor");
+    const target = frame.locator('[data-native-case="background-format-refusal"]');
+    const beforeDocument = await documentToken(page);
+    const beforeGeneration = await editor.locator('iframe[data-runtime-slot-role="active"]')
+      .getAttribute("data-frame-generation");
+    const beforeScriptCount = await page.evaluate(() => (
+      window.__PAGEROOT_BACKGROUND_FORMAT_RUNTIME_COUNT__ || 0
+    ));
+
+    await activateNativeEdit(frame, "background-format-refusal");
+    await target.evaluate((element) => {
+      const text = [...element.childNodes].find((node) => node.nodeType === Node.TEXT_NODE);
+      if (!(text instanceof Text) || text.data.length < 10) {
+        throw new Error("Background formatting fixture text is missing.");
+      }
+      const range = element.ownerDocument.createRange();
+      range.setStart(text, 0);
+      range.setEnd(text, 10);
+      const selection = element.ownerDocument.getSelection();
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+      element.ownerDocument.dispatchEvent(new Event("selectionchange"));
+    });
+    await editor.getByText("样式与间距", { exact: true }).click();
+    const fill = editor.getByLabel("元素填充色");
+    await expect(fill).toBeEnabled();
+    await fill.evaluate((element) => {
+      if (!(element instanceof HTMLInputElement)) throw new Error("Fill input is missing.");
+      const valueSetter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )?.set;
+      valueSetter?.call(element, "#ff0000");
+      element.dispatchEvent(new Event("input", { bubbles: true }));
+      element.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await expect(editor).toHaveAttribute(
+      "data-native-format-resume",
+      "rejected:requested:resumed",
+    );
+    await expect(target).toHaveAttribute("contenteditable", "true");
+    const working = await managedWorkingCopyPath(page, sourcePath);
+    expect(await readPublishedWorkingCopy(working, "utf8"))
+      .not.toMatch(/background-color\s*:/u);
+    await target.press("End");
+    await page.keyboard.insertText(" STILL_TYPING_AFTER_BACKGROUND_REFUSAL");
+    await page.keyboard.press(keyShortcut("s"));
+    await expect.poll(() => readPublishedWorkingCopy(working, "utf8"))
+      .toContain("STILL_TYPING_AFTER_BACKGROUND_REFUSAL");
+    await expect.poll(() => documentToken(page)).toBe(beforeDocument);
+    await expect(editor.locator('iframe[data-runtime-slot-role="active"]'))
+      .toHaveAttribute("data-frame-generation", beforeGeneration);
+    expect(await page.evaluate(() => (
+      window.__PAGEROOT_BACKGROUND_FORMAT_RUNTIME_COUNT__ || 0
+    ))).toBe(beforeScriptCount);
+  });
+});
+
 test("format state ignores unselected boundary text and unchanged formatting keeps the native session", async () => {
   const source = DELAYED_CHART_PAGE.replace('Revenue grew steadily this quarter.', '<span style="font-style:italic">Selected</span> unselected normal text.');
   await withRuntimeProject('pageroot-format-boundary-e2e-', { 'runtime-report.html': source }, async ({ page, sourcePath }) => {

@@ -10,7 +10,140 @@
 - Focused real Electron execution passed 2/2 at the normal window and at 1024px with a long source name, dark authored HTML, hover/focus/disabled states and reduced motion. Screenshot inspection exposed a pre-existing narrow-Review Grid bug: the overlay sidebar retained `grid-column: 2` after the layout became one column, creating a zero-width implicit track offscreen. The narrow rule now releases both Grid axes and raises the overlay above the Review directory; an exact hit-test plus close/reopen journey verifies it. Post-rebase verification also passed real Electron 4/4, including R4 annotation-capacity adoption and discard.
 - Final completion gate `2026-09-12T15-39-43-004Z-task` passed all 10/10 steps against `origin/main`: type/architecture, lint with 0 errors, Node contract/core, web and desktop builds, Browser 36/36, Electron 53/53 and AI 30/30; every selected Playwright test reported 0 failed / 0 skipped / 0 not executed. Independent review remained PASS with no P0/P1. This is not a complete stylesheet migration or full accessibility audit; shared trailing transition/focus ownership is recorded as P2, and stale changelog wording plus a fuller sidebar-bounds assertion as P3 without widening this package.
 
+## 2026-09-12 — Direct semantic native island and Enter commands
 
+- Scope: native text editing, Enter and managed hard-break identity now submit a
+  direct semantic editable-island operation. Canvas no longer builds or
+  translates a SourcePatch plan; the Kernel owns the single source
+  materialization, allocates fresh hard-break IDs in DOM order, and returns the
+  canonical operation and identity delta that Canvas seals after acceptance.
+- Source and interaction boundary: current HTML bytes remain authoritative;
+  exact island authorization, stale source/identity rejection, inverse replay,
+  IME/selection continuity and one-apply projection are retained. No control,
+  copy, geometry, color, motion or recovery surface changed, so no new pixel
+  comparison was required for this ownership-only refactor.
+- Focused implementation evidence: 97/97 Node tests and 3/3 exact Electron
+  journeys passed, together with typecheck, lint with zero errors,
+  architecture checks and diff validation. The Electron cases cover managed
+  Enter identity, continuous type/Enter/style/save in one Runtime document and
+  the native editable-island path without the retired Canvas adapter.
+- Independent review passed with no P0/P1. Its documentation findings were
+  repaired in the architecture, MVP and test-strategy owner documents. One P2
+  test-depth debt remains: Kernel-level collision cases for duplicate,
+  pre-existing and illegal `randomUUID` output are not yet isolated as direct
+  unit tests; production allocation still fails closed and existing identity
+  coverage remains green.
+- Final task gate `2026-09-12T16-31-28-845Z-task` passed all 10 selected suites
+  without reuse: typecheck, lint, targeted Node, contract Node, core Node
+  1876/1876, both builds, Browser 34/34, Electron 60/60 and AI 20/20. There
+  were zero selected failures, skips or not-executed results.
+- The user-designated eight-file corpus then completed one real Electron run:
+  5 passed, 3 failed and 0 skipped, with all eight originals byte-identical.
+  Every passing file completed three text hosts, two duplicate/delete cycles,
+  preview/edit re-entry, source reload and save/reopen. One failure completed
+  three text hosts before the copy action was unavailable; two found only one
+  independent text host. The single-file improvement from the recorded 4/8
+  baseline is treated as discovery noise, not broader acceptance. This is
+  rebuilt-source evidence, not an installed-app or full-corpus pass.
+- final result: passed for the scoped direct native-island ownership and
+  source/Runtime continuity.
+
+## 2026-09-12 — Direct semantic text-range style commands
+
+- Mode: DESIGN CHANGE. Existing text-format controls, quiet refusal copy,
+  selection treatment and recovery surfaces are unchanged. The implementation
+  removes Canvas range pre-planning: exact logical range/quote becomes direct
+  `setStyle` intent, and flex/grid or partial-background safety is decided from
+  the same Kernel materialization before source publication.
+- Focused Node evidence: 92/92 passed across the Canvas command helper,
+  semantic Kernel, SourcePatch, source text map, edit-pipeline baseline and
+  Repository identity/save contracts. New cases cover mixed inline segments,
+  entities and exact surrounding bytes; deterministic fresh wrapper IDs
+  returned by the Kernel; no-change and existing-wrapper projections; stale
+  revision/hash/target/quote rejection; tracked caller identity; inverse/redo;
+  and one full patch apply.
+- Rebuilt-source Electron evidence: 7/7 targeted journeys passed with zero
+  retry. They cover a normal new range wrapper, forged-clone isolation, native
+  range restoration, one full patch apply, chart/script continuity, flex/grid
+  refusal, partial background-fill refusal, continued typing after rejection,
+  Undo/Redo, save and managed Working Copy reopen. The first sandboxed attempt
+  stopped before product execution because Electron launch hit macOS
+  `SIGABRT`/`EPERM`; the identical command then passed in the authorized host
+  environment.
+- Quiet-first and accessibility result: successful formatting stays in the
+  same iframe with the native range active; rejected formatting restores the
+  editable host and selection without adding a banner, modal, control, color or
+  motion. No new geometry or visual token was introduced, so a new pixel
+  comparison would not add evidence beyond the interaction assertions.
+- Independent source review found no P0/P1. It recorded a P2 test-depth debt:
+  the two refusal journeys do not yet assert the exact retained selected text
+  and pipeline count together, plus a P3 module-ref assertion gap; neither
+  changes the verified production result or expands this scoped package.
+- Final task gate `2026-09-12T15-03-37-444Z-task` passed all 10 selected
+  suites on the frozen production diff: targeted Node 796/796, contract Node
+  16/16, core Node 1874/1874, Browser 34/34, Electron 60/60 and AI 20/20,
+  with zero selected failure, skip or not-executed result. The first sandboxed
+  Node pass could not create its Unix socket (`EPERM`); the exact subtest passed
+  3/3 on the authorized host and the gate's fingerprinted resume reused only
+  typecheck/lint before completing every remaining suite.
+- The user-designated eight-file corpus then completed one real Electron run:
+  4 passed, 4 failed and 0 skipped, with all eight originals byte-identical.
+  The four passes each completed three text hosts, two duplicate/delete cycles,
+  preview/edit re-entry, source reload and save/reopen. Failures retained the
+  previously recorded baseline shapes: one reached three text hosts before the
+  copy action was unavailable; three completed only one host against the
+  three-host minimum. This is not a full-corpus pass or installed-app evidence.
+- final result: passed for the scoped direct-range behavior and continuity.
+
+## 2026-09-12 — Direct element style and sibling reorder commands
+
+- Scope: existing element-style controls and same-parent up/down actions now
+  construct semantic intent directly. The layout, copy, native checkpoints,
+  Runtime source proof and persistence boundaries are unchanged. Range styles,
+  editable islands, Enter/IME and controlled HTML echoes remain separate work.
+- Source evidence: the two former Canvas command/translation branches are
+  removed; direct projection uses the kernel's materialization type. Kernel
+  re-planning, exact source materialization, target mapping and inverse remain.
+- Local validation: 30 focused Node tests passed, including direct commands,
+  exact style bytes/priority, sibling positions through the end, comment-owned
+  whitespace, unchanged style, inverse/redo and identity/stale-source rejection.
+  Typecheck and architecture passed. Initial synthetic fixtures used invalid
+  UUID version bits, then assumed the wrong trailing-comment newline ownership;
+  both failures were retained and the fixtures were corrected against the
+  existing identity contract and shared reorder planner, without relaxing it.
+- Independent review reproduced a blocking target-continuity defect before
+  delivery: direct Kernel materialization returned its canonical subregion
+  TargetRef but omitted the caller's module-level target, so the first move
+  left the selection orphaned and disabled a second move. Direct operations
+  now carry that caller identity as a tracked mapping in the same Kernel
+  apply. Focused Node coverage checks both style and reorder mappings; the
+  Electron reorder flow requires two consecutive module moves without a new
+  selection, retains the module marker and checks one full patch apply for
+  each move. Independent re-review confirmed the P1 closed with no new P0/P1
+  or P2; the remaining P3 is that the automated counter proves one apply but
+  does not independently count old pre-planning calls.
+- Runtime evidence before that repair: the exact pre-fix completion gate
+  `2026-09-12T10-54-27-167Z-task` passed 10/10 selected suites (Browser 34,
+  Electron 52 and AI 20; no selected failure, skip or flaky result). The
+  user-designated eight-file HTML corpus then completed one real Electron run:
+  5 passed, 3 failed and 0 skipped, with all eight originals byte-identical.
+  The five passes completed preview/edit re-entry, source reload, save/reopen
+  and two duplicate/delete cycles. One failure followed three text hosts when
+  the copy action was unavailable; two found only one independent text host
+  rather than the required three. Failure screenshots were inspected. This is
+  not a full-corpus pass or a same-HEAD attribution experiment.
+- Repaired-source runtime evidence: the focused real Electron module reorder
+  flow passed 1/1. It retained the same module selection through two moves,
+  kept the second move available, preserved one document and one script
+  execution, and recorded one full patch apply for each command. The same
+  eight-file corpus was then rerun once: 4 passed, 4 failed and 0 skipped,
+  again with all eight originals byte-identical. The extra failure versus the
+  preceding run was another one-text-host minimum failure; the file had passed
+  in the immediately preceding run, so the variation is treated as discovery
+  noise rather than a repair regression. The other failure shapes were the
+  same missing copy action and one-text-host minimum. This matches the earlier
+  recorded 4/8 baseline shape and still is not a full-corpus pass. The exact
+  repaired-source completion gate remains pending.
 ## 2026-09-12 — 合法空差异候选进入同一审阅页
 
 - Truth: 用户确认即使没有可定位变化也应进入审阅，保留 AI 草稿作为未来对话入口。
@@ -25,7 +158,11 @@
 - 测试修正：空态不复用强制非空 marker 的旧助手；使用正式嵌入式工具栏名称；
   head 中的合成脚本在 DOMContentLoaded 后访问 body。先前测试脚本失败的报告保留，未计为通过。
 - 验收边界：此证据覆盖已存在合法 Candidate 的零事实审阅，不证明上游原始同内容输出
-  已从 no-change 改为 Candidate；后者属于独立 R2。私人全目录 HTML 验收尚待明确目录。
+  已从 no-change 改为 Candidate；后者属于独立 R2。
+- 私人 HTML 全目录：8/8 文件执行，4 通过、4 失败，原件 Hash 全部不变。两类文件级失败为复制按钮不可用，
+  以及既有 pending refresh 的 sourceRevision 更新触发旧整对象相等断言；后续未执行步骤未计通过。
+  两类代表文件在未含本次产品修改的主干基线均复现相同失败。此归因不等同于全目录验收通过；
+  通过文件中的候选宿主 rejection 也保留在本机完整报告，私人名称、路径和截图不提交。
 - final result: scoped empty-Review Electron flows and screenshot inspection passed; broader gate results are recorded separately.
 
 ## 2026-09-12 — Shared HTTP Agent input policy

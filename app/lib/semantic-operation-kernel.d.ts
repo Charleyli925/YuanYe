@@ -94,6 +94,7 @@ export interface SemanticOperationResult {
   identityDelta?: SemanticIdentityDelta;
   materialization: {
     kind: "source-patch" | "trusted-exact-source-restore";
+    planType?: string;
     [key: string]: unknown;
   };
 }

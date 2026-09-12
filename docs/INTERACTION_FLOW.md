@@ -450,10 +450,10 @@ Source 逐节点对账；Script 执行状态迁移；为绝对无刷新建立双
 → 浏览器提供光标 / Selection / IME，Controller 接管所有实际文字变更
 → 用户输入、删除或选择文字
 → 约 700ms 或格式、Cmd+S、目标切换、关闭、发送边界
-→ 生成 replace-editable-island EditCommand
+→ 生成带 logical text + canonical `contentHtml` 的 `editableIslandTextOperation`（不预分配换行 ID）
 → SourceIndex + TargetResolver 锁定源码范围
-→ 岛内做最小安全规范化，SourcePatchEngine 生成精确 range patch 与 inverse patch
-→ 原生换行以裸 `<br>` 进入受管计划，由系统分配 fresh stable ID 后再形成 `setText`；调用方预置新 ID 失败关闭
+→ Kernel 在同一次 apply 中做岛内最小安全规范化并生成精确 range patch 与 inverse patch；无 ID 时透传受控 `randomUUID`，按 DOM 顺序分配 fresh stable ID
+→ 原生换行以裸 `<br>` 进入受管计划，再由 Kernel 封存为 `setText` 的 allocation evidence；调用方预置新 ID 仍失败关闭
 → 删除硬换行时一并退役该 `<br>` 的身份；非 `<br>` 的持久身份仍不得在岛内文字编辑中被改写或删除
 → 保存计划接受后，仅在 expected-mutation 边界把这些 ID 补到对应实时 `<br>`，保留 Selection 并继续当前编辑会话；ID 不新增 Runtime authority
 → 校验岛外字节完全不变，并重解析受影响区域
@@ -466,7 +466,7 @@ Source 逐节点对账；Script 执行状态迁移；为绝对无刷新建立双
 → 核对源 Hash
 → Repository 重新解析身份差异，与 semantic operation + identityDelta 交叉验证；SourcePatch kind 不授权身份变化
 → 结构操作使用 Canvas/Repository 共享的纯 plan replayer 重建整组 exact patches；删除、插入、替换、跨父移动及 comment-aware 同父 reorder 均禁止附带无关 patch
-→ 对 plain `setText`，Canvas/Repository 共用纯 planner，拒绝 void/raw-text target，并核对唯一 target-content patch 的范围、原字节、规范转义后字节和 kind；Repository 也从 original-forward 源码独立重建 `replaceTextRange`、`setAttribute`、普通/整段合并 `setStyle` 的完整 patch 数组；对 identified `setText` 岛内容及需要 wrapper 的 range-style，继续按目标内容范围或逻辑文字范围核对位置、数量、样式字节和新 ID，部分 range 不得省略 wrapper identity
+→ 对 plain `setText`，Canvas/Repository 共用纯 planner，拒绝 void/raw-text target，并核对唯一 target-content patch 的范围、原字节、规范转义后字节和 kind；Repository 也从 original-forward 源码独立重建 `replaceTextRange`、`setAttribute`、普通/整段合并 `setStyle` 的完整 patch 数组；对 identified `setText` 岛内容及需要 wrapper 的 range-style，继续按目标内容范围或逻辑文字范围核对位置、数量、样式字节和新 ID，部分 range 不得省略 wrapper identity；Canvas 不预规划 range，而是在发布前从同一次 Kernel materialization 的 patch 判断是否新增 wrapper，并执行既有 flex/grid 与局部填充拒绝
 → 临时文件写入、刷盘、原子替换
 → 重读校验
 → 封存新的 ID/tag/parent/order binding，仅用于之后的外部冲突检测

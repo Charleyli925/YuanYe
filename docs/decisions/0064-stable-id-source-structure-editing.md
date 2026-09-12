@@ -58,13 +58,16 @@ state. Cloning authored markup also cannot retain the original persistent IDs.
   end tags cannot gain authority only at the Repository boundary. A valid
   identity transition cannot carry an extra unrelated patch.
 - Native editable-island line breaks enter the semantic contract as bare
-  `<br>` nodes. The accepted Canvas plan allocates their fresh IDs before it
-  creates `setText`; semantic replay must reproduce that exact identified
-  `contentHtml`, including the ordered association between each new `<br>` and
-  its system allocation. Repository replays the shared materializer with the
-  declared ID sequence and binds the operation to the target's one exact
-  editable-island patch, so a matching ID inventory cannot authorize unrelated
-  island bytes. After acceptance, the controller applies only those
+  `<br>` nodes. The initial `editableIslandTextOperation` carries logical text
+  and canonical `contentHtml` but no fresh IDs. The Kernel's single materializer
+  allocates new IDs in DOM order, returns them as allocation evidence, and
+  seals them into the accepted `setText` operation only after Canvas validates
+  the result. Semantic replay with declared IDs must reproduce that exact
+  identified `contentHtml`, including the ordered association between each new
+  `<br>` and its system allocation. Repository replays the shared materializer
+  with the declared ID sequence and binds the operation to the target's one
+  exact editable-island patch, so a matching ID inventory cannot authorize
+  unrelated island bytes. After acceptance, the controller applies only those
   source-allocated IDs to the corresponding live `<br>` nodes as an expected
   mutation. The controller accepts that reconciliation only when the live
   canonical island exactly equals the newly saved source, then advances both

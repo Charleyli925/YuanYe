@@ -1122,6 +1122,7 @@
       "patterns": [
         "^app/lib/(?:align-preview-source-surface|canvas-target-rebind|comment-text-locator|editable-island|edit-pipeline-counters|native-dom-logical-index|page-(?:presentation-dom|view-context)|pageroot-element-identity|semantic-operation-kernel|source-(?:index|patch-core|patch-engine|structure-edit|text-map)|target-resolver|native-(?:edit-capability|edit-policy))\\.(?:js|ts|d\\.ts)$",
         "^app/components/html-canvas-structure-commands\\.ts$",
+        "^app/components/html-canvas-source-commands\\.(?:js|d\\.ts)$",
         "^shared/pageroot-element-identity\\.mjs$",
         "^shared/semantic-identity-delta\\.mjs$",
         "^schemas/(?:pageroot-element-identity|semantic-operation)\\.v1\\.schema\\.json$",
@@ -1143,6 +1144,7 @@
         "tests/page-view-context.test.mjs",
         "tests/source-patch-engine.test.mjs",
         "tests/source-structure-edit.test.mjs",
+        "tests/html-canvas-source-commands.test.mjs",
         "tests/semantic-operation-kernel.test.mjs",
         "tests/semantic-identity-save-contract.test.mjs",
         "tests/project-semantic-identity-save.test.mjs",

@@ -161,7 +161,7 @@ PageRoot 让用户在真实本地 HTML 上完成两类工作：
 每次本地修改：
 
 1. 文字双击时由 `IslandEditingController` 为当前源码宿主建立唯一可编辑岛；向上提升时非行内后代保持冻结原子。浏览器只负责光标、Selection 和 IME，Controller 接管实际变更。
-2. 约 700ms、格式、Cmd+S、目标切换、关闭或发送边界生成带目标身份、源 Hash 和精确 before/after 的 `replace-editable-island` 命令；编辑工具栏及与当前选区绑定的评论操作不结束会话，点击除此之外的页面或 App 区域则提交 checkpoint，并同时清除编辑态、选区与工具栏。
+2. 约 700ms、格式、Cmd+S、目标切换、关闭或发送边界生成带目标身份、源 Hash、逻辑文字与 canonical content HTML 的 `setText` 语义操作；初始操作不预置新 ID，由 Kernel 单次物化分配换行 ID，Canvas 仅在整次结果验收后封存。编辑工具栏及与当前选区绑定的评论操作不结束会话，点击除此之外的页面或 App 区域则提交 checkpoint，并同时清除编辑态、选区与工具栏。
 3. SourceIndex/TargetResolver 唯一定位真实源码范围；无法唯一定位时保留草稿并阻止操作。
 4. SemanticOperationKernel 把文字、样式或结构意图降低为 SourcePatchEngine 的精确 range patch，并验证未授权范围逐字节不变。文本节点删除时仍由存活父 TargetRef 授权；结构新增、删除和移动只使用 SourceIndex 中的稳定元素 ID，保证 exact inverse 可恢复；不保存整页 DOM 快照。
 5. 用 Patch 结果更新内存 HTML 并原子重建 projection；失败时保留原会话和草稿。

@@ -185,12 +185,15 @@
         "^schemas/semantic-operation",
         "^tests/semantic-operation-kernel",
         "^tests/source-structure-edit",
-        "^tests/edit-pipeline-"
+        "^tests/edit-pipeline-",
+        "^app/components/html-canvas-source-commands",
+        "^tests/html-canvas-source-commands"
       ],
       "entryInterfaces": [
         "schemas/semantic-operation.v1.schema.json",
         "app/lib/source-structure-edit.d.ts",
-        "app/components/html-canvas-structure-commands.ts"
+        "app/components/html-canvas-structure-commands.ts",
+        "app/components/html-canvas-source-commands.d.ts"
       ],
       "owners": [
         "SemanticOperationKernel"
@@ -200,9 +203,11 @@
         "app/lib/source-structure-edit.js",
         "app/lib/source-patch-engine.js",
         "app/lib/source-index.js",
-        "app/components/html-canvas-structure-commands.ts"
+        "app/components/html-canvas-structure-commands.ts",
+        "app/components/html-canvas-source-commands.js"
       ],
       "focusedTests": [
+        "tests/html-canvas-source-commands.test.mjs",
         "tests/semantic-operation-kernel.test.mjs",
         "tests/source-structure-edit.test.mjs",
         "tests/source-patch-engine.test.mjs",

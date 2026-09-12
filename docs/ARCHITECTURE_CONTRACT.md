@@ -980,6 +980,15 @@ Text, style, sibling reorder, insert, duplicate, delete and cross-parent move
 already use this boundary. Canvas publishes the kernel's single SourcePatch
 materialization, including tracked comment and selection target mappings;
 SourcePatch is not a second public apply. Persistence checks remain independent.
+Element-level style, text-range style and same-parent up/down intents construct
+the existing semantic operations directly; their old Canvas SourcePatch
+command adapters are retired. The kernel's materialization type and exact
+patches drive local projection. When a range needs wrappers, the same Kernel
+materialization allocates their IDs and returns that evidence; Canvas inspects
+the result for flex/grid and visible-background layout safety before publishing
+source. Editable islands now use the same semantic apply directly; their live
+line-break ID reconciliation is only a post-acceptance projection step under
+the expected-mutation guard.
 Repository and Desktop Main do not own
 or persist the semantic revision or the current-open history stack.
 
@@ -1016,17 +1025,23 @@ including comment-aware same-parent reorder, so no valid move/delete/insert/
 replacement can authorize an additional source change. The shared planner also
 owns the safe parent boundary and explicit-end/void/source-self-closing sibling
 preconditions, preventing Repository from accepting a reorder Canvas rejects.
-Native editable-island `<br>` nodes receive fresh IDs in the accepted Canvas
-plan before `setText` is formed, and Repository binds that operation to one
-exact target-content patch and the shared materializer's normalized
-`contentHtml`; multiple new line breaks must retain their declared allocation
-order, not merely the same ID set. Deleting a hard break retires that break
-identity with the node; other persistent element identities remain fail-closed. Canvas copies only
-those accepted IDs onto the matching live line-break objects under its expected
-mutation guard. The controller first proves the prior live DOM still equals its
-owned canonical draft, then proves the reconciled live DOM equals the newly
-saved canonical island before advancing both owned and baseline state without a
-page reload; this identity update does not grant Runtime source authority. Plain
+Native editable-island input forms `setText` with logical text and canonical
+`contentHtml` but no `createdPagerootIds`. When IDs are absent, the Kernel runs
+the fresh editable-island planner and passes the caller's `randomUUID` through
+to `materializeEditableIslandHtml`; the ordered IDs it allocates become
+`allocation.allocatedElementIds` and are sealed into the accepted operation
+only after Canvas validation. A replay operation with IDs uses the existing
+exact-ID path. Repository binds the sealed operation to one exact
+target-content patch and the shared materializer's normalized `contentHtml`;
+multiple new line breaks must retain their declared allocation order, not merely
+the same ID set. Deleting a hard break retires that break identity with the
+node; other persistent element identities remain fail-closed. Canvas copies
+only Kernel-returned IDs onto matching live line-break objects under its
+expected-mutation guard. The controller first proves the prior live DOM still
+equals its owned canonical draft, then proves the reconciled live DOM equals the
+newly saved canonical island before advancing both owned and baseline state
+without a page reload; this identity update does not grant Runtime source
+authority. Plain
 `setText` uses one shared Canvas/Repository planner that rejects void/raw-text
 targets and binds the exact target range, original bytes, canonical escaped
 text bytes and patch kind; decoded-equivalent entities and extra patches fail

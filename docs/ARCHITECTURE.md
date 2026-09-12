@@ -476,10 +476,12 @@ must preserve the binding Hash; structural identity drift is an explicit
 conflict and only force-unlock may adopt it before controlled migration.
 Immutable Versions, frozen Requests and Runtime DOM are never migration inputs
 or destinations.
-On the existing direct-edit path, `IslandEditingController` retains IDs on
-authored descendants and allocates an ID when the browser creates a new inline
-wrapper or line break; deleting that hard break retires its ID with the node.
-The text-range style planner likewise identifies each new source wrapper. The
+On the existing direct-edit path, `IslandEditingController` owns only the
+controlled DOM, Selection and IME checkpoint. Canvas submits logical `setText`
+with canonical content HTML and no new IDs; the Kernel's single materialization
+allocates any browser-created line-break IDs, and Canvas seals the accepted IDs
+before synchronizing the live projection. New inline wrappers remain owned by
+the text-range style planner. Deleting a hard break retires its ID with the node. The
 Repository verifies that every current non-break claim survives and may fill
 only otherwise-valid missing IDs on genuinely new source elements before the
 CAS; it never repairs a lost prior claim.
