@@ -219,6 +219,7 @@ import {
 } from "./html-canvas-selection-chrome-contract";
 import {
   RuntimeFrameCoordinator,
+  runtimeCandidateAlreadyActive,
   type RuntimeFrameIdentity,
   type RuntimeFrameSettlement,
   type RuntimeFrameSlotId,
@@ -274,6 +275,12 @@ import {
   prepareCanvasFrameDocument,
   prepareVerifiedFrameDocument,
 } from "./html-preview-sandbox.js";
+import {
+  isSourceReceipt,
+  sameSourceReceipt,
+  sameSourceReceiptContext,
+} from "../application/document-session.js";
+import type { DocumentSourceReceipt } from "../application/document-session.js";
 import styles from "./HtmlCanvasEditor.module.css";
 
 function sourceSubtreeElementIds(
@@ -951,6 +958,7 @@ function verifyInlineStyleOverrideForTargets(
 const HtmlCanvasEditor = forwardRef<HtmlCanvasEditorHandle, HtmlCanvasEditorProps>(function HtmlCanvasEditor(
   {
     html,
+    sourceReceipt,
     semanticRevision = 0,
     onChange,
     onSelect,
@@ -1091,8 +1099,7 @@ const HtmlCanvasEditor = forwardRef<HtmlCanvasEditorHandle, HtmlCanvasEditorProp
   } | null>(null);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const frameInitializedRef = useRef(false);
-  const lastEmittedHtmlRef = useRef<string | null>(null);
-  const pendingHtmlEchoesRef = useRef<string[]>([]);
+  const lastSourceReceiptRef = useRef<DocumentSourceReceipt | null>(sourceReceipt);
   const renderedSourceHtmlRef = useRef<string | null>(null);
   const renderedProjectionSha256Ref = useRef("");
   const frameSourceHtmlRef = useRef(html);
@@ -1172,7 +1179,10 @@ const HtmlCanvasEditor = forwardRef<HtmlCanvasEditorHandle, HtmlCanvasEditorProp
   ) => boolean>(() => false);
   const updateOverlayPositionRef = useRef<() => void>(() => undefined);
   const imperativeLockRef = useRef(false);
-  const lastPropRef = useRef({ html, baseHref: documentBaseHref });
+  const lastPropRef = useRef({
+    sessionIncarnation: sourceReceipt?.sessionIncarnation ?? null,
+    receiptSequence: sourceReceipt?.sequence ?? null,
+  });
   const semanticRevisionRef = useRef(semanticRevision);
   const lastSemanticRevisionPropRef = useRef(semanticRevision);
   const onChangeRef = useRef(onChange);
@@ -2540,11 +2550,12 @@ const HtmlCanvasEditor = forwardRef<HtmlCanvasEditorHandle, HtmlCanvasEditorProp
       }
       return;
     }
-    const activeIdentity = runtimeFrameCoordinatorRef.current!.snapshot.lastKnownGood;
-    if (
-      activeIdentity?.sourceRevision === request.sourceRevision
-      && activeIdentity.kind === request.kind
-    ) {
+    if (runtimeCandidateAlreadyActive({
+      request,
+      runtimeFrame: runtimeFrameRef.current,
+      frameLoadGeneration: frameLoadGenerationRef.current,
+      snapshot: runtimeFrameCoordinatorRef.current!.snapshot,
+    })) {
       if (deferredRuntimeCandidateRef.current?.lease === request.lease) {
         deferredRuntimeCandidateRef.current = null;
       }
@@ -3843,19 +3854,6 @@ const HtmlCanvasEditor = forwardRef<HtmlCanvasEditorHandle, HtmlCanvasEditorProp
           ]),
         ],
       };
-      const previousLastEmittedHtml = lastEmittedHtmlRef.current;
-      // Publish the echo token before calling the controlled parent. A host
-      // using flushSync may reflect the new `html` prop during this callback;
-      // the prop effect must recognize that value as our own accepted patch
-      // instead of replacing the live V2 editing document.
-      lastEmittedHtmlRef.current = result.html;
-      pendingHtmlEchoesRef.current.push(result.html);
-      if (pendingHtmlEchoesRef.current.length > 16) {
-        pendingHtmlEchoesRef.current.splice(
-          0,
-          pendingHtmlEchoesRef.current.length - 16,
-        );
-      }
       const beforeHistorySelection = historySelectionFromMutationValue(
         mutation.before,
       );
@@ -3922,16 +3920,16 @@ const HtmlCanvasEditor = forwardRef<HtmlCanvasEditorHandle, HtmlCanvasEditorProp
             }
           : {}),
       };
-      if (!onChangeRef.current(
+      const acceptedReceipt = onChangeRef.current(
         result.html,
         appliedMutation,
         sourceTransaction,
-      )) {
-        lastEmittedHtmlRef.current = previousLastEmittedHtml;
-        pendingHtmlEchoesRef.current.pop();
+      );
+      if (!acceptedReceipt) {
         reportBlockedEdit(new Error("宿主状态已锁定，本次画布修改未被接受。"));
         return null;
       }
+      lastSourceReceiptRef.current = acceptedReceipt;
       recordRuntimeRefreshDecision(refreshDecision);
       latestSourceProjectionRef.current = {
         source: result.html,
@@ -6383,8 +6381,6 @@ const HtmlCanvasEditor = forwardRef<HtmlCanvasEditorHandle, HtmlCanvasEditorProp
     pendingHistoryBookmarkRef.current = null;
     pendingHistoryCanonicalFenceRef.current = false;
     nativeSessionNeedsCanonicalFenceRef.current = false;
-    lastEmittedHtmlRef.current = source;
-    pendingHtmlEchoesRef.current = [];
     const resumeTarget = bookmark
       ? target ?? bookmark.target
       : target;
@@ -6462,7 +6458,6 @@ const HtmlCanvasEditor = forwardRef<HtmlCanvasEditorHandle, HtmlCanvasEditorProp
     });
     if (!committed.ok) return committed;
     const frozenHtml = committed.html;
-    lastEmittedHtmlRef.current = frozenHtml;
     imperativeLockRef.current = true;
     lockedRef.current = true;
     readOnlyRef.current = true;
@@ -6654,6 +6649,9 @@ const HtmlCanvasEditor = forwardRef<HtmlCanvasEditorHandle, HtmlCanvasEditorProp
       getRenderedFrameGeneration: () => containerRef.current?.getAttribute("data-render-verified") === "true"
         ? frameLoadGenerationRef.current
         : null,
+      getRenderedFrameDocument: () => containerRef.current?.getAttribute("data-render-verified") === "true"
+        ? iframeRef.current?.contentDocument || null
+        : null,
       isCurrentProjectionEditable: () => !readOnlyRef.current
         && !lockedRef.current
         && renderedSourceHtmlRef.current === frameSourceHtmlRef.current
@@ -6731,39 +6729,75 @@ const HtmlCanvasEditor = forwardRef<HtmlCanvasEditorHandle, HtmlCanvasEditorProp
     if (!frameInitializedRef.current) {
       frameInitializedRef.current = true;
       loadFrameSource(html);
-      lastPropRef.current = { html, baseHref: documentBaseHref };
+      lastSourceReceiptRef.current = sourceReceipt;
+      lastPropRef.current = {
+        sessionIncarnation: sourceReceipt?.sessionIncarnation ?? null,
+        receiptSequence: sourceReceipt?.sequence ?? null,
+      };
       return;
     }
 
     const previous = lastPropRef.current;
-    if (previous.html === html) {
-      // A Finder rename or /var vs /private/var spelling change can update
-      // the file URL without changing Working HTML. That is not a new Canvas
-      // authority, and forceStatic would wipe a settled Runtime iframe while
-      // the live grant stays in place and never re-handoffs.
-      lastPropRef.current = { html, baseHref: documentBaseHref };
+    if (!isSourceReceipt(sourceReceipt)) {
       return;
     }
-    lastPropRef.current = { html, baseHref: documentBaseHref };
-
-    const echoIndex = pendingHtmlEchoesRef.current.indexOf(html);
-    if (echoIndex >= 0 && previous.baseHref === documentBaseHref) {
-      pendingHtmlEchoesRef.current.splice(0, echoIndex + 1);
-      lastEmittedHtmlRef.current = html;
+    const receiptSequence = sourceReceipt.sequence;
+    const previousReceipt = lastSourceReceiptRef.current;
+    const sameSessionIncarnation = Boolean(
+      previousReceipt
+      && sourceReceipt.sessionIncarnation === previousReceipt.sessionIncarnation,
+    );
+    if (
+      previousReceipt
+      && sourceReceipt.sessionIncarnation < previousReceipt.sessionIncarnation
+    ) {
+      // A rebuilt DocumentSession owns a newer incarnation even when its
+      // per-session sequence starts lower. Never let a late prop from an old
+      // incarnation replace the current physical frame.
       return;
     }
-    if (html === lastEmittedHtmlRef.current && previous.baseHref === documentBaseHref) return;
+    if (
+      sameSessionIncarnation
+      && (
+        (previous.receiptSequence !== null && receiptSequence < previous.receiptSequence)
+        || (previousReceipt && receiptSequence < previousReceipt.sequence)
+      )
+    ) {
+      // React may deliver an older controlled snapshot after a newer source
+      // operation. Receipt order, not HTML bytes, is the source fence.
+      return;
+    }
+    if (sameSessionIncarnation && previousReceipt && receiptSequence === previousReceipt.sequence) {
+      if (!sameSourceReceipt(sourceReceipt, previousReceipt)) return;
+      lastPropRef.current = {
+        sessionIncarnation: sourceReceipt.sessionIncarnation,
+        receiptSequence,
+      };
+      return;
+    }
+    if (sourceReceipt.origin !== "authority") {
+      if (sameSessionIncarnation && previousReceipt && !sameSourceReceiptContext(sourceReceipt, previousReceipt)) return;
+      lastSourceReceiptRef.current = sourceReceipt;
+      lastPropRef.current = {
+        sessionIncarnation: sourceReceipt.sessionIncarnation,
+        receiptSequence,
+      };
+      return;
+    }
+    lastSourceReceiptRef.current = sourceReceipt;
+    lastPropRef.current = {
+      sessionIncarnation: sourceReceipt.sessionIncarnation,
+      receiptSequence,
+    };
     if (activeNativeEditRef.current) detachNativeEditForFence();
     pendingHistoryBookmarkRef.current = null;
     pendingHistoryCanonicalFenceRef.current = false;
     resetSelection(false);
     pendingSelectionRef.current = null;
     pendingToolbarVisibleRef.current = false;
-    lastEmittedHtmlRef.current = null;
-    pendingHtmlEchoesRef.current = [];
-    // Workbench-owned HTML is a new source authority (adopted Version, disk
-    // reload, history). Echoes already returned above. Write the new bytes
-    // into static Active first so Canvas verify and edit unlock can finish
+    // Workbench-owned authority receipts (adopted Version, disk reload or
+    // recovery) retire the current frame. Write the new bytes into static
+    // Active first so Canvas verify and edit unlock can finish
     // without waiting for author Script. Hidden Candidates only refresh
     // scripts after that static frame is proven. Same mounted editor keeps a
     // minimal viewport anchor; it must not restore Caret, Range or a native
@@ -6781,6 +6815,7 @@ const HtmlCanvasEditor = forwardRef<HtmlCanvasEditorHandle, HtmlCanvasEditorProp
     previewAssetsReady,
     resetSelection,
     supersedeRuntimeRefreshPending,
+    sourceReceipt,
   ]);
 
   useEffect(() => {

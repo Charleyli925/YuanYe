@@ -105,7 +105,13 @@ PageRoot edits local files and renders user-controlled HTML, so its default poli
 - Desktop Edit author runtime is a trusted-local authoring capability, not a
   hostile-page sandbox. Main re-reads the active source and requires exact
   HTML/SHA, Canvas generation, bounded supported scripts and contained resource
-  paths before creating a scoped `pageroot-edit-runtime:` session. The visible
+  paths before creating a scoped `pageroot-edit-runtime:` session. Renderer
+  Canvas observations additionally require the source-owner receipt
+  incarnation/sequence, origin, generation, exact HTML/SHA and complete
+  project/session context; the DocumentWorkflow is the only confirmer, and an
+  old or duplicate callback cannot certify a newer document. An authority
+  receipt always retires the physical frame, including for equal HTML bytes,
+  while local/history receipts retain the frame. The visible
   iframe parses the complete source with author-script placeholders inert,
   registers parser-authored source objects once, and then activates that closure
   in source order with the sandbox tokens required for in-place editing. Relative assets resolve only through

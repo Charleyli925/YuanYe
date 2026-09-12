@@ -13,7 +13,9 @@ import type { DocumentWorkflowCodecs } from "./document-workflow-codecs.js";
 import type { CommentSession } from "./comment-session.js";
 import type { ConversationSession } from "./conversation-session.js";
 import type {
+  DocumentCanvasRenderObservation,
   DocumentSession,
+  DocumentSourceReceipt,
   PersistedBoundaryResult,
 } from "./document-session.js";
 import type { DraftSession } from "./draft-session.js";
@@ -500,10 +502,7 @@ export class WorkspaceController {
     deleteOriginal?: boolean;
   }): ProjectWorkflowOutcome;
   retryExternalOpen(input?: { requestId?: string }): Promise<WorkbenchNavigationOutcome>;
-  acknowledgeEditCanvas(input?: {
-    generation?: number;
-    renderedSha256?: string | null;
-  }): boolean;
+  acknowledgeEditCanvas(input?: DocumentCanvasRenderObservation): boolean;
   retryCanvasVerification(input?: {
     context?: ProjectContext;
   }): Promise<DocumentWorkflowOutcome>;
@@ -718,6 +717,7 @@ export class WorkspaceController {
   enqueueDocumentEdit(input: Record<string, unknown>): DocumentWorkflowOutcome<{
     revision: number;
     queued: boolean;
+    receipt: DocumentSourceReceipt | null;
   }>;
   flushDocument(input?: { throughRevision?: number }): Promise<DocumentWorkflowOutcome<{
     revision: number;

@@ -67,11 +67,16 @@ the historical synthetic-spike decision.
   project/document identities, canonical path, Version state, HTML bytes and
   Hash are validated before one synchronous renderer publication. No async
   query may expose a new path or Hash beside old Document bytes.
-- `DocumentSession` advances one Canvas authority generation whenever the
-  authoritative bytes/view are replaced. Edit and preview readiness are
-  disposable acknowledgements tagged by that generation and the rendered
-  source Hash; stale acknowledgements are ignored. “Safely saved” additionally
-  requires the visible surface acknowledgement to match the persisted source.
+- `DocumentSession` publishes a monotonic source receipt for every accepted
+  local edit/history result and every authority/reset/reload transition. The
+  receipt carries its origin, operation, edit revision, Canvas generation,
+  source Hash and complete project/session context. Local/history receipts keep
+  the mounted iframe; authority receipts advance the generation and require a
+  fresh physical frame even when the HTML bytes are unchanged. Edit and preview
+  readiness are disposable acknowledgements tagged by the exact receipt,
+  rendered HTML/Hash and context; stale, duplicate or cross-document
+  acknowledgements are ignored. “Safely saved” additionally requires the
+  visible surface acknowledgement to match the persisted source.
 - A clean projection mismatch is repaired automatically by one authoritative
   source reread and one bounded Canvas rebuild. Failure stays fail-closed and
   never asks the user to reconcile internal Hash state manually.
@@ -296,7 +301,7 @@ services.
 | Open/registered project identity, session generation and late-query fencing | `app/application/project-session.js` |
 | External OS/QoderWork HTML-open FIFO delivery with explicit renderer acknowledgement, opaque request deduplication, read-only A/B/C classification, Prepared Intent, committed-exit one-shot handoff, cold-start native failure presentation from stable product codes, whole project-open transition ordering, blocker-gated deferred head retention, request-keyed ack-only retry, accepted-result FIFO and final renderer fence | `desktop/external-file-open.mjs`, `desktop/prepared-html-open.mjs`, `desktop/project-open-queue.mjs`, `app/application/external-file-open-session.js`, `app/application/project-application-session.js` |
 | First-open and already-imported confirmation prompt | Auto-confirmed by Workbench from `ProjectWorkflow.openConfirmation`; delete-original still uses a registered `window.confirm` |
-| Current source bytes, persisted/working/Canvas/protection Hashes, revisions, persistence projection, source-write single flight, coalesced recovery-journal queue, verified recovery/export evidence and Canvas authority generation | `app/application/document-session.js` and `app/application/document-workflow.js`; reversible detach requires working = Canvas = protection, while failed/conflict and the disk-confirmed persisted Hash remain visible |
+| Current source bytes, persisted/working/Canvas/protection Hashes, revisions, persistence projection, source-write single flight, coalesced recovery-journal queue, monotonic source receipts, verified recovery/export evidence and Canvas authority generation | `app/application/document-session.js` and `app/application/document-workflow.js`; reversible detach requires working = Canvas = protection, while failed/conflict and the disk-confirmed persisted Hash remain visible |
 | Renderer draft revision, pending operations and reconciliation | `app/application/draft-session.js` |
 | Renderer comment working copy, composer and saved-comment edit projection | `app/application/comment-session.js` |
 | Active/background runs, Agent delivery projection, background outcomes, submission lifecycle locks and operation locks | `app/application/run-session.js` |

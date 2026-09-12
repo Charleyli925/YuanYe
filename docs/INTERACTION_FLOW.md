@@ -307,7 +307,10 @@ SourcePatch、不写磁盘、不运行作者脚本，也不引入右键菜单、
 完整性检查。后面的“先物化为完整 next HTML”描述产品结果，也表示生产路径
 对一次已接受编辑只执行一次修改。
 
-进入新 `canvasGeneration` 时，桌面端对当前已持久化 HTML 进行一次受限的
+进入新的 authority source receipt / `canvasGeneration` 时，即使 HTML 字节不变也必须换一张
+物理 iframe；local-edit/history receipt 继续复用当前 iframe。Canvas 只返回绑定完整
+receipt 的不可变渲染 observation，由 DocumentWorkflow 统一确认，避免异步旧回执改变来源。
+桌面端对当前已持久化 HTML 进行一次受限的
 Script 资源准备。可见 iframe 完成普通 load 后安装选择、原生编辑、评论和
 IME 交互；不再依赖真实像素、静默帧、宿主审计或运行态冻结。脚本在源码
 节点通过一次性注册口进入父编辑器私有 `WeakSet` 之后才执行；公开属性或

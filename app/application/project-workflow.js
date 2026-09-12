@@ -1,5 +1,6 @@
 import { decodeWorkspaceResponse } from "./workspace-controller-codecs.js";
 import { isBridgeRequestError } from "./bridge-client.js";
+import { sameSourceReceipt } from "./document-session.js";
 import { planProjectCloseAbort, planProjectCloseHydration, planProjectCloseIdentity } from "./project/close-plan.js";
 import { planProjectOpen } from "./project/open-intent.js";
 import {
@@ -12,6 +13,7 @@ import {
   planProjectSwitchEntry,
   planProjectSwitchFence,
 } from "./project/switch-plan.js";
+import { copyProjectContext } from "./verified-project-context.js";
 import { reportInternalFailure } from "./internal-failure.js";
 
 const SHA256 = /^sha256:[a-f0-9]{64}$/u;
@@ -56,6 +58,54 @@ function stale(identity) {
     status: "stale",
     identity: Object.freeze({ ...identity }),
   });
+}
+
+function completeAuthorityContext(value) {
+  const rawContext = value?.context || value;
+  if (!rawContext || typeof rawContext !== "object" || Array.isArray(rawContext)) return null;
+  const requiredTargetFields = [
+    "projectRootPath",
+    "targetKind",
+    "workingCopyId",
+    "versionId",
+    "exactSourcePath",
+    "sourceSha256",
+    "sessionEpoch",
+  ];
+  if (!requiredTargetFields.every((key) => Object.hasOwn(rawContext, key))) return null;
+  const context = copyProjectContext(rawContext);
+  if (
+    !context
+    || !Number.isSafeInteger(Number(context.epoch))
+    || !String(context.projectId || "")
+    || !String(context.documentId || "")
+    || !String(context.sourcePath || "")
+    || !String(context.projectRootPath || "")
+    || (context.targetKind !== "working-copy" && context.targetKind !== "version")
+    || !String(context.exactSourcePath || "")
+    || !SHA256.test(String(context.sourceSha256 || ""))
+    || !Number.isSafeInteger(Number(context.sessionEpoch))
+    || (context.targetKind === "working-copy" && !String(context.workingCopyId || ""))
+    || (context.targetKind === "version" && !String(context.versionId || ""))
+  ) return null;
+  return context;
+}
+
+function sameAuthorityContext(leftReceipt, rightContext, sameSourcePath) {
+  const left = completeAuthorityContext(leftReceipt);
+  const right = completeAuthorityContext(rightContext);
+  if (!left || !right) return false;
+  return Number(left.epoch) === Number(right.epoch)
+    && String(left.projectId) === String(right.projectId)
+    && String(left.documentId) === String(right.documentId)
+    && sameSourcePath(left.sourcePath, right.sourcePath)
+    && sameSourcePath(left.projectRootPath, right.projectRootPath)
+    && String(left.targetKind) === String(right.targetKind)
+    && String(left.workingCopyId || "") === String(right.workingCopyId || "")
+    && String(left.versionId || "") === String(right.versionId || "")
+    && sameSourcePath(left.exactSourcePath, right.exactSourcePath)
+    && Number(left.sessionEpoch) === Number(right.sessionEpoch)
+    && String(left.sourceSha256) === String(right.sourceSha256);
 }
 
 function matchesCloseProjectIdentity(projectSession, context) {
@@ -616,6 +666,7 @@ export class ProjectWorkflow {
     epoch,
     fromDeferred = false,
     sourceTransitionToken,
+    authorityReceiptContinuation = null,
   } = {}) {
     if (this.#disposed) {
       return blocked("PROJECT_WORKFLOW_DISPOSED", "项目读取工作流已经停止。");
@@ -628,6 +679,7 @@ export class ProjectWorkflow {
           epoch,
           fromDeferred: true,
           sourceTransitionToken,
+          authorityReceiptContinuation,
         }),
         { authority: "system" },
       );
@@ -637,6 +689,7 @@ export class ProjectWorkflow {
       sourcePath,
       epoch,
       sourceTransitionToken,
+      authorityReceiptContinuation,
     });
   }
 
@@ -3456,6 +3509,8 @@ export class ProjectWorkflow {
     this.#documentSession.reset({
       html: project.html,
       persistedSourceSha256: project.sha256 || null,
+      context: this.#projectSession.context,
+      operationId: operationId || "project-apply",
     });
     this.#markHydrationStage("apply-authority", operationId);
     this.#commentWorkflow.resetForProjectTransition();
@@ -3492,7 +3547,12 @@ export class ProjectWorkflow {
     return true;
   }
 
-  async #hydrateWorkspace({ sourcePath, epoch, sourceTransitionToken }) {
+  async #hydrateWorkspace({
+    sourcePath,
+    epoch,
+    sourceTransitionToken,
+    authorityReceiptContinuation,
+  }) {
     let activeSource = sourcePath === undefined
       ? this.#projectSession.sourcePath
       : sourcePath;
@@ -3616,6 +3676,27 @@ export class ProjectWorkflow {
         ? supplementalPayload.project
         : {};
       const currentDocument = this.#documentSession.snapshot;
+      const runtime = this.#codecs.isRecord(payload.runtimeState)
+        ? payload.runtimeState
+        : {};
+      const runtimeConflict = this.#codecs.isRecord(runtime.conflict)
+        ? runtime.conflict
+        : null;
+      const edit = this.#codecs.isRecord(runtime.edit) ? runtime.edit : {};
+      const serverRevision = Number(runtime.editRevision || edit.editRevision || 0);
+      const serverPersistedRevision = Number(
+        runtime.lastPersistedRevision
+        || edit.lastPersistedRevision
+        || serverRevision,
+      );
+      const finalEditRevision = Math.max(
+        currentDocument.editRevision,
+        serverRevision,
+      );
+      const finalLastPersistedRevision = Math.max(
+        currentDocument.lastPersistedRevision,
+        serverPersistedRevision,
+      );
       const projection = await inspectProjectOpenProjection({
         document: currentDocument,
         hashPort: this.#hashPort,
@@ -3690,6 +3771,8 @@ export class ProjectWorkflow {
           prepared: preparedTransition,
           html: authoritativeHtml,
           sourceSha256: authoritativeHash,
+          editRevision: finalEditRevision,
+          lastPersistedRevision: finalLastPersistedRevision,
           publishVersion,
         });
       } else {
@@ -3708,17 +3791,55 @@ export class ProjectWorkflow {
           ...(hydrationOpenTarget ? { openTarget: hydrationOpenTarget } : {}),
         });
         if (!context) return stale({ operationId, epoch: activeEpoch, sourcePath: activeSource });
-        if (mustAdoptSource || authoritativeHtml !== currentDocument.html) {
-          this.#documentSession.publishAuthority({
-            html: authoritativeHtml,
-            persistedSourceSha256: authoritativeHash,
-          });
-          this.#canvasPort.invalidateRenderAcks?.();
-        } else {
+        const nextWorkingHash = currentDocumentClean
+          ? authoritativeHash
+          : currentDocument.workingHtmlSha256;
+        const continuationReceipt = authorityReceiptContinuation?.receipt
+          || authorityReceiptContinuation;
+        const reuseAuthorityReceipt = Boolean(
+          continuationReceipt
+          && sameSourceReceipt(continuationReceipt, currentDocument.sourceReceipt)
+          && continuationReceipt.origin === "authority"
+          && currentDocument.canvasAuthority.status === "verified"
+          && currentDocument.html === authoritativeHtml
+          && currentDocument.persistedSourceSha256 === authoritativeHash
+          && currentDocument.workingHtmlSha256 === nextWorkingHash
+          && currentDocument.editRevision === finalEditRevision
+          && currentDocument.lastPersistedRevision === finalLastPersistedRevision
+          && sameAuthorityContext(
+            continuationReceipt,
+            context,
+            this.#codecs.sameSourcePath,
+          )
+        );
+        if (reuseAuthorityReceipt) {
+          // A reload already published and verified this exact authority. The
+          // following workspace refresh only hydrates supplemental state; it
+          // must not create a second receipt or physical Canvas transition.
           this.#documentSession.update({
             html: authoritativeHtml,
             persistedSourceSha256: authoritativeHash,
+            workingHtmlSha256: nextWorkingHash,
+            editRevision: finalEditRevision,
+            lastPersistedRevision: finalLastPersistedRevision,
+            persistState: "idle",
+            persistError: "",
           });
+        } else {
+          // Independent hydration always changes the complete source context.
+          // Same-byte hydration still needs a fresh authority receipt and
+          // physical frame generation so pre-hydration ACKs cannot settle the
+          // new document.
+          this.#documentSession.publishAuthority({
+            html: authoritativeHtml,
+            persistedSourceSha256: authoritativeHash,
+            workingHtmlSha256: nextWorkingHash,
+            editRevision: finalEditRevision,
+            lastPersistedRevision: finalLastPersistedRevision,
+            context,
+            operationId: operationId || "project-hydration",
+          });
+          this.#canvasPort.invalidateRenderAcks?.();
         }
         publishVersion();
       }
@@ -3729,26 +3850,6 @@ export class ProjectWorkflow {
       this.#documentWorkflow.replaceRecoveryIdentity(
         this.#codecs.recoveryIdentityFromRecord(payload.recoveryIdentity),
       );
-      const runtime = this.#codecs.isRecord(payload.runtimeState)
-        ? payload.runtimeState
-        : {};
-      const runtimeConflict = this.#codecs.isRecord(runtime.conflict)
-        ? runtime.conflict
-        : null;
-      const edit = this.#codecs.isRecord(runtime.edit) ? runtime.edit : {};
-      const serverRevision = Number(runtime.editRevision || edit.editRevision || 0);
-      const serverPersistedRevision = Number(
-        runtime.lastPersistedRevision
-        || edit.lastPersistedRevision
-        || serverRevision,
-      );
-      this.#documentSession.update({
-        editRevision: Math.max(this.#documentSession.editRevision, serverRevision),
-        lastPersistedRevision: Math.max(
-          this.#documentSession.lastPersistedRevision,
-          serverPersistedRevision,
-        ),
-      });
 
       const draftRecord = decodedWorkspace.draft;
       const serverDraftRevision = this.#codecs.authoritativeDraftRevision(draftRecord);
@@ -4131,6 +4232,8 @@ export class ProjectWorkflow {
       persistState: previous.document.persistState,
       persistError: previous.document.persistError,
       pendingWrite: previous.pendingWrite,
+      context,
+      operationId: "project-hydration-rollback",
     });
     this.#versionSession.hydrate({
       versions: previous.version.versions,
@@ -4293,6 +4396,8 @@ export class ProjectWorkflow {
     prepared,
     html,
     sourceSha256,
+    editRevision,
+    lastPersistedRevision,
     publishVersion = () => {},
     publishSessions = null,
   }) {
@@ -4336,7 +4441,11 @@ export class ProjectWorkflow {
     this.#documentSession.publishAuthority({
       html,
       persistedSourceSha256: sourceSha256,
+      ...(editRevision !== undefined ? { editRevision } : {}),
+      ...(lastPersistedRevision !== undefined ? { lastPersistedRevision } : {}),
       pendingWrite: null,
+      context: this.#projectSession.context,
+      operationId: "managed-source-transition",
     });
     if (typeof publishSessions === "function") {
       publishSessions(this.#projectSession.context);

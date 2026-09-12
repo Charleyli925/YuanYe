@@ -122,6 +122,7 @@ function createHarness({
     null,
   );
   const scheduler = createScheduler();
+  const configuredVerifyRendered = canvasOverrides.verifyRendered;
   const canvas = {
     invalidations: 0,
     history: [],
@@ -132,6 +133,17 @@ function createHarness({
       this.history.push({ html: htmlValue, target, selection });
     },
     ...canvasOverrides,
+  };
+  canvas.verifyRendered = async (...args) => {
+    const configured = await configuredVerifyRendered?.(...args);
+    if (configured) return configured;
+    const [renderedHtml, renderedSha256, , receipt] = args;
+    return Object.freeze({
+      receipt: receipt || documentSession.sourceReceipt,
+      renderedHtml: String(renderedHtml || ""),
+      renderedSha256: String(renderedSha256 || ""),
+      frameGeneration: documentSession.canvasGeneration,
+    });
   };
   const client = {
     async autosave() {
@@ -711,6 +723,113 @@ test("DocumentWorkflow rebinds a moved Working Copy before the next autosave", a
   assert.equal(calls[1].exactSourcePath, movedPath);
   assert.equal(calls[1].projectRootPath, "/tmp/project-renamed");
   assert.equal(calls[1].expectedSourceSha256, sha256(after));
+});
+
+test("DocumentWorkflow publishes an authority receipt when a same-byte autosave adopts a moved Working Copy", async () => {
+  const before = "<!doctype html><html><body><p>one</p></body></html>";
+  const after = before.replace("one", "two");
+  const movedPath = "/tmp/project-renamed/document-V1.html";
+  const initialTarget = {
+    projectId: PROJECT_ID,
+    documentId: DOCUMENT_ID,
+    projectRootPath: "/tmp/project-original",
+    targetKind: "working-copy",
+    workingCopyId: "work_ver_0001",
+    versionId: "ver_0001",
+    exactSourcePath: SOURCE_PATH,
+    sourceSha256: sha256(before),
+  };
+  const harness = createHarness({
+    html: before,
+    bridge: {
+      async autosave(body) {
+        return {
+          ok: true,
+          content: body.html,
+          sha256: sha256(body.html),
+          persistedRevision: body.editRevision,
+          lastModifiedAt: "2026-09-01T00:00:00.000Z",
+          openTarget: {
+            ...initialTarget,
+            projectRootPath: "/tmp/project-renamed",
+            exactSourcePath: movedPath,
+            sourceSha256: sha256(body.html),
+          },
+        };
+      },
+    },
+  });
+  assert.ok(harness.projectSession.register({
+    ...harness.context,
+    openTarget: initialTarget,
+  }));
+  const oldReceipt = harness.documentSession.sourceReceipt;
+  const oldGeneration = harness.documentSession.canvasGeneration;
+
+  assert.equal(harness.workflow.enqueueEdit({ html: after }).status, "succeeded");
+  assert.equal((await harness.workflow.flush()).status, "succeeded");
+
+  assert.equal(harness.documentSession.html, after);
+  assert.equal(harness.projectSession.context?.sourcePath, movedPath);
+  assert.equal(harness.projectSession.context?.projectRootPath, "/tmp/project-renamed");
+  assert.equal(harness.documentSession.canvasGeneration, oldGeneration + 1);
+  assert.equal(harness.documentSession.sourceReceipt.origin, "authority");
+  assert.equal(harness.documentSession.sourceReceipt.context.sourcePath, movedPath);
+  assert.equal(
+    harness.documentSession.sourceReceipt.editRevision,
+    harness.documentSession.editRevision,
+  );
+  assert.equal(harness.canvas.invalidations, 2);
+  assert.equal(harness.documentSession.confirmCanvas({
+    generation: harness.documentSession.canvasGeneration,
+    renderedSha256: sha256(after),
+    workingHtmlSha256: sha256(after),
+    renderedHtml: after,
+    receipt: oldReceipt,
+  }), false);
+});
+
+test("DocumentWorkflow keeps a same-route hash-only autosave in the existing Canvas generation", async () => {
+  const before = "<!doctype html><html><body><p>one</p></body></html>";
+  const after = before.replace("one", "two");
+  const target = {
+    projectId: PROJECT_ID,
+    documentId: DOCUMENT_ID,
+    projectRootPath: "/tmp/project-original",
+    targetKind: "working-copy",
+    workingCopyId: "work_ver_0001",
+    versionId: "ver_0001",
+    exactSourcePath: SOURCE_PATH,
+    sourceSha256: sha256(before),
+  };
+  const harness = createHarness({
+    html: before,
+    bridge: {
+      async autosave(body) {
+        return {
+          ok: true,
+          content: body.html,
+          sha256: sha256(body.html),
+          persistedRevision: body.editRevision,
+          lastModifiedAt: "2026-09-01T00:00:00.000Z",
+          openTarget: { ...target, sourceSha256: sha256(body.html) },
+        };
+      },
+    },
+  });
+  assert.ok(harness.projectSession.register({ ...harness.context, openTarget: target }));
+  const oldGeneration = harness.documentSession.canvasGeneration;
+  assert.equal(harness.workflow.enqueueEdit({
+    html: after,
+    sourceTransaction: operation(before, after),
+  }).status, "succeeded");
+  const localReceipt = harness.documentSession.sourceReceipt;
+  assert.equal((await harness.workflow.flush()).status, "succeeded");
+
+  assert.equal(harness.documentSession.canvasGeneration, oldGeneration);
+  assert.equal(harness.documentSession.sourceReceipt.sequence, localReceipt.sequence);
+  assert.equal(harness.documentSession.sourceReceipt.origin, "local-edit");
+  assert.equal(harness.documentSession.persistedSourceSha256, sha256(after));
 });
 
 test("DocumentWorkflow exposes no user-selected moved-project rebinding API", () => {
@@ -2079,6 +2198,261 @@ test("ensureCurrentCanvas reuses an exact clean verified Canvas without another 
   assert.equal(reused.status, "succeeded");
   assert.equal(reused.value.reusedCanvasAuthority, true);
   assert.equal(verifyCalls, 1);
+});
+
+test("Canvas observation confirms exactly once and rejects an external duplicate", async () => {
+  const html = "<!doctype html><html><body><p>observation</p></body></html>";
+  let observation = null;
+  let verifyCalls = 0;
+  const harness = createHarness({
+    html,
+    canvasOverrides: {
+      async verifyRendered(renderedHtml, renderedSha256, _context, receipt) {
+        verifyCalls += 1;
+        observation = Object.freeze({
+          receipt,
+          renderedHtml,
+          renderedSha256,
+          frameGeneration: 11,
+        });
+        return observation;
+      },
+    },
+  });
+  const outcome = await harness.workflow.ensureCurrentCanvas({ context: harness.context });
+
+  assert.equal(outcome.status, "succeeded");
+  assert.equal(verifyCalls, 1);
+  assert.ok(observation);
+  assert.equal(harness.workflow.confirmCanvas(observation), false);
+  assert.equal(harness.documentSession.canvasAuthority.status, "verified");
+});
+
+test("local and history observations with a receipt hash mismatch never verify", () => {
+  const html = "<!doctype html><html><body><p>hash fence</p></body></html>";
+  const nextHtml = html.replace("hash fence", "next");
+  const nextSha256 = sha256(nextHtml);
+  const wrongSha256 = sha256("different rendered bytes");
+  for (const origin of ["local-edit", "history"]) {
+    const harness = createHarness({ html });
+    harness.documentSession.beginEdit(nextHtml, {
+      origin,
+      sourceSha256: nextSha256,
+      context: harness.context,
+      operationId: `${origin}-hash-fence`,
+    });
+    const receipt = harness.documentSession.sourceReceipt;
+    assert.equal(harness.workflow.confirmCanvas({
+      receipt,
+      renderedHtml: nextHtml,
+      renderedSha256: wrongSha256,
+      frameGeneration: receipt.canvasGeneration,
+    }), false, `${origin} rendered hash must match its receipt`);
+    assert.equal(harness.documentSession.canvasAuthority.status, "pending");
+    assert.equal(harness.workflow.confirmCanvas({
+      receipt: { ...receipt, sourceSha256: wrongSha256 },
+      renderedHtml: nextHtml,
+      renderedSha256: wrongSha256,
+      frameGeneration: receipt.canvasGeneration,
+    }), false, `${origin} forged receipt hash must remain stale`);
+    assert.equal(harness.documentSession.canvasAuthority.status, "pending");
+    harness.workflow.dispose();
+  }
+});
+
+test("a conflict candidate with no working hash cannot self-certify until a corrected receipt", () => {
+  const html = "<!doctype html><html><body><p>external</p></body></html>";
+  const candidateHtml = html.replace("external", "candidate");
+  const candidateSha256 = sha256(candidateHtml);
+  const harness = createHarness({ html });
+  const adopted = harness.workflow.adoptConflictCandidate({
+    context: harness.context,
+    html: candidateHtml,
+    authoritativeSourceSha256: sha256(html),
+    expectedSourceSha256: sha256(html),
+    revision: harness.documentSession.editRevision + 1,
+  });
+  assert.equal(adopted.status, "succeeded");
+  assert.equal(harness.documentSession.workingHtmlSha256, null);
+  assert.equal(harness.documentSession.sourceReceipt.sourceSha256, "");
+  const conflictedReceipt = harness.documentSession.sourceReceipt;
+  assert.equal(harness.workflow.confirmCanvas({
+    receipt: conflictedReceipt,
+    renderedHtml: candidateHtml,
+    renderedSha256: candidateSha256,
+    frameGeneration: conflictedReceipt.canvasGeneration,
+  }), false);
+  assert.equal(harness.documentSession.canvasAuthority.status, "pending");
+
+  const correctedReceipt = harness.documentSession.publishAuthority({
+    html: candidateHtml,
+    persistedSourceSha256: candidateSha256,
+    workingHtmlSha256: candidateSha256,
+    context: harness.context,
+    operationId: "conflict-candidate-corrected-hash",
+  }).sourceReceipt;
+  assert.notEqual(correctedReceipt.sequence, conflictedReceipt.sequence);
+  assert.equal(harness.workflow.confirmCanvas({
+    receipt: correctedReceipt,
+    renderedHtml: candidateHtml,
+    renderedSha256: candidateSha256,
+    frameGeneration: correctedReceipt.canvasGeneration,
+  }), true);
+  harness.workflow.dispose();
+});
+
+test("an exact conflict-candidate autosave publishes a corrected hash receipt", async () => {
+  const html = "<!doctype html><html><body><p>external</p></body></html>";
+  const candidateHtml = html.replace("external", "autosaved-candidate");
+  const candidateSha256 = sha256(candidateHtml);
+  const harness = createHarness({
+    html,
+    bridge: {
+      async autosave(body) {
+        return {
+          ok: true,
+          content: body.html,
+          sha256: candidateSha256,
+          persistedRevision: body.editRevision,
+          lastModifiedAt: "2026-09-13T00:00:00.000Z",
+        };
+      },
+    },
+  });
+  const adopted = harness.workflow.adoptConflictCandidate({
+    context: harness.context,
+    html: candidateHtml,
+    authoritativeSourceSha256: sha256(html),
+    expectedSourceSha256: sha256(html),
+    revision: harness.documentSession.editRevision + 1,
+  });
+  assert.equal(adopted.status, "succeeded");
+  const conflictedReceipt = harness.documentSession.sourceReceipt;
+  const beforeGeneration = harness.documentSession.canvasGeneration;
+  const flushed = await harness.workflow.flush();
+
+  assert.equal(flushed.status, "succeeded", JSON.stringify(flushed));
+  assert.equal(harness.documentSession.sourceReceipt.origin, "authority");
+  assert.equal(harness.documentSession.sourceReceipt.sourceSha256, candidateSha256);
+  assert.notEqual(harness.documentSession.sourceReceipt.sequence, conflictedReceipt.sequence);
+  assert.equal(harness.documentSession.canvasGeneration, beforeGeneration + 1);
+  assert.equal(harness.workflow.confirmCanvas({
+    receipt: harness.documentSession.sourceReceipt,
+    renderedHtml: candidateHtml,
+    renderedSha256: candidateSha256,
+    frameGeneration: harness.documentSession.canvasGeneration,
+  }), true);
+  harness.workflow.dispose();
+});
+
+test("ensureCurrentCanvas tolerates an exact observation confirmed by its composed verifier", async () => {
+  const html = "<!doctype html><html><body><p>composed</p></body></html>";
+  let harness;
+  let observation = null;
+  harness = createHarness({
+    html,
+    canvasOverrides: {
+      async verifyRendered(renderedHtml, renderedSha256, _context, receipt) {
+        observation = Object.freeze({
+          receipt,
+          renderedHtml,
+          renderedSha256,
+          frameGeneration: harness.documentSession.canvasGeneration,
+        });
+        assert.equal(harness.workflow.confirmCanvas(observation), true);
+        return observation;
+      },
+    },
+  });
+
+  const outcome = await harness.workflow.ensureCurrentCanvas({ context: harness.context });
+
+  assert.equal(outcome.status, "succeeded");
+  assert.equal(harness.documentSession.canvasAuthority.status, "verified");
+  assert.ok(observation);
+  assert.equal(harness.workflow.confirmCanvas(observation), false);
+});
+
+test("ensureCurrentCanvas repairs a clean persisted hash mismatch with the authoritative receipt", async () => {
+  const oldHtml = "<!doctype html><html><body><p>old</p></body></html>";
+  const repairedHtml = oldHtml.replace("old", "repaired");
+  const harness = createHarness({
+    html: oldHtml,
+    bridge: {
+      async source() {
+        return {
+          projectId: PROJECT_ID,
+          documentId: DOCUMENT_ID,
+          sourcePath: SOURCE_PATH,
+          content: repairedHtml,
+          sha256: sha256(repairedHtml),
+        };
+      },
+    },
+  });
+  harness.documentSession.update({
+    persistedSourceSha256: sha256("stale persisted bytes"),
+    workingHtmlSha256: sha256(oldHtml),
+  });
+  const beforeReceipt = harness.documentSession.sourceReceipt;
+
+  const outcome = await harness.workflow.ensureCurrentCanvas({ context: harness.context });
+
+  assert.equal(outcome.status, "succeeded");
+  assert.equal(harness.documentSession.html, repairedHtml);
+  assert.equal(harness.documentSession.persistedSourceSha256, sha256(repairedHtml));
+  assert.equal(harness.documentSession.sourceReceipt.origin, "authority");
+  assert.notEqual(harness.documentSession.sourceReceipt.sequence, beforeReceipt.sequence);
+  assert.equal(
+    harness.documentSession.sourceReceipt.editRevision,
+    harness.documentSession.editRevision,
+  );
+  assert.equal(harness.documentSession.canvasAuthority.status, "verified");
+});
+
+test("Canvas rebuild timeout fails the current R2 and a later R2 authority can verify", async () => {
+  const html = "<!doctype html><html><body><p>rebuild</p></body></html>";
+  let harness;
+  let verifyCalls = 0;
+  harness = createHarness({
+    html,
+    canvasOverrides: {
+      async verifyRendered(renderedHtml, renderedSha256, _context, receipt) {
+        verifyCalls += 1;
+        if (verifyCalls === 1) {
+          harness.documentSession.reloadCanvas({
+            context: harness.context,
+            operationId: "canvas-rebuild-r2",
+          });
+          throw new Error("canvas timeout after rebuild");
+        }
+        return Object.freeze({
+          receipt,
+          renderedHtml,
+          renderedSha256,
+          frameGeneration: harness.documentSession.canvasGeneration,
+        });
+      },
+    },
+  });
+
+  const failed = await harness.workflow.ensureCurrentCanvas({ context: harness.context });
+  const failedReceipt = harness.documentSession.sourceReceipt;
+  assert.equal(failed.status, "rejected");
+  assert.equal(harness.documentSession.canvasAuthority.status, "failed");
+  assert.equal(harness.documentSession.canvasAuthority.generation, failedReceipt.canvasGeneration);
+  assert.equal(failedReceipt.operationId, "canvas-rebuild-r2");
+
+  const nextReceipt = harness.documentSession.publishAuthority({
+    html,
+    persistedSourceSha256: sha256(html),
+    context: harness.context,
+    operationId: "canvas-rebuild-r3",
+  }).sourceReceipt;
+  const recovered = await harness.workflow.ensureCurrentCanvas({ context: harness.context });
+  assert.equal(recovered.status, "succeeded");
+  assert.equal(harness.documentSession.sourceReceipt.operationId, nextReceipt.operationId);
+  assert.equal(harness.documentSession.canvasAuthority.status, "verified");
 });
 
 test("ensureCurrentCanvas fails closed when the canvas cannot render", async () => {

@@ -685,6 +685,10 @@ test("the read-only recovery notice reloads source authority even when dynamic p
     await expect(page.getByTestId('edit-runtime-static-fallback')).toContainText('页面暂时无法编辑');
     const working = await managedWorkingCopyPath(page, sourcePath);
     await expect.poll(() => readPublishedWorkingCopy(working)).toContain('FAIL_CHART');
+    const activeFrame = editor.locator('iframe[data-runtime-slot-role="active"]');
+    await activeFrame.evaluate((frame) => {
+      window.__M5_BEFORE_AUTHORITY_CONTENT_DOCUMENT__ = frame.contentDocument;
+    });
     // A second, independent failure during reload used to retain the previous
     // runtime's read-only flag forever, despite a verified static document.
     await electronApp.evaluate(({ ipcMain }) => {
@@ -696,6 +700,10 @@ test("the read-only recovery notice reloads source authority even when dynamic p
     await expect(page.locator('.workbench-chrome-status')).toHaveText('页面已重新加载，可以继续编辑');
     await expect(editor).toHaveAttribute('aria-readonly', 'false');
     await expect(page.getByTestId('edit-runtime-static-fallback')).toHaveCount(0);
+    await expect.poll(() => activeFrame.evaluate((frame) => Boolean(
+      frame.contentDocument
+      && frame.contentDocument !== window.__M5_BEFORE_AUTHORITY_CONTENT_DOCUMENT__
+    ))).toBe(true);
     await target.dblclick();
     await expect(target).toHaveAttribute('contenteditable', 'true');
     await target.press(keyShortcut('ArrowRight'));
@@ -734,9 +742,35 @@ test("Canvas shortcuts follow the promoted frame and same-source reload keeps ch
     await expect.poll(() => readPublishedWorkingCopy(working)).toContain("HISTORY_CONTINUITY");
     await expect(editor.locator('iframe[data-runtime-slot-role="active"]')).not.toHaveAttribute("data-frame-generation", generation);
     await expect.poll(() => page.evaluate(() => document.activeElement?.getAttribute("data-runtime-slot-role"))).toBe("active");
+    await expect(editor).toHaveAttribute("data-runtime-activation", "activation-ready");
+    await expect(editor).not.toHaveAttribute("data-runtime-candidate-id", /.+/u);
+    await expect(editor).not.toHaveAttribute("data-runtime-refresh-pending", "");
+    const activeFrame = editor.locator('iframe[data-runtime-slot-role="active"]');
+    const beforeReloadDocument = await documentToken(page);
+    const beforeReloadScriptCount = await page.evaluate(() => (
+      window.__PAGEROOT_DELAYED_CHART_RUNTIME_COUNT__ || 0
+    ));
+    const beforeReloadLastKnownGood = await editor.getAttribute(
+      "data-runtime-last-known-good-id",
+    );
+    await activeFrame.evaluate((frame) => {
+      window.__M5_BEFORE_SAME_BYTE_AUTHORITY_CONTENT_DOCUMENT__ = frame.contentDocument;
+    });
     await page.getByRole("button", { name: "更多", exact: true }).click();
     await page.getByRole("menuitem", { name: "从磁盘重新载入 HTML", exact: true }).click();
     await expect(page.locator(".workbench-chrome-status")).toHaveText("页面已重新加载，可以继续编辑");
+    await expect.poll(() => page.evaluate(() => (
+      window.__PAGEROOT_DELAYED_CHART_RUNTIME_COUNT__ || 0
+    ))).toBe(beforeReloadScriptCount + 1);
+    await expect.poll(() => documentToken(page)).not.toBe(beforeReloadDocument);
+    await expect.poll(() => activeFrame.evaluate((frame) => Boolean(
+      frame.contentDocument
+      && frame.contentDocument !== window.__M5_BEFORE_SAME_BYTE_AUTHORITY_CONTENT_DOCUMENT__
+    ))).toBe(true);
+    await expect(editor).toHaveAttribute("data-runtime-activation", "activation-ready");
+    await expect(editor).not.toHaveAttribute("data-runtime-candidate-id", /.+/u);
+    await expect.poll(() => editor.getAttribute("data-runtime-last-known-good-id"))
+      .not.toBe(beforeReloadLastKnownGood);
     await expect.poll(() => frame.locator("#chart canvas").evaluateAll(canvases => canvases.filter(canvas => (
       canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height).data.some((value, index) => index % 4 === 3 && value > 0)
     )).length)).toBe(1);

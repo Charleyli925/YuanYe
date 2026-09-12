@@ -64,8 +64,11 @@ The renderer's main workspace facts are partitioned as follows:
 
 - `ProjectSession`: open/registered identity, generation and query fencing;
 - `DocumentSession`: current HTML bytes, Hash, edit/persist revisions,
-  persistence projection, pending write, flush single flight, Canvas authority
-  generation and exact-byte reconciliation at persistence boundaries;
+  persistence projection, pending write, flush single flight, monotonic source
+  receipts with a session incarnation, Canvas authority generation and
+  exact-byte reconciliation at persistence boundaries. A receipt binds origin,
+  operation, edit revision, Canvas generation, source Hash and the complete
+  Project/session context;
 - `CommentSession`: disposable comment working copy, composer, tombstones and
   saved-comment edit session;
 - `DraftSession`: acknowledged Draft revision, pending mutation and
@@ -476,13 +479,20 @@ Request-relative paths. A failed attachment or bundle validation stops before
 public `request.json` and Runtime authority are published, and the copy is
 never a hard link to the mutable Draft.
 
-Edit and preview surfaces acknowledge the exact Canvas authority generation and
-rendered source Hash. Acknowledgements are disposable and generation-fenced;
-they never become source authority. The safe-save projection requires both the
-persisted Document revision/Hash and the currently visible surface
-acknowledgement. A missing acknowledgement triggers at most one Canvas rebuild;
-a clean source mismatch triggers at most one authoritative reread before that
-rebuild. Neither recovery path delegates internal reconciliation to the user.
+Edit and preview surfaces observe the exact source receipt, rendered HTML,
+rendered Hash and physical frame generation. `DocumentWorkflow` is the only
+production confirmer; Canvas returns observations and WorkspaceController
+forwards them without mutating source authority. Observations are disposable and fenced by the
+receipt session incarnation/sequence, origin, Canvas generation and complete
+Project/session context; old, duplicate or cross-document observations are
+discarded and never become source authority. Local/history receipts keep the
+mounted iframe, while every authority receipt advances Canvas generation and
+requires a fresh physical frame, including when the HTML bytes are equal. The safe-save projection
+requires both the persisted Document revision/Hash and the currently visible
+surface acknowledgement. A missing acknowledgement triggers at most one
+Canvas rebuild; a clean source mismatch triggers at most one authoritative
+reread before that rebuild. Neither recovery path delegates internal
+reconciliation to the user.
 
 The preview-to-edit `PageViewContext` is a non-durable projection owned by the
 Workbench for one current document key and preview generation. It contains

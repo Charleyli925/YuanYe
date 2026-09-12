@@ -167,6 +167,7 @@ function createHarness({
   documentWorkflowFactory = null,
   initialProject = true,
   openTarget = null,
+  sameSourcePath = (left, right) => Boolean(left && right && left === right),
 } = {}) {
   const projectSession = new ProjectSession();
   const locator = initialProject ? projectSession.openLocator(OLD_PATH) : null;
@@ -466,7 +467,7 @@ function createHarness({
     drainCoordinator: new DrainCoordinator(),
     codecs: {
       isRecord,
-      sameSourcePath: (left, right) => Boolean(left && right && left === right),
+      sameSourcePath,
       versionsFromWorkspace: (payload) => Array.isArray(payload.versions)
         ? payload.versions
         : [],
@@ -1176,6 +1177,347 @@ test("production split workspace commits Core without a second source read and f
   ]);
   assert.ok(harness.events.some((event) => event.type === "project-core-ready"));
   assert.ok(harness.events.some((event) => event.type === "project-hydrated"));
+});
+
+test("hydration publishes the final server revision in one authority receipt", async (t) => {
+  const serverRevision = 7;
+  const harness = createHarness({
+    bridge: {
+      async workspace(sourcePath) {
+        return {
+          ...workspacePayload(sourcePath, OLD_HTML),
+          runtimeState: {
+            editRevision: serverRevision,
+            lastPersistedRevision: serverRevision,
+            draft: draftAuthority(),
+          },
+        };
+      },
+    },
+  });
+  t.after(() => harness.workflow.dispose());
+  const oldReceipt = harness.documentSession.sourceReceipt;
+
+  const outcome = await harness.workflow.refreshWorkspace({
+    sourcePath: OLD_PATH,
+    epoch: harness.projectSession.epoch,
+  });
+
+  assert.equal(outcome.status, "succeeded", JSON.stringify(outcome));
+  assert.equal(harness.documentSession.html, OLD_HTML);
+  assert.equal(harness.documentSession.editRevision, serverRevision);
+  assert.equal(harness.documentSession.lastPersistedRevision, serverRevision);
+  assert.equal(
+    harness.documentSession.sourceReceipt.editRevision,
+    harness.documentSession.editRevision,
+  );
+  assert.equal(harness.documentSession.sourceReceipt.editRevision, serverRevision);
+  assert.equal(harness.documentSession.sourceReceipt.origin, "authority");
+  assert.notEqual(harness.documentSession.sourceReceipt.sequence, oldReceipt.sequence);
+  assert.equal(harness.documentSession.confirmCanvas({
+    generation: harness.documentSession.canvasGeneration,
+    renderedSha256: sha256(OLD_HTML),
+    workingHtmlSha256: sha256(OLD_HTML),
+    renderedHtml: OLD_HTML,
+    receipt: oldReceipt,
+  }), false);
+});
+
+test("a reload continuation rehydrates supplemental state without a second authority receipt", async (t) => {
+  const harness = createHarness({
+    openTarget: {
+      ...managedOpenTarget(`/private${OLD_PATH}`),
+      projectRootPath: "/private/var/project-root",
+    },
+    sameSourcePath: (left, right) => {
+      const normalize = (value) => String(value || "").replace(
+        /^\/private(?=\/(?:tmp|var)(?:\/|$))/u,
+        "",
+      );
+      return Boolean(left && right && normalize(left) === normalize(right));
+    },
+    bridge: {
+      async workspace(sourcePath) {
+        return {
+          ...workspacePayload(sourcePath, OLD_HTML),
+          projectId: "project_old",
+          documentId: "document_old",
+          openTarget: {
+            ...managedOpenTarget(sourcePath),
+            projectRootPath: "/var/project-root",
+          },
+        };
+      },
+    },
+  });
+  t.after(() => harness.workflow.dispose());
+  const authorityReceipt = harness.documentSession.publishAuthority({
+    html: OLD_HTML,
+    persistedSourceSha256: sha256(OLD_HTML),
+    workingHtmlSha256: sha256(OLD_HTML),
+    editRevision: harness.documentSession.editRevision,
+    lastPersistedRevision: harness.documentSession.lastPersistedRevision,
+    context: harness.oldContext,
+    operationId: "authority-reload-continuation",
+  }).sourceReceipt;
+  assert.equal(harness.documentSession.confirmCanvas({
+    generation: authorityReceipt.canvasGeneration,
+    renderedSha256: sha256(OLD_HTML),
+    workingHtmlSha256: sha256(OLD_HTML),
+    renderedHtml: OLD_HTML,
+    receipt: authorityReceipt,
+  }), true);
+  const beforeSequence = authorityReceipt.sequence;
+  const beforeGeneration = authorityReceipt.canvasGeneration;
+
+  const outcome = await harness.workflow.refreshWorkspace({
+    sourcePath: OLD_PATH,
+    epoch: harness.projectSession.epoch,
+    authorityReceiptContinuation: authorityReceipt,
+  });
+
+  assert.equal(outcome.status, "succeeded", JSON.stringify(outcome));
+  assert.equal(harness.documentSession.sourceReceipt, authorityReceipt);
+  assert.equal(harness.documentSession.sourceReceipt.sequence, beforeSequence);
+  assert.equal(harness.documentSession.canvasGeneration, beforeGeneration);
+  assert.equal(harness.documentSession.canvasAuthority.status, "verified");
+});
+
+test("a reload continuation with no managed OpenTarget publishes a fresh authority receipt", async (t) => {
+  const harness = createHarness({
+    bridge: {
+      async workspace(sourcePath) {
+        return {
+          ...workspacePayload(sourcePath, OLD_HTML),
+          projectId: "project_old",
+          documentId: "document_old",
+        };
+      },
+    },
+  });
+  t.after(() => harness.workflow.dispose());
+  const authorityReceipt = harness.documentSession.publishAuthority({
+    html: OLD_HTML,
+    persistedSourceSha256: sha256(OLD_HTML),
+    workingHtmlSha256: sha256(OLD_HTML),
+    context: harness.oldContext,
+    operationId: "authority-reload-incomplete-target",
+  }).sourceReceipt;
+  assert.equal(harness.documentSession.confirmCanvas({
+    generation: authorityReceipt.canvasGeneration,
+    renderedSha256: sha256(OLD_HTML),
+    workingHtmlSha256: sha256(OLD_HTML),
+    renderedHtml: OLD_HTML,
+    receipt: authorityReceipt,
+  }), true);
+
+  const outcome = await harness.workflow.refreshWorkspace({
+    sourcePath: OLD_PATH,
+    epoch: harness.projectSession.epoch,
+    authorityReceiptContinuation: authorityReceipt,
+  });
+
+  assert.equal(outcome.status, "succeeded", JSON.stringify(outcome));
+  assert.notEqual(harness.documentSession.sourceReceipt.sequence, authorityReceipt.sequence);
+  assert.equal(harness.documentSession.sourceReceipt.origin, "authority");
+});
+
+test("a reload continuation rejects stale receipt tuple mutations", async () => {
+  const mutations = [
+    ["source hash", (receipt) => ({
+      ...receipt,
+      sourceSha256: sha256(A_HTML),
+    })],
+    ["real path", (receipt) => ({
+      ...receipt,
+      context: {
+        ...receipt.context,
+        exactSourcePath: "/tmp/project-workflow-other.html",
+      },
+    })],
+    ["project identity", (receipt) => ({
+      ...receipt,
+      context: {
+        ...receipt.context,
+        projectId: "project_other",
+      },
+    })],
+    ["document identity", (receipt) => ({
+      ...receipt,
+      context: {
+        ...receipt.context,
+        documentId: "document_other",
+      },
+    })],
+    ["project root missing", (receipt) => ({
+      ...receipt,
+      context: Object.fromEntries(
+        Object.entries(receipt.context).filter(([key]) => key !== "projectRootPath"),
+      ),
+    })],
+    ["project root changed", (receipt) => ({
+      ...receipt,
+      context: {
+        ...receipt.context,
+        projectRootPath: "/tmp/project-workflow-other-root",
+      },
+    })],
+    ["target kind missing", (receipt) => ({
+      ...receipt,
+      context: Object.fromEntries(
+        Object.entries(receipt.context).filter(([key]) => key !== "targetKind"),
+      ),
+    })],
+    ["target kind changed", (receipt) => ({
+      ...receipt,
+      context: {
+        ...receipt.context,
+        targetKind: "version",
+      },
+    })],
+    ["version target missing version", (receipt) => ({
+      ...receipt,
+      context: Object.fromEntries(
+        Object.entries({
+          ...receipt.context,
+          targetKind: "version",
+        }).filter(([key]) => key !== "versionId"),
+      ),
+    })],
+    ["working copy missing", (receipt) => ({
+      ...receipt,
+      context: Object.fromEntries(
+        Object.entries(receipt.context).filter(([key]) => key !== "workingCopyId"),
+      ),
+    })],
+    ["working copy changed", (receipt) => ({
+      ...receipt,
+      context: {
+        ...receipt.context,
+        workingCopyId: "work_other",
+      },
+    })],
+    ["version changed", (receipt) => ({
+      ...receipt,
+      context: {
+        ...receipt.context,
+        versionId: "version_other",
+      },
+    })],
+    ["exact path missing", (receipt) => ({
+      ...receipt,
+      context: Object.fromEntries(
+        Object.entries(receipt.context).filter(([key]) => key !== "exactSourcePath"),
+      ),
+    })],
+    ["source hash missing", (receipt) => ({
+      ...receipt,
+      context: Object.fromEntries(
+        Object.entries(receipt.context).filter(([key]) => key !== "sourceSha256"),
+      ),
+    })],
+    ["session epoch missing", (receipt) => ({
+      ...receipt,
+      context: Object.fromEntries(
+        Object.entries(receipt.context).filter(([key]) => key !== "sessionEpoch"),
+      ),
+    })],
+    ["session epoch changed", (receipt) => ({
+      ...receipt,
+      context: {
+        ...receipt.context,
+        sessionEpoch: receipt.context.sessionEpoch + 1,
+      },
+    })],
+  ];
+  for (const [label, mutate] of mutations) {
+    const harness = createHarness({
+      openTarget: managedOpenTarget(OLD_PATH),
+      bridge: {
+        async workspace(sourcePath) {
+          return {
+            ...workspacePayload(sourcePath, OLD_HTML),
+            projectId: "project_old",
+            documentId: "document_old",
+          };
+        },
+      },
+    });
+    const authorityReceipt = harness.documentSession.publishAuthority({
+      html: OLD_HTML,
+      persistedSourceSha256: sha256(OLD_HTML),
+      workingHtmlSha256: sha256(OLD_HTML),
+      context: harness.oldContext,
+      operationId: `authority-reload-${label}`,
+    }).sourceReceipt;
+    assert.equal(harness.documentSession.confirmCanvas({
+      generation: authorityReceipt.canvasGeneration,
+      renderedSha256: sha256(OLD_HTML),
+      workingHtmlSha256: sha256(OLD_HTML),
+      renderedHtml: OLD_HTML,
+      receipt: authorityReceipt,
+    }), true);
+    const beforeGeneration = authorityReceipt.canvasGeneration;
+
+    const outcome = await harness.workflow.refreshWorkspace({
+      sourcePath: OLD_PATH,
+      epoch: harness.projectSession.epoch,
+      authorityReceiptContinuation: mutate(authorityReceipt),
+    });
+
+    assert.equal(outcome.status, "succeeded", `${label}: ${JSON.stringify(outcome)}`);
+    assert.notEqual(
+      harness.documentSession.sourceReceipt.sequence,
+      authorityReceipt.sequence,
+      `${label} continuation must publish a fresh authority receipt`,
+    );
+    assert.ok(
+      harness.documentSession.canvasGeneration > beforeGeneration,
+      `${label} continuation must advance Canvas generation`,
+    );
+    harness.workflow.dispose();
+  }
+});
+
+test("a reload continuation with a changed managed identity publishes a new authority receipt", async (t) => {
+  const harness = createHarness({
+    bridge: {
+      async workspace(sourcePath) {
+        return {
+          ...workspacePayload(sourcePath, OLD_HTML),
+          projectId: "project_rebound",
+          documentId: "document_rebound",
+        };
+      },
+    },
+  });
+  t.after(() => harness.workflow.dispose());
+  const authorityReceipt = harness.documentSession.publishAuthority({
+    html: OLD_HTML,
+    persistedSourceSha256: sha256(OLD_HTML),
+    workingHtmlSha256: sha256(OLD_HTML),
+    context: harness.oldContext,
+    operationId: "authority-reload-identity-mismatch",
+  }).sourceReceipt;
+  assert.equal(harness.documentSession.confirmCanvas({
+    generation: authorityReceipt.canvasGeneration,
+    renderedSha256: sha256(OLD_HTML),
+    workingHtmlSha256: sha256(OLD_HTML),
+    renderedHtml: OLD_HTML,
+    receipt: authorityReceipt,
+  }), true);
+
+  const outcome = await harness.workflow.refreshWorkspace({
+    sourcePath: OLD_PATH,
+    epoch: harness.projectSession.epoch,
+    authorityReceiptContinuation: authorityReceipt,
+  });
+
+  assert.equal(outcome.status, "succeeded", JSON.stringify(outcome));
+  assert.notEqual(harness.documentSession.sourceReceipt.sequence, authorityReceipt.sequence);
+  assert.equal(harness.documentSession.sourceReceipt.origin, "authority");
+  assert.equal(harness.documentSession.sourceReceipt.projectId, "project_rebound");
+  assert.equal(harness.documentSession.canvasGeneration, authorityReceipt.canvasGeneration + 1);
 });
 
 test("Supplemental failure never rolls back committed Core HTML", async (t) => {

@@ -57,6 +57,14 @@ test("retired Runtime handoff and comment-layout restore paths stay deleted", ()
   assert.doesNotMatch(editor, /lastValidCommentLayoutRef/u);
 });
 
+test("Canvas source transitions are receipt-gated rather than HTML-echo guessed", () => {
+  const editor = source("app/components/HtmlCanvasEditor.tsx");
+  assert.doesNotMatch(editor, /lastEmittedHtmlRef|pendingHtmlEchoesRef/u);
+  assert.match(editor, /lastSourceReceiptRef/u);
+  assert.match(editor, /sameSourceReceiptContext/u);
+  assert.match(editor, /sourceReceipt\.origin !== "authority"/u);
+});
+
 test("ADR 0065 no longer requires native session or comment-layout handoff restore", () => {
   const adr = source("docs/decisions/0065-disposable-edit-runtime.md");
   assert.match(adr, /hidden Candidate/u);

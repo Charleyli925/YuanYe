@@ -2,11 +2,28 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
 
-import { DocumentSession } from "../app/application/document-session.js";
+import {
+  DocumentSession,
+  isSourceReceipt,
+} from "../app/application/document-session.js";
 
 function sha256(value) {
   return `sha256:${createHash("sha256").update(value).digest("hex")}`;
 }
+
+const RECEIPT_CONTEXT = Object.freeze({
+  epoch: 7,
+  projectId: "project_receipt",
+  documentId: "document_receipt",
+  sourcePath: "/tmp/receipt-document.html",
+  projectRootPath: "/tmp/receipt-project",
+  targetKind: "working-copy",
+  workingCopyId: "working_receipt",
+  versionId: "version_receipt",
+  exactSourcePath: "/tmp/receipt-document.html",
+  sourceSha256: sha256("<main>one</main>"),
+  sessionEpoch: 7,
+});
 
 test("document session owns source bytes, revisions and pending write", () => {
   const session = new DocumentSession({
@@ -298,19 +315,16 @@ test("beginEdit pending the current canvas generation without rebuilding it", ()
   }), true);
 
   const edited = "<main>two</main>";
-  session.beginEdit(edited);
+  const editedDigest = sha256(edited);
+  session.beginEdit(edited, { sourceSha256: editedDigest });
   assert.equal(session.canvasGeneration, 1);
   assert.equal(session.canvasAuthority.status, "pending");
   assert.equal(session.canvasAuthority.generation, 1);
   assert.equal(session.confirmCanvas({
     generation: 1,
     renderedSha256: sha256(edited),
-  }), false);
-  assert.equal(session.persistedSourceSha256, digest);
-  assert.equal(session.confirmWorkingHtml({
-    revision: 1,
-    htmlSha256: sha256(edited),
   }), true);
+  assert.equal(session.persistedSourceSha256, digest);
   assert.equal(session.confirmCanvas({
     generation: 1,
     renderedSha256: sha256("different"),
@@ -318,7 +332,41 @@ test("beginEdit pending the current canvas generation without rebuilding it", ()
   }), false);
   assert.equal(session.confirmCanvas({
     generation: 1,
-    renderedSha256: sha256(edited),
+    renderedSha256: editedDigest,
+  }), false);
+});
+
+test("a receipt with no working hash cannot self-certify a Canvas", () => {
+  const html = "<main>one</main>";
+  const digest = sha256(html);
+  const edited = "<main>two</main>";
+  const editedDigest = sha256(edited);
+  const session = new DocumentSession({ html, persistedSourceSha256: digest });
+  session.beginEdit(edited);
+  assert.equal(session.confirmWorkingHtml({
+    revision: 1,
+    htmlSha256: editedDigest,
+  }), true);
+  assert.equal(session.sourceReceipt.sourceSha256, "");
+  assert.equal(session.confirmCanvas({
+    generation: session.canvasGeneration,
+    renderedSha256: editedDigest,
+    workingHtmlSha256: editedDigest,
+    renderedHtml: edited,
+    receipt: session.sourceReceipt,
+  }), false);
+  const corrected = session.publishAuthority({
+    html: edited,
+    persistedSourceSha256: editedDigest,
+    workingHtmlSha256: editedDigest,
+    operationId: "corrected-working-hash",
+  }).sourceReceipt;
+  assert.equal(session.confirmCanvas({
+    generation: corrected.canvasGeneration,
+    renderedSha256: editedDigest,
+    workingHtmlSha256: editedDigest,
+    renderedHtml: edited,
+    receipt: corrected,
   }), true);
 });
 
@@ -333,6 +381,10 @@ test("a late canvas ACK cannot change a newer generation or a failed verificatio
     generation: 1,
     error: "画布没有在时限内确认载入目标 HTML。",
   }), true);
+  assert.equal(session.failCanvas({
+    generation: 1,
+    error: "duplicate failure",
+  }), false);
   assert.equal(session.canvasAuthority.status, "failed");
 
   session.publishAuthority({
@@ -345,4 +397,341 @@ test("a late canvas ACK cannot change a newer generation or a failed verificatio
   }), false);
   assert.equal(session.canvasAuthority.status, "pending");
   assert.equal(session.canvasAuthority.generation, 2);
+});
+
+test("same-byte authority publication and reload advance receipt and generation", () => {
+  const html = "<main>same</main>";
+  const digest = sha256(html);
+  const session = new DocumentSession({
+    html,
+    persistedSourceSha256: digest,
+    context: RECEIPT_CONTEXT,
+  });
+  const before = session.sourceReceipt;
+
+  const published = session.publishAuthority({
+    html,
+    persistedSourceSha256: digest,
+    context: RECEIPT_CONTEXT,
+    operationId: "authority-same-byte",
+  });
+  const reloaded = session.reloadCanvas({
+    context: RECEIPT_CONTEXT,
+    operationId: "authority-same-byte-reload",
+  });
+
+  assert.equal(published.html, html);
+  assert.equal(reloaded.html, html);
+  assert.equal(published.canvasGeneration, before.canvasGeneration + 1);
+  assert.equal(reloaded.canvasGeneration, published.canvasGeneration + 1);
+  assert.equal(published.sourceReceipt.origin, "authority");
+  assert.equal(reloaded.sourceReceipt.origin, "authority");
+  assert.ok(published.sourceReceipt.sequence > before.sequence);
+  assert.ok(reloaded.sourceReceipt.sequence > published.sourceReceipt.sequence);
+});
+
+test("local and history receipts keep the current canvas generation", () => {
+  const session = new DocumentSession({
+    html: "<main>one</main>",
+    persistedSourceSha256: sha256("<main>one</main>"),
+    context: RECEIPT_CONTEXT,
+  });
+  const generation = session.canvasGeneration;
+
+  session.beginEdit("<main>two</main>", {
+    origin: "local-edit",
+    operationId: "local-edit-one",
+    sourceSha256: sha256("<main>two</main>"),
+    context: RECEIPT_CONTEXT,
+  });
+  const localReceipt = session.sourceReceipt;
+  session.beginEdit("<main>three</main>", {
+    origin: "history",
+    operationId: "history-one",
+    sourceSha256: sha256("<main>three</main>"),
+    context: RECEIPT_CONTEXT,
+  });
+  const historyReceipt = session.sourceReceipt;
+
+  assert.equal(localReceipt.origin, "local-edit");
+  assert.equal(historyReceipt.origin, "history");
+  assert.equal(localReceipt.canvasGeneration, generation);
+  assert.equal(historyReceipt.canvasGeneration, generation);
+  assert.ok(historyReceipt.sequence > localReceipt.sequence);
+});
+
+test("a late A receipt cannot acknowledge or overwrite newer B source", () => {
+  const htmlA = "<main>A</main>";
+  const htmlB = "<main>B</main>";
+  const session = new DocumentSession({
+    html: "<main>start</main>",
+    persistedSourceSha256: sha256("<main>start</main>"),
+    context: RECEIPT_CONTEXT,
+  });
+  session.beginEdit(htmlA, {
+    origin: "local-edit",
+    operationId: "edit-A",
+    sourceSha256: sha256(htmlA),
+    context: RECEIPT_CONTEXT,
+  });
+  const receiptA = session.sourceReceipt;
+  session.beginEdit(htmlB, {
+    origin: "local-edit",
+    operationId: "edit-B",
+    sourceSha256: sha256(htmlB),
+    context: RECEIPT_CONTEXT,
+  });
+  const receiptB = session.sourceReceipt;
+  session.confirmWorkingHtml({ revision: session.editRevision, htmlSha256: sha256(htmlB) });
+
+  assert.equal(session.confirmCanvas({
+    generation: receiptA.canvasGeneration,
+    renderedSha256: sha256(htmlB),
+    workingHtmlSha256: sha256(htmlB),
+    renderedHtml: htmlB,
+    receipt: receiptA,
+  }), false);
+  assert.equal(session.html, htmlB);
+  assert.equal(session.sourceReceipt.sequence, receiptB.sequence);
+  assert.equal(session.confirmCanvas({
+    generation: receiptB.canvasGeneration,
+    renderedSha256: sha256(htmlB),
+    workingHtmlSha256: sha256(htmlB),
+    renderedHtml: htmlB,
+    receipt: receiptB,
+  }), true);
+});
+
+test("duplicate, stale and context-mismatched receipts are discarded", () => {
+  const html = "<main>receipt</main>";
+  const session = new DocumentSession({
+    html,
+    persistedSourceSha256: sha256(html),
+    context: RECEIPT_CONTEXT,
+  });
+  session.confirmWorkingHtml({ revision: session.editRevision, htmlSha256: sha256(html) });
+  const first = session.sourceReceipt;
+  const exactAck = {
+    generation: first.canvasGeneration,
+    renderedSha256: sha256(html),
+    workingHtmlSha256: sha256(html),
+    renderedHtml: html,
+    receipt: first,
+  };
+  assert.equal(session.confirmCanvas({
+    generation: first.canvasGeneration,
+    renderedSha256: sha256(html),
+    workingHtmlSha256: sha256(html),
+    receipt: first,
+  }), false);
+  assert.equal(session.confirmCanvas({
+    ...exactAck,
+    renderedHtml: "<main>not-the-source</main>",
+  }), false);
+  assert.equal(session.confirmCanvas({
+    ...exactAck,
+    receipt: { ...first, operationId: "forged-operation" },
+  }), false);
+  assert.equal(session.confirmCanvas(exactAck), true);
+  assert.equal(session.confirmCanvas(exactAck), false);
+
+  const next = session.publishAuthority({
+    html,
+    persistedSourceSha256: sha256(html),
+    context: RECEIPT_CONTEXT,
+    operationId: "authority-next",
+  }).sourceReceipt;
+  const wrongContext = {
+    ...next,
+    context: { ...RECEIPT_CONTEXT, documentId: "other-document" },
+  };
+  assert.equal(session.confirmWorkingHtml({
+    revision: session.editRevision,
+    htmlSha256: sha256(html),
+  }), true);
+  assert.equal(session.confirmCanvas({
+    generation: next.canvasGeneration,
+    renderedSha256: sha256(html),
+    workingHtmlSha256: sha256(html),
+    renderedHtml: html,
+    receipt: first,
+  }), false);
+  assert.equal(session.confirmCanvas({
+    generation: next.canvasGeneration,
+    renderedSha256: sha256(html),
+    workingHtmlSha256: sha256(html),
+    renderedHtml: html,
+    receipt: wrongContext,
+  }), false);
+  for (const [field, value] of [
+    ["projectId", "other-project"],
+    ["epoch", RECEIPT_CONTEXT.epoch + 1],
+    ["sourcePath", "/tmp/other-document.html"],
+  ]) {
+    assert.equal(session.confirmCanvas({
+      generation: next.canvasGeneration,
+      renderedSha256: sha256(html),
+      workingHtmlSha256: sha256(html),
+      renderedHtml: html,
+      receipt: {
+        ...next,
+        context: { ...RECEIPT_CONTEXT, [field]: value },
+      },
+    }), false, `receipt context field ${field} must be fenced`);
+  }
+});
+
+test("receipt target context never infers exact path or session epoch", () => {
+  const html = "<main>strict-target</main>";
+  const session = new DocumentSession({
+    html,
+    persistedSourceSha256: sha256(html),
+    context: RECEIPT_CONTEXT,
+  });
+  const receipt = session.publishAuthority({
+    html,
+    persistedSourceSha256: sha256(html),
+    context: RECEIPT_CONTEXT,
+    operationId: "strict-target-context",
+  }).sourceReceipt;
+  for (const field of ["exactSourcePath", "sessionEpoch"]) {
+    const incompleteReceipt = {
+      ...receipt,
+      context: Object.fromEntries(
+        Object.entries(receipt.context).filter(([key]) => key !== field),
+      ),
+    };
+    assert.equal(isSourceReceipt(incompleteReceipt), false, `${field} is required`);
+    assert.equal(session.confirmCanvas({
+      generation: receipt.canvasGeneration,
+      renderedSha256: sha256(html),
+      workingHtmlSha256: sha256(html),
+      renderedHtml: html,
+      receipt: incompleteReceipt,
+    }), false, `${field} omission cannot ACK Canvas`);
+    assert.equal(session.canvasAuthority.status, "pending");
+  }
+});
+
+test("failed receipts are terminal until a newer authority receipt is published", () => {
+  const html = "<main>terminal</main>";
+  const digest = sha256(html);
+  const session = new DocumentSession({
+    html,
+    persistedSourceSha256: digest,
+    context: RECEIPT_CONTEXT,
+  });
+  const first = session.sourceReceipt;
+
+  assert.equal(session.failCanvas({
+    generation: first.canvasGeneration,
+    error: "timeout",
+    receipt: first,
+  }), true);
+  assert.equal(session.canvasAuthority.status, "failed");
+  assert.equal(session.confirmCanvas({
+    generation: first.canvasGeneration,
+    renderedSha256: digest,
+    workingHtmlSha256: digest,
+    renderedHtml: html,
+    receipt: first,
+  }), false);
+  assert.equal(session.canvasAuthority.status, "failed");
+
+  const second = session.publishAuthority({
+    html,
+    persistedSourceSha256: digest,
+    context: RECEIPT_CONTEXT,
+    operationId: "authority-after-timeout",
+  }).sourceReceipt;
+  assert.ok(second.sequence > first.sequence);
+  assert.equal(session.confirmCanvas({
+    generation: second.canvasGeneration,
+    renderedSha256: digest,
+    workingHtmlSha256: digest,
+    renderedHtml: html,
+    receipt: second,
+  }), true);
+  assert.equal(session.failCanvas({
+    generation: second.canvasGeneration,
+    error: "late failure",
+    receipt: second,
+  }), false);
+  assert.equal(session.canvasAuthority.status, "verified");
+});
+
+test("session incarnation fences lower and equal sequence receipts across rebuilds", () => {
+  const htmlA = "<main>A</main>";
+  const htmlB = "<main>B</main>";
+  const firstSession = new DocumentSession({
+    html: htmlA,
+    persistedSourceSha256: sha256(htmlA),
+    context: RECEIPT_CONTEXT,
+  });
+  const receiptA = firstSession.sourceReceipt;
+  const rebuiltSession = new DocumentSession({
+    html: htmlB,
+    persistedSourceSha256: sha256(htmlB),
+    context: RECEIPT_CONTEXT,
+  });
+  const receiptB = rebuiltSession.sourceReceipt;
+
+  assert.notEqual(receiptA.sessionIncarnation, receiptB.sessionIncarnation);
+  assert.equal(receiptA.sequence, receiptB.sequence);
+  assert.equal(rebuiltSession.confirmCanvas({
+    generation: receiptB.canvasGeneration,
+    renderedSha256: sha256(htmlB),
+    workingHtmlSha256: sha256(htmlB),
+    renderedHtml: htmlB,
+    receipt: receiptA,
+  }), false, "old incarnation cannot ACK the rebuilt document");
+
+  const equalSequenceDifferentOperation = {
+    ...receiptB,
+    operationId: "different-operation",
+    sourceSha256: sha256("<main>other</main>"),
+  };
+  assert.equal(rebuiltSession.confirmCanvas({
+    generation: receiptB.canvasGeneration,
+    renderedSha256: sha256(htmlB),
+    workingHtmlSha256: sha256(htmlB),
+    renderedHtml: htmlB,
+    receipt: equalSequenceDifferentOperation,
+  }), false, "equal sequence with different operation/hash is stale");
+  assert.equal(rebuiltSession.confirmCanvas({
+    generation: receiptB.canvasGeneration,
+    renderedSha256: sha256(htmlB),
+    workingHtmlSha256: sha256(htmlB),
+    renderedHtml: htmlB,
+    receipt: receiptB,
+  }), true);
+
+  const sameByteSession = new DocumentSession({
+    html: htmlB,
+    persistedSourceSha256: sha256(htmlB),
+    context: RECEIPT_CONTEXT,
+  });
+  const sameByteA = sameByteSession.sourceReceipt;
+  const sameByteB = sameByteSession.publishAuthority({
+    html: htmlB,
+    persistedSourceSha256: sha256(htmlB),
+    context: RECEIPT_CONTEXT,
+    operationId: sameByteA.operationId,
+  }).sourceReceipt;
+  assert.equal(sameByteA.operationId, sameByteB.operationId);
+  assert.ok(sameByteB.canvasGeneration > sameByteA.canvasGeneration);
+  assert.equal(sameByteSession.confirmCanvas({
+    generation: sameByteB.canvasGeneration,
+    renderedSha256: sha256(htmlB),
+    workingHtmlSha256: sha256(htmlB),
+    renderedHtml: htmlB,
+    receipt: sameByteA,
+  }), false, "same-byte authority cannot reuse the prior receipt");
+  assert.equal(sameByteSession.confirmCanvas({
+    generation: sameByteB.canvasGeneration,
+    renderedSha256: sha256(htmlB),
+    workingHtmlSha256: sha256(htmlB),
+    renderedHtml: htmlB,
+    receipt: sameByteB,
+  }), true);
 });

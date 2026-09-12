@@ -395,11 +395,18 @@ test("managed registration activates the exact V1 Working Copy before publishing
     },
   });
 
+  const beforeGeneration = harness.documentSession.canvasGeneration;
   const outcome = await harness.controller.ensureRegistered();
 
   assert.equal(outcome.status, "succeeded");
+  assert.equal(harness.documentSession.canvasGeneration, beforeGeneration + 1);
+  assert.equal(harness.canvasInvalidations, 1);
   assert.equal(harness.projectSession.context?.sourcePath, workingCopyPath);
   assert.equal(harness.projectSession.context?.workingCopyId, "work_ver_0001");
+  assert.equal(harness.documentSession.sourceReceipt.context.projectId, outcome.value.projectId);
+  assert.equal(harness.documentSession.sourceReceipt.context.documentId, outcome.value.documentId);
+  assert.equal(harness.documentSession.sourceReceipt.context.sourcePath, outcome.value.sourcePath);
+  assert.equal(harness.documentSession.sourceReceipt.context.workingCopyId, outcome.value.workingCopyId);
   assert.equal(calls.length, 1);
   assert.deepEqual(calls[0], {
     previousSourcePath: SOURCE_PATH,
@@ -455,16 +462,29 @@ test("managed registration fails closed when its desktop Working Copy activation
   assert.equal(harness.projectSession.sourcePath, SOURCE_PATH);
 });
 
-test("workspace registration confirms matching canonical bytes without rebuilding the canvas", async () => {
+test("workspace registration publishes a same-byte authority and rebuild fence", async () => {
   const html = "<main>canonical source</main>";
   const harness = createHarness({ html });
   const beforeGeneration = harness.documentSession.canvasGeneration;
+  const beforeReceipt = harness.documentSession.sourceReceipt;
 
   const outcome = await harness.controller.ensureRegistered();
 
   assert.equal(outcome.status, "succeeded");
-  assert.equal(harness.documentSession.canvasGeneration, beforeGeneration);
-  assert.equal(harness.canvasInvalidations, 0);
+  assert.equal(harness.documentSession.canvasGeneration, beforeGeneration + 1);
+  assert.equal(harness.canvasInvalidations, 1);
+  assert.equal(harness.documentSession.sourceReceipt.origin, "authority");
+  assert.ok(harness.documentSession.sourceReceipt.sequence > beforeReceipt.sequence);
+  assert.equal(harness.documentSession.sourceReceipt.context.projectId, outcome.value.projectId);
+  assert.equal(harness.documentSession.sourceReceipt.context.documentId, outcome.value.documentId);
+  assert.equal(harness.documentSession.sourceReceipt.context.sourcePath, outcome.value.sourcePath);
+  assert.equal(harness.documentSession.confirmCanvas({
+    generation: harness.documentSession.canvasGeneration,
+    renderedSha256: sha256(html),
+    workingHtmlSha256: sha256(html),
+    renderedHtml: html,
+    receipt: beforeReceipt,
+  }), false, "pre-registration ACK must not settle the registered context");
   harness.controller.dispose();
 });
 

@@ -1,6 +1,11 @@
 import type { BridgeClient } from "./bridge-client.js";
 import type { CommentSession } from "./comment-session.js";
-import type { DocumentSession, PersistedBoundaryResult } from "./document-session.js";
+import type {
+  DocumentSession,
+  DocumentCanvasRenderObservation,
+  DocumentSourceReceipt,
+  PersistedBoundaryResult,
+} from "./document-session.js";
 import type { ProjectContext, ProjectSession } from "./project-session.js";
 import type {
   OpenDocumentMemoryHistory,
@@ -36,7 +41,8 @@ export type DocumentWorkflowCanvasPort = Readonly<{
     html: string,
     sourceSha256: string,
     context?: ProjectContext,
-  ): Promise<void>;
+    receipt?: DocumentSourceReceipt | null,
+  ): Promise<DocumentCanvasRenderObservation>;
   freeze?(reason: string): Promise<{ ok: boolean; reason?: string }> | { ok: boolean; reason?: string };
   adoptHistorySource?(html: string, target: unknown, selection: unknown): void;
 }>;
@@ -149,7 +155,11 @@ export class DocumentWorkflow {
     mutation?: unknown;
     sourceTransaction?: unknown;
     context?: Partial<ProjectContext>;
-  }): DocumentWorkflowOutcome<{ revision: number; queued: boolean }>;
+  }): DocumentWorkflowOutcome<{
+    revision: number;
+    queued: boolean;
+    receipt: DocumentSourceReceipt | null;
+  }>;
   flush(input?: { throughRevision?: number }): Promise<DocumentWorkflowOutcome<{ revision: number; idle?: boolean }>>;
   performHistoryAction(input: {
     direction: "undo" | "redo";
@@ -172,6 +182,7 @@ export class DocumentWorkflow {
   ensureCurrentCanvas(input?: {
     context?: ProjectContext;
   }): Promise<DocumentWorkflowOutcome<Record<string, unknown>>>;
+  confirmCanvas(observation: DocumentCanvasRenderObservation): boolean;
   reconcileBoundary(input: {
     frozenHtml: string;
     reportedSourceSha256?: string | null;

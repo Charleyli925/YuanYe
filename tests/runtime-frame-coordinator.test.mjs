@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { RuntimeFrameCoordinator } from "../app/components/runtime-frame-coordinator.js";
+import {
+  RuntimeFrameCoordinator,
+  runtimeCandidateAlreadyActive,
+} from "../app/components/runtime-frame-coordinator.js";
 
 function begin(coordinator, generation) {
   return coordinator.beginCandidate({
@@ -161,6 +164,76 @@ test("a failed static-disabled candidate preserves the old active without anothe
   });
   assert.equal(coordinator.snapshot.activeSlotId, active.slotId);
   assert.equal(coordinator.snapshot.lastKnownGood?.candidateId, active.candidateId);
+});
+
+test("deferred dynamic replay requires the settled runtime and complete active identity", () => {
+  const coordinator = new RuntimeFrameCoordinator();
+  const active = begin(coordinator, 4);
+  promote(coordinator, active);
+  const snapshot = coordinator.snapshot;
+  const request = { kind: "dynamic", sourceRevision: active.sourceRevision };
+  const runtimeFrame = {
+    attempt: active,
+    elementGeneration: active.generation,
+    activation: "ready",
+    settled: true,
+  };
+
+  assert.equal(runtimeCandidateAlreadyActive({
+    request,
+    runtimeFrame,
+    frameLoadGeneration: active.generation,
+    snapshot,
+  }), true);
+  assert.equal(runtimeCandidateAlreadyActive({
+    request,
+    runtimeFrame: null,
+    frameLoadGeneration: active.generation,
+    snapshot,
+  }), false, "an old lastKnownGood cannot satisfy a new physical frame");
+  assert.equal(runtimeCandidateAlreadyActive({
+    request,
+    runtimeFrame: { ...runtimeFrame, activation: "pending" },
+    frameLoadGeneration: active.generation,
+    snapshot,
+  }), false);
+  assert.equal(runtimeCandidateAlreadyActive({
+    request,
+    runtimeFrame: { ...runtimeFrame, elementGeneration: active.generation + 1 },
+    frameLoadGeneration: active.generation,
+    snapshot,
+  }), false);
+  assert.equal(runtimeCandidateAlreadyActive({
+    request,
+    runtimeFrame: {
+      ...runtimeFrame,
+      attempt: { ...active, candidateId: "forged-candidate" },
+    },
+    frameLoadGeneration: active.generation,
+    snapshot,
+  }), false, "same source/kind is not enough without the full identity");
+});
+
+test("deferred static replay keeps its existing last-known-good semantics", () => {
+  const coordinator = new RuntimeFrameCoordinator();
+  const dynamic = begin(coordinator, 5);
+  promote(coordinator, dynamic);
+  const staticCandidate = coordinator.beginCandidate({
+    generation: 6,
+    sourceRevision: dynamic.sourceRevision,
+    kind: "static-disabled",
+  }).identity;
+  promote(coordinator, staticCandidate);
+
+  assert.equal(runtimeCandidateAlreadyActive({
+    request: {
+      kind: "static-disabled",
+      sourceRevision: staticCandidate.sourceRevision,
+    },
+    runtimeFrame: null,
+    frameLoadGeneration: 0,
+    snapshot: coordinator.snapshot,
+  }), true);
 });
 
 test("the first failure requests static fallback and clears its slot", () => {

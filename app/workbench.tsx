@@ -93,7 +93,14 @@ import {
 import { createWorkspaceControllerCodecs } from "./application/workspace-controller-codecs.js";
 import { createDesktopRecoveryJournalPort } from "./workbench/desktop-recovery-journal-port";
 import type { CommentSessionSnapshot } from "./application/comment-session.js";
-import type { DocumentSessionSnapshot } from "./application/document-session.js";
+import {
+  sameSourceReceipt,
+} from "./application/document-session.js";
+import type {
+  DocumentCanvasRenderObservation,
+  DocumentSessionSnapshot,
+  DocumentSourceReceipt,
+} from "./application/document-session.js";
 import { runLocalUserAction } from "./application/local-action-outcomes.js";
 import {
   ReviewAnalysisCancelledError,
@@ -342,6 +349,7 @@ const INITIAL_DOCUMENT_SNAPSHOT: DocumentSessionSnapshot = {
   persistedSourceSha256: null,
   workingHtmlSha256: null,
   canvasGeneration: 0,
+  sourceReceipt: null,
   canvasAuthority: {
     status: "idle",
     generation: 0,
@@ -415,6 +423,7 @@ function requiredWorkspaceController(
 type DocumentEditOutcome = DocumentWorkflowOutcome<{
   revision: number;
   queued: boolean;
+  receipt: DocumentSourceReceipt | null;
 }>;
 
 function documentEditFailureReason(outcome: DocumentEditOutcome): string {
@@ -505,8 +514,9 @@ export default function Workbench() {
     expectedHtml: string,
     expectedSha256: string,
     context?: ProjectContext,
+    receipt?: DocumentSourceReceipt | null,
     previousFrameGeneration?: number | null,
-  ) => Promise<void>>(async () => {
+  ) => Promise<DocumentCanvasRenderObservation>>(async () => {
     throw new Error("画布核对尚未完成初始化。");
   });
   const sourceTransitioningRef = useRef(false);
@@ -615,6 +625,7 @@ export default function Workbench() {
     shellSnapshot?.project?.projectApplication
     ?? INITIAL_PROJECT_APPLICATION_SNAPSHOT;
   const html = documentSnapshot.html;
+  const sourceReceipt = documentSnapshot.sourceReceipt;
   const sourceSha256 = documentSnapshot.persistedSourceSha256;
   const canvasGeneration = documentSnapshot.canvasGeneration;
   const editRevision = documentSnapshot.editRevision;
@@ -973,11 +984,12 @@ export default function Workbench() {
           errorMessage: productErrorMessage,
         }),
         canvas: {
-          verifyRendered: (expectedHtml, expectedSha256, context) => (
+          verifyRendered: (expectedHtml, expectedSha256, context, receipt) => (
             verifyCanvasRenderedRef.current(
               expectedHtml,
               expectedSha256,
               context as ProjectContext | undefined,
+              receipt,
             )
           ),
           freeze: (reason) => fenceAndFreezeCurrentCanvasRef.current(reason),
@@ -1074,10 +1086,12 @@ export default function Workbench() {
               expectedHtml: string,
               expectedSha256: string,
               context?: ProjectContext,
+              receipt?: DocumentSourceReceipt | null,
             ) => verifyCanvasRenderedRef.current(
               expectedHtml,
               expectedSha256,
               context,
+              receipt,
             ),
             showCommitBlocked: (reason: string) => (
               editorRef.current?.showCommitBlocked(reason)
@@ -1310,7 +1324,9 @@ export default function Workbench() {
             expectedHtml: string,
             expectedSha256: string,
             context?: ProjectContext,
-          ) => verifyCanvasRenderedRef.current(expectedHtml, expectedSha256, context),
+            receipt?: DocumentSourceReceipt | null,
+          ) => verifyCanvasRenderedRef.current(expectedHtml, expectedSha256, context, receipt)
+            .then(() => undefined),
           invalidateRenderAcks: invalidateCanvasRenderAcks,
           unlock: () => editorRef.current?.unlockNow?.(),
           requestFrame: (callback: () => void) => window.requestAnimationFrame(callback),
@@ -1344,32 +1360,25 @@ export default function Workbench() {
     ));
   }, []);
   const acknowledgeCanvasRender = useCallback((
-    surface: CanvasMode,
-    generation: number,
-    sha256: string | null,
+    observation: DocumentCanvasRenderObservation,
   ): boolean => {
-    if (generation !== currentDocumentSessionSnapshot().canvasGeneration) return false;
-    if (surface === "edit") {
-      if (!sha256) return false;
-      const acknowledged = workspaceControllerRef.current?.acknowledgeEditCanvas({
-        generation,
-        renderedSha256: sha256,
-      }) === true;
-      return acknowledged;
-    }
-    setCanvasRenderAcks((current) => ({
-      ...current,
-      preview: sha256 ? { generation, sha256 } : null,
-    }));
-    return true;
+    const current = currentDocumentSessionSnapshot();
+    if (
+      observation.receipt.canvasGeneration !== current.canvasGeneration
+      || !sameSourceReceipt(observation.receipt, current.sourceReceipt)
+    ) return false;
+    return workspaceControllerRef.current?.acknowledgeEditCanvas(observation) === true;
   }, [currentDocumentSessionSnapshot]);
   const renderedContentSha256 =
     canvasRenderAcks.edit?.generation === canvasGeneration
       ? canvasRenderAcks.edit.sha256
       : null;
   const handlePreviewReady = useCallback((sha256: string | null) => {
-    acknowledgeCanvasRender("preview", canvasGeneration, sha256);
-  }, [acknowledgeCanvasRender, canvasGeneration]);
+    setCanvasRenderAcks((current) => ({
+      ...current,
+      preview: sha256 ? { generation: canvasGeneration, sha256 } : null,
+    }));
+  }, [canvasGeneration]);
   const activeRun = runSnapshot.activeRun;
   const recentRunOutcome = runSnapshot.recentOutcome;
   const projectLocked = runSnapshot.activeLocked;
@@ -2566,11 +2575,21 @@ export default function Workbench() {
     expectedHtml: string,
     expectedSha256: string,
     context?: ProjectContext,
+    receipt?: DocumentSourceReceipt | null,
     previousFrameGeneration?: number | null,
-  ): Promise<void> => {
+    previousFrameDocument?: Document | null,
+  ): Promise<DocumentCanvasRenderObservation> => {
     performance.mark("pageroot:canvas:verify-start");
     let expectedGeneration = currentDocumentSessionSnapshot().canvasGeneration;
-    const waitForCurrentGeneration = async (): Promise<boolean> => {
+    let expectedReceipt = receipt || currentDocumentSessionSnapshot().sourceReceipt;
+    const initialFrameDocument = previousFrameDocument
+      || editorRef.current?.getRenderedFrameDocument()
+      || null;
+    const requirePhysicalReload = Boolean(
+      expectedReceipt?.origin === "authority"
+      && initialFrameDocument,
+    );
+    const waitForCurrentGeneration = async (): Promise<DocumentCanvasRenderObservation | null> => {
       let attemptLimit = 40;
       const runtimeAttemptLimit = Math.ceil(
         EDIT_AUTHOR_RUNTIME_VERIFICATION_DEADLINE_MS / 25,
@@ -2596,27 +2615,45 @@ export default function Workbench() {
         ) {
           throw new Error("画布核对期间当前文档已经切换。");
         }
+        const currentReceipt = currentDocumentSessionSnapshot().sourceReceipt;
+        if (
+          expectedReceipt
+          && (!currentReceipt
+            || !sameSourceReceipt(currentReceipt, expectedReceipt))
+        ) {
+          throw new Error("画布核对期间当前源码回执已经切换。");
+        }
         const renderedSource = editorRef.current?.getRenderedSourceHtml();
         if (renderedSource !== expectedHtml) continue;
-        if (previousFrameGeneration != null
-          && editorRef.current?.getRenderedFrameGeneration() === previousFrameGeneration) {
+        const frameGeneration = editorRef.current?.getRenderedFrameGeneration();
+        const frameDocument = editorRef.current?.getRenderedFrameDocument() || null;
+        if (
+          (previousFrameGeneration != null && frameGeneration === previousFrameGeneration)
+          || (requirePhysicalReload && frameDocument === initialFrameDocument)
+        ) {
           // Same bytes in the old frame are not a reload receipt. Let the new
           // author candidate finish; only a settled failure/static state needs
           // the bounded rebuild below, which must not cancel a healthy load.
-          if (!runtimePending) return false;
+          if (!runtimePending) return null;
           continue;
         }
         const renderedSha256 = await browserSha256(renderedSource);
         if (renderedSha256 !== expectedSha256) {
           throw new Error("画布已载入内容的 Hash 与源 HTML 不一致。");
         }
-        acknowledgeCanvasRender("edit", expectedGeneration, renderedSha256);
+        if (!currentReceipt || frameGeneration == null) continue;
         performance.mark("pageroot:canvas:verify-ack");
-        return true;
+        return Object.freeze({
+          receipt: currentReceipt,
+          renderedHtml: renderedSource,
+          renderedSha256,
+          frameGeneration,
+        });
       }
-      return false;
+      return null;
     };
-    if (await waitForCurrentGeneration()) return;
+    const firstObservation = await waitForCurrentGeneration();
+    if (firstObservation) return firstObservation;
 
     // A missing acknowledgement is a disposable-Canvas failure, not a user
     // conflict. Rebuild exactly once from the authoritative Document snapshot.
@@ -2624,12 +2661,13 @@ export default function Workbench() {
     expectedGeneration = requiredWorkspaceController(
       workspaceControllerRef.current,
     ).reloadDocumentCanvas().canvasGeneration;
+    expectedReceipt = currentDocumentSessionSnapshot().sourceReceipt;
     invalidateCanvasRenderAcks();
     editorRef.current?.rebuildActiveFrame();
-    if (await waitForCurrentGeneration()) return;
+    const rebuiltObservation = await waitForCurrentGeneration();
+    if (rebuiltObservation) return rebuiltObservation;
     throw new Error("画布没有在时限内确认载入目标 HTML。");
   }, [
-    acknowledgeCanvasRender,
     currentControllerSnapshot,
     currentDocumentSessionSnapshot,
     invalidateCanvasRenderAcks,
@@ -2645,6 +2683,7 @@ export default function Workbench() {
     let cancelled = false;
     const expectedHtml = html;
     const expectedGeneration = canvasGeneration;
+    const expectedReceipt = currentDocumentSessionSnapshot().sourceReceipt;
     const verifyInitialRender = async () => {
       for (let attempt = 0; attempt < 40; attempt += 1) {
         await new Promise<void>((resolve) => window.setTimeout(resolve, 25));
@@ -2657,7 +2696,19 @@ export default function Workbench() {
           && currentDocumentSessionSnapshot().canvasGeneration === expectedGeneration
           && currentDocumentSessionSnapshot().workingHtmlSha256 === renderedSha256
         ) {
-          acknowledgeCanvasRender("edit", expectedGeneration, renderedSha256);
+          const currentReceipt = currentDocumentSessionSnapshot().sourceReceipt;
+          const frameGeneration = editorRef.current?.getRenderedFrameGeneration();
+          if (
+            currentReceipt
+            && expectedReceipt
+            && sameSourceReceipt(currentReceipt, expectedReceipt)
+            && frameGeneration != null
+          ) acknowledgeCanvasRender(Object.freeze({
+            receipt: currentReceipt,
+            renderedHtml: expectedHtml,
+            renderedSha256,
+            frameGeneration,
+          }));
         }
         return;
       }
@@ -2675,6 +2726,7 @@ export default function Workbench() {
     editRuntimeRenderPending,
     html,
     sourceSha256,
+    sourceReceipt,
   ]);
 
   const clearAutosaveTimer = useCallback(() => {
@@ -2737,6 +2789,7 @@ export default function Workbench() {
     epochOverride?: number,
     fromDeferred = false,
     sourceTransitionToken?: number,
+    authorityReceiptContinuation?: DocumentSourceReceipt | null,
   ) => {
     if (!workspaceController) return;
     await workspaceController.refreshProject({
@@ -2744,6 +2797,7 @@ export default function Workbench() {
       epoch: epochOverride,
       fromDeferred,
       sourceTransitionToken,
+      authorityReceiptContinuation,
     });
   }, [workspaceController]);
   useEffect(() => {
@@ -3314,7 +3368,7 @@ export default function Workbench() {
     nextHtml: string,
     mutation?: HtmlCanvasMutation,
     sourceTransaction?: HtmlCanvasSourceTransaction,
-  ): boolean => {
+  ): DocumentSourceReceipt | false => {
     const currentRun = currentRunSessionSnapshot();
     const currentDocument = currentDocumentSessionSnapshot();
     if (
@@ -3328,6 +3382,7 @@ export default function Workbench() {
     // A published history projection can accept the next source transaction
     // while its save receipt drains. The history chain validates its base;
     // an in-flight receipt alone must not revoke visible editability.
+    let acceptedReceipt: DocumentSourceReceipt | null = null;
     try {
       const enqueued = enqueueAutosave(nextHtml, mutation, sourceTransaction);
       if (enqueued.status !== "succeeded") {
@@ -3340,6 +3395,8 @@ export default function Workbench() {
         });
         return false;
       }
+      acceptedReceipt = enqueued.value.receipt;
+      if (!acceptedReceipt) return false;
     } catch (cause) {
       reportInternalFailure({
         area: "history",
@@ -3431,19 +3488,28 @@ export default function Workbench() {
           : {}),
       });
     }
-    const renderGeneration = currentDocument.canvasGeneration;
+    const renderGeneration = acceptedReceipt.canvasGeneration;
     void browserSha256(nextHtml).then((renderedSha256) => {
       const settledDocument = currentDocumentSessionSnapshot();
+      const settledReceipt = settledDocument.sourceReceipt;
       if (
         settledDocument.html === nextHtml
         && settledDocument.canvasGeneration === renderGeneration
+        && sameSourceReceipt(settledReceipt, acceptedReceipt)
         && editorRef.current?.getRenderedSourceHtml() === nextHtml
       ) {
-        acknowledgeCanvasRender("edit", renderGeneration, renderedSha256);
+        const frameGeneration = editorRef.current?.getRenderedFrameGeneration();
+        if (frameGeneration == null || !settledReceipt) return;
+        acknowledgeCanvasRender(Object.freeze({
+          receipt: settledReceipt,
+          renderedHtml: nextHtml,
+          renderedSha256,
+          frameGeneration,
+        }));
       }
     });
     workspaceController?.clearCompletedRun();
-    return true;
+    return acceptedReceipt;
   }, [
     acknowledgeCanvasRender,
     currentCommentSessionSnapshot,
@@ -3602,6 +3668,7 @@ export default function Workbench() {
     const operationId = beginSourceTransition();
     if (operationId === null) return false;
     const previousFrameGeneration = editorRef.current?.getRenderedFrameGeneration() ?? null;
+    const previousFrameDocument = editorRef.current?.getRenderedFrameDocument() || null;
     let restored = false;
     try {
       const outcome = await requiredWorkspaceController(workspaceController)
@@ -3618,14 +3685,28 @@ export default function Workbench() {
       if (outcome.status !== "succeeded") {
         throw new Error(outcome.reason);
       }
-      await refreshWorkspace(context.sourcePath, context.epoch);
+      const authorityReceiptContinuation = currentDocumentSessionSnapshot().sourceReceipt;
+      await refreshWorkspace(
+        context.sourcePath,
+        context.epoch,
+        false,
+        undefined,
+        authorityReceiptContinuation,
+      );
       if (
         sourceTransitionOperationRef.current !== operationId
         || !isCurrentProjectContext(context)
       ) return false;
       setFileStatusNotice("已重新读取文件，正在恢复页面…");
       const reloadedDocument = currentDocumentSessionSnapshot();
-      await verifyCanvasRendered(reloadedDocument.html, reloadedDocument.workingHtmlSha256 || await browserSha256(reloadedDocument.html), context, previousFrameGeneration);
+      await verifyCanvasRendered(
+        reloadedDocument.html,
+        reloadedDocument.workingHtmlSha256 || await browserSha256(reloadedDocument.html),
+        context,
+        reloadedDocument.sourceReceipt,
+        previousFrameGeneration,
+        previousFrameDocument,
+      );
       if (sourceTransitionOperationRef.current !== operationId || !isCurrentProjectContext(context)) return false;
       restored = true;
     } catch (cause) {
@@ -6647,6 +6728,7 @@ export default function Workbench() {
                   key={`editor-authority-${documentRuntimeTabId || "none"}`}
                   ref={editorRef}
                   html={html}
+                  sourceReceipt={documentSnapshot.sourceReceipt}
                   semanticRevision={editRevision}
                   sourcePath={canvasSourcePath}
                   height="var(--comment-canvas-height, 760px)"

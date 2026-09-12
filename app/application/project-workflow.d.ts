@@ -257,6 +257,8 @@ export class ProjectWorkflow {
     prepared: PreparedManagedSourceTransition;
     html: string;
     sourceSha256: string;
+    editRevision?: number;
+    lastPersistedRevision?: number;
     publishVersion?(): void;
     publishSessions?(context: ProjectContext): void;
   }): ProjectContext | null;
@@ -273,6 +275,8 @@ export class ProjectWorkflow {
     prepared: PreparedGeneratedSourceTransition;
     html: string;
     sourceSha256: string;
+    editRevision?: number;
+    lastPersistedRevision?: number;
     publishVersion(): void;
   }): ProjectContext | null;
   dispose(): void;

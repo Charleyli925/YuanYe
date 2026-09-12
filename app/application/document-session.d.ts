@@ -1,3 +1,5 @@
+import type { ProjectContext } from "./project-session.js";
+
 export type DocumentPersistState =
   | "idle"
   | "preview-dirty"
@@ -19,11 +21,39 @@ export type DocumentCanvasAuthority = {
   error: string | null;
 };
 
+export type DocumentSourceReceipt = Readonly<{
+  sessionIncarnation: number;
+  sequence: number;
+  origin: "local-edit" | "history" | "authority";
+  operationId: string;
+  editRevision: number;
+  canvasGeneration: number;
+  sourceSha256: string;
+  context: ProjectContext | null;
+  epoch: number | null;
+  projectId: string | null;
+  documentId: string | null;
+  sourcePath: string | null;
+  sessionEpoch: number | null;
+}>;
+
+export function isSourceReceipt(value: unknown): value is DocumentSourceReceipt;
+export function sameSourceReceiptContext(left: unknown, right: unknown): boolean;
+export function sameSourceReceipt(left: unknown, right: unknown): boolean;
+
+export type DocumentCanvasRenderObservation = Readonly<{
+  receipt: DocumentSourceReceipt;
+  renderedHtml: string;
+  renderedSha256: string;
+  frameGeneration: number;
+}>;
+
 export type DocumentSessionSnapshot = {
   html: string;
   persistedSourceSha256: string | null;
   workingHtmlSha256: string | null;
   canvasGeneration: number;
+  sourceReceipt: DocumentSourceReceipt | null;
   canvasAuthority: DocumentCanvasAuthority;
   editRevision: number;
   lastPersistedRevision: number;
@@ -58,6 +88,8 @@ export class DocumentSession<TWrite = unknown> {
     html?: string;
     persistedSourceSha256?: string | null;
     workingHtmlSha256?: string | null;
+    context?: ProjectContext | null;
+    operationId?: string;
   });
   setObserver(
     observer: ((snapshot: DocumentSessionSnapshot) => void) | null,
@@ -78,18 +110,26 @@ export class DocumentSession<TWrite = unknown> {
     workingHtmlSha256?: string | null;
     editRevision?: number;
     lastPersistedRevision?: number;
+    context?: ProjectContext | null;
+    operationId?: string;
   }): DocumentSessionSnapshot;
   publishAuthority(value: {
     html: string;
     persistedSourceSha256?: string | null;
     workingHtmlSha256?: string | null;
+    sourceSha256?: string | null;
     editRevision?: number;
     lastPersistedRevision?: number;
     persistState?: DocumentPersistState;
     persistError?: string;
     pendingWrite?: TWrite | null;
+    context?: ProjectContext | null;
+    operationId?: string;
   }): DocumentSessionSnapshot;
-  reloadCanvas(): DocumentSessionSnapshot;
+  reloadCanvas(value?: {
+    context?: ProjectContext | null;
+    operationId?: string;
+  }): DocumentSessionSnapshot;
   confirmWorkingHtml(value: {
     revision: number;
     htmlSha256: string;
@@ -98,12 +138,20 @@ export class DocumentSession<TWrite = unknown> {
     generation: number;
     renderedSha256: string;
     workingHtmlSha256?: string;
+    renderedHtml?: string;
+    receipt: DocumentSourceReceipt;
   }): boolean;
   failCanvas(value: {
     generation: number;
     error?: string;
+    receipt: DocumentSourceReceipt;
   }): boolean;
-  beginEdit(html: string): number;
+  beginEdit(html: string, value?: {
+    origin?: "local-edit" | "history";
+    operationId?: string;
+    sourceSha256?: string;
+    context?: ProjectContext | null;
+  }): number;
   setHtml(html: string): void;
   setPersistedSourceSha256(persistedSourceSha256: string | null): void;
   setEditRevision(value: number): void;
@@ -133,6 +181,7 @@ export class DocumentSession<TWrite = unknown> {
   readonly persistedSourceSha256: string | null;
   readonly workingHtmlSha256: string | null;
   readonly canvasGeneration: number;
+  readonly sourceReceipt: DocumentSourceReceipt | null;
   readonly canvasAuthority: DocumentCanvasAuthority;
   readonly editRevision: number;
   readonly lastPersistedRevision: number;

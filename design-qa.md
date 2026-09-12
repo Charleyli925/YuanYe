@@ -10,6 +10,49 @@
 - Focused real Electron execution passed 2/2 at the normal window and at 1024px with a long source name, dark authored HTML, hover/focus/disabled states and reduced motion. Screenshot inspection exposed a pre-existing narrow-Review Grid bug: the overlay sidebar retained `grid-column: 2` after the layout became one column, creating a zero-width implicit track offscreen. The narrow rule now releases both Grid axes and raises the overlay above the Review directory; an exact hit-test plus close/reopen journey verifies it. Post-rebase verification also passed real Electron 4/4, including R4 annotation-capacity adoption and discard.
 - Final completion gate `2026-09-12T15-39-43-004Z-task` passed all 10/10 steps against `origin/main`: type/architecture, lint with 0 errors, Node contract/core, web and desktop builds, Browser 36/36, Electron 53/53 and AI 30/30; every selected Playwright test reported 0 failed / 0 skipped / 0 not executed. Independent review remained PASS with no P0/P1. This is not a complete stylesheet migration or full accessibility audit; shared trailing transition/focus ownership is recorded as P2, and stale changelog wording plus a fuller sidebar-bounds assertion as P3 without widening this package.
 
+## 2026-09-13 — Exact source receipts fence Canvas authority
+
+- Scope: Document authority now publishes one immutable Source Receipt with
+  the complete project, document, source-path, source-hash, revision,
+  operation and Canvas-generation context. Canvas confirmation consumes that
+  exact receipt and a complete rendered observation; the former HTML echo
+  queue and hash-only confirmation paths are retired.
+- Interaction result: ordinary local and history editing still completes in
+  the current physical frame. An authority reload creates exactly one new
+  physical document, executes authored scripts once in that frame and waits
+  for its exact settled Runtime identity before the receipt can confirm. No
+  new control, notice, layout, color or motion was introduced.
+- Failure boundaries: missing or mismatched path/session/hash/revision,
+  duplicate or late acknowledgements, a null/conflicting working hash and an
+  observation from another frame all fail closed. Exact autosave authority
+  repair issues a corrected receipt; it never retroactively certifies an old
+  hashless receipt.
+- Focused evidence covered initial render, same-source authority reload,
+  dynamic chart repaint, autosave repair, moved Working Copy hydration,
+  terminal/incarnation fencing and local/history in-place continuity.
+  Independent final review passed with no P0/P1/P2/P3 after the seeded fault
+  oracle was tightened to require the corrected authority receipt.
+- Final task gate `2026-09-12T21-38-36-703Z-task` passed all 10 selected
+  suites on the frozen source: targeted Node 1061/1061, contract Node 16/16,
+  core Node 1901/1901, Browser 34/34, Electron 74/74 and AI 20/20, with zero
+  selected failure, skip or not-executed result. Nine already-passed steps
+  were reused only after the gate revalidated the identical fingerprint and
+  original `origin/main` base. Two different pairs of AI cases had previously
+  stalled before their business assertions while reading the shared system
+  clipboard; all four exact cases passed in sequential isolation, and the
+  final complete AI step passed 20/20 without retry.
+- The user-designated eight-file corpus then completed one real Electron run:
+  4 passed, 4 failed and 0 skipped, with all eight originals byte-identical.
+  Every passing file completed three text hosts, two duplicate/delete cycles,
+  preview/edit re-entry, source reload and save/reopen. One failure completed
+  three text hosts before the copy action was unavailable; three completed
+  only one independent host against the three-host minimum. The four failure
+  screenshots were inspected, and the result matches the recorded baseline
+  shape. This is rebuilt-source evidence, not an installed-app or full-corpus
+  pass.
+- final result: passed for the scoped Source Receipt authority and
+  source/Runtime continuity.
+
 ## 2026-09-12 — Direct semantic native island and Enter commands
 
 - Scope: native text editing, Enter and managed hard-break identity now submit a
