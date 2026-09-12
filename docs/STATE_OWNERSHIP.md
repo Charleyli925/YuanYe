@@ -1,5 +1,31 @@
 # State ownership
 
+Ordinary save journal retirement stays inside `ProjectFileRepository`.
+`save-retirement.mjs` is only its filesystem cleanup sequence, with no durable
+state or scheduler. After committed source/metadata publication, the Repository
+revalidates project/member identity, source/state Hash and retained previous
+bytes. It removes the exact recovery directory as before, requires its parent
+sync and all file/publication-directory sync, verifies again, then unlinks the
+exact save journal and requires the transaction parent sync. Unsupported directory sync
+retains recovery responsibility; cleanup failure does not turn a completed save
+into an unsaved result. Failure after unlink is explicitly unconfirmed, not a
+promise that the journal remains; its possible reappearance is harmless because
+recovery removal was already durable.
+
+Required publication sync gates the new journal deletion, not the pre-existing
+recovery-directory cleanup. This prevents unsupported sync from newly retaining
+old recovery directories across subsequent successful saves. A missing recovery
+directory with an unretired committed journal keeps the existing recovery-reader
+semantics; the journal may remain without blocking a later valid save.
+
+Each existing recovery scan attempts at most 16 eligible stock retirements.
+Only committed ordinary records with a recovery ID, no recovery reason and a
+still-matching current source/state qualify. Stale targets, ambiguous legacy
+records, rollback/conflict evidence and incomplete recoveries are retained.
+Pending recovery still runs independently of that budget. Identity migrations,
+history and Promotion receipts keep their existing lifetimes. No old target is
+reapplied merely to make a stock journal eligible for collection.
+
 | Mutable fact | Sole owner | Durable authority | Consumers |
 | --- | --- | --- | --- |
 | Open source locator before first durable action, registered identity, renderer generation and late-query fence | Renderer `ProjectSession` | active-file record before registration; project registry and `project.json` afterwards | Application workflows and the Controller aggregate snapshot |

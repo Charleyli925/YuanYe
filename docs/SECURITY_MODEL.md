@@ -238,6 +238,15 @@ Multiple visible links or conflicting member paths fail closed. Persisted
 `device`, `inode`, and `birthtimeMs` never authorize startup, open or writes.
 Physical comparisons use live observations within one operation only.
 
+Retiring an ordinary save journal requires current project/member, source Hash,
+state and previous-byte verification before existing recovery cleanup, followed
+by identity/source/state revalidation after required publication synchronization.
+Recovery removal must be durably synchronized before journal unlink. Unsupported
+sync or cleanup failure retains the journal whenever unlink has not happened;
+failure after unlink is an unconfirmed cleanup outcome, with recovery absence
+already durable. This optional collection never broadens save authority and does
+not collect identity migration, history or Promotion receipts.
+
 After pending transaction recovery, valid registered members gain anchors
 without changing HTML or Version records. Atomic anchor publication is the
 per-member migration checkpoint. Missing/unsupported anchors do not invalidate
