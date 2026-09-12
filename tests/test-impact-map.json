@@ -1940,6 +1940,8 @@
     {
       "id": "agent-provider-pageroot-http",
       "patterns": [
+        "^shared/agent-input-policy\\.mjs$",
+        "^tests/agent-input-policy\\.test\\.mjs$",
         "^bridge/agent/providers/openai-compatible-provider\\.mjs$",
         "^bridge/agent/runtimes/http-runtime\\.mjs$",
         "^shared/openai-compatible-vendors\\.mjs$",
@@ -1954,6 +1956,8 @@
       ],
       "nodeTests": [
         "tests/openai-compatible-agent.test.mjs",
+        "tests/agent-input-policy.test.mjs",
+        "tests/run-workflow.test.mjs",
         "tests/agent-provider-catalog.test.mjs",
         "tests/agent-protocol-acceptance.test.mjs"
       ]

@@ -26,6 +26,16 @@ Pending recovery still runs independently of that budget. Identity migrations,
 history and Promotion receipts keep their existing lifetimes. No old target is
 reapplied merely to make a stock journal eligible for collection.
 
+Native HTTP input estimates and execution checks share the pure
+`shared/agent-input-policy.mjs`; it owns no state or I/O. RunWorkflow measures
+current candidate input with an explicit reserve. Runtime measures the actual
+serialized frozen messages and checks each file's reread Hash/size. Both use
+the model capability from the same preflight ticket; the Provider copies that
+snapshot into the immutable launch instead of resolving a fresh catalog model.
+The existing configuration digest and capability revision fence remain the
+authority for launch. Retry messages recalculate input and requested output
+headroom through the same policy; unknown capability is not a verified fit.
+
 | Mutable fact | Sole owner | Durable authority | Consumers |
 | --- | --- | --- | --- |
 | Open source locator before first durable action, registered identity, renderer generation and late-query fence | Renderer `ProjectSession` | active-file record before registration; project registry and `project.json` afterwards | Application workflows and the Controller aggregate snapshot |

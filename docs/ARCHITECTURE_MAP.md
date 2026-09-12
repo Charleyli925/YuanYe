@@ -64,6 +64,12 @@ Ordinary save recovery and bounded retirement remain Repository operations in
 required-sync cleanup sequence. It owns no separate journal or background job.
 The deletion proof and retained-record cases are defined in `STATE_OWNERSHIP.md`.
 
+Native HTTP Agent input/attachment policy is shared in
+`shared/agent-input-policy.mjs`. RunWorkflow supplies candidate byte estimates;
+HTTP Runtime supplies verified frozen serialized bytes. Provider launch consumes
+the selected preflight ticket capability. No policy object owns source, Request,
+credentials or durable runtime state; see ADR 0069 for the estimation boundary.
+
 ## Workspace response ingress
 
 `decodeWorkspaceResponse` in the existing Controller codecs module is the

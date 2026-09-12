@@ -6,6 +6,12 @@ import { verifyProjectContext } from "./verified-project-context.js";
 import { AgentCatalogState } from "./agent-provider-catalog.js";
 import { credentialErrorField } from "../../shared/agent-access-operation.mjs";
 import {
+  decodeHttpAgentText,
+  httpAgentSupportsTextAttachment,
+  httpAgentInputBudget,
+  HTTP_AGENT_PREFLIGHT_RESERVE_BYTES,
+} from "../../shared/agent-input-policy.mjs";
+import {
   agentRecoveryKindForError,
   CLIPBOARD_DELIVERY_MODE,
   MANAGED_AGENT_MODE,
@@ -14,8 +20,6 @@ import {
 } from "../../shared/agent-delivery.mjs";
 
 const SHA256 = /^sha256:[a-f0-9]{64}$/u;
-const SOURCE_AGENT_MAX_CONTEXT_BYTES = 2 * 1024 * 1024;
-const SOURCE_AGENT_RESERVED_CONTEXT_BYTES = 256 * 1024;
 const POLL_DELAYS_MS = Object.freeze({
   reconcile: 500,
   starting: 500,
@@ -35,21 +39,10 @@ const NON_RETRYABLE_AGENT_ERRORS = new Set([
   "AGENT_TASK_POLICY_INVALID",
 ]);
 
-function sourceAgentSupportsAttachment(attachment) {
-  const mediaType = String(attachment?.mediaType || "").toLowerCase();
-  if (mediaType.startsWith("text/")
-    || ["application/json", "application/xml", "application/javascript"].includes(mediaType)
-    || mediaType.endsWith("+json")
-    || mediaType.endsWith("+xml")) return true;
-  if (mediaType && mediaType !== "application/octet-stream") return false;
-  return /\.(?:txt|md|markdown|json|jsonl|csv|tsv|xml|html?|css|js|jsx|ts|tsx|yml|yaml|toml|ini|log|sql|py|rb|go|rs|java|c|h|cpp|hpp|sh|zsh|fish)$/iu
-    .test(String(attachment?.fileName || ""));
-}
-
 function unsupportedSourceAgentAttachment(comments) {
   for (const comment of Array.isArray(comments) ? comments : []) {
     const unsupported = (comment?.attachments || []).find(
-      (attachment) => !sourceAgentSupportsAttachment(attachment),
+      (attachment) => !httpAgentSupportsTextAttachment(attachment),
     );
     if (unsupported) return unsupported;
   }
@@ -60,7 +53,7 @@ async function verifiedSourceAgentAttachmentBytes(bridgeClient, sourcePath, comm
   let total = 0;
   for (const comment of Array.isArray(comments) ? comments : []) {
     for (const attachment of comment?.attachments || []) {
-      if (!sourceAgentSupportsAttachment(attachment) || !attachment?.relativePath) {
+      if (!httpAgentSupportsTextAttachment(attachment) || !attachment?.relativePath) {
         throw responseError(
           "RUN_AGENT_ATTACHMENT_UNSUPPORTED",
           "源页 Agent 暂不支持此附件，可改用 Qoder、Codex 或复制给其他 AI。",
@@ -80,15 +73,7 @@ async function verifiedSourceAgentAttachmentBytes(bridgeClient, sourcePath, comm
         );
       }
       const bytes = new Uint8Array(await blob.arrayBuffer());
-      if (!bytes.byteLength || bytes.includes(0)) {
-        throw responseError(
-          "RUN_AGENT_ATTACHMENT_UNSUPPORTED",
-          "源页 Agent 只能发送可验证的 UTF-8 文本附件。",
-        );
-      }
-      try {
-        new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-      } catch {
+      if (decodeHttpAgentText(bytes, { allowEmpty: false }) === null) {
         throw responseError(
           "RUN_AGENT_ATTACHMENT_UNSUPPORTED",
           "源页 Agent 只能发送可验证的 UTF-8 文本附件。",
@@ -105,20 +90,11 @@ function sourceAgentBudgetExceeded(delivery, preflight, html, comments, attachme
   const modelId = delivery.selection.resolvedModelId || delivery.selection.requestedModelId;
   const model = (preflight?.models || []).find((entry) => entry?.id === modelId);
   const htmlBytes = new TextEncoder().encode(String(html || "")).byteLength;
-  let taskBytes = SOURCE_AGENT_RESERVED_CONTEXT_BYTES + htmlBytes + attachmentBytes;
+  let taskBytes = HTTP_AGENT_PREFLIGHT_RESERVE_BYTES + htmlBytes + attachmentBytes;
   for (const comment of Array.isArray(comments) ? comments : []) {
     taskBytes += new TextEncoder().encode(String(comment?.text || "")).byteLength;
   }
-  if (taskBytes > SOURCE_AGENT_MAX_CONTEXT_BYTES) return true;
-  if (!model?.contextWindow || !model?.recommendedMaxInputTokens || !model?.maxOutputTokens) {
-    return false; // Custom still observes the runtime hard limit above.
-  }
-  const inputTokens = Math.ceil(taskBytes / 3);
-  const outputTokens = Math.ceil((htmlBytes / 3) * 1.15);
-  return model.supportsCompleteHtml !== true
-    || inputTokens > model.recommendedMaxInputTokens
-    || outputTokens > model.maxOutputTokens
-    || inputTokens + outputTokens > model.contextWindow;
+  return httpAgentInputBudget({ inputBytes: taskBytes, baseHtmlBytes: htmlBytes, model }).status === "exceeded";
 }
 
 function succeeded(value) {

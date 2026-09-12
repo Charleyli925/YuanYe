@@ -473,6 +473,7 @@
       "id": "agent-runtime",
       "patterns": [
         "^bridge/agent/",
+        "^shared/agent-input-policy\\.mjs$",
         "^desktop/ipc/agent-ipc",
         "^tests/agent-"
       ],
@@ -482,16 +483,24 @@
       ],
       "owners": [
         "AgentRuntimeCoordinator",
-        "ACP runtime"
+        "ACP runtime",
+        "HTTP runtime"
       ],
       "implementationFiles": [
         "bridge/agent/agent-runtime-coordinator.mjs",
+        "shared/agent-input-policy.mjs",
+        "app/application/run-workflow.js",
+        "bridge/agent/runtimes/http-runtime.mjs",
+        "bridge/agent/providers/openai-compatible-provider.mjs",
         "bridge/agent/runtimes/acp-runtime.mjs",
         "bridge/agent/hosts/execution-host.mjs",
         "desktop/ipc/agent-ipc.mjs"
       ],
       "focusedTests": [
         "tests/agent-runtime-coordinator.test.mjs",
+        "tests/agent-input-policy.test.mjs",
+        "tests/openai-compatible-agent.test.mjs",
+        "tests/run-workflow.test.mjs",
         "tests/agent-provider-contract.test.mjs",
         "tests/agent-bridge-service.test.mjs",
         "tests/agent-bridge-workspace.test.mjs"

@@ -12,10 +12,12 @@ import {
   openAiCompatibleModelCapability,
   publicModelsForVendor,
   resolveOpenAiCompatibleVendor,
-  supportedAgentModel,
   testOpenAiCompatibleBaseUrl,
 } from "../../../shared/openai-compatible-vendors.mjs";
 import { SUPPORTED_AGENT_MODELS_REVISION } from "../../../shared/supported-agent-models.mjs";
+import { HTTP_AGENT_INPUT_POLICY_REVISION } from "../../../shared/agent-input-policy.mjs";
+
+const HTTP_AGENT_CAPABILITY_REVISION = `${SUPPORTED_AGENT_MODELS_REVISION}:${HTTP_AGENT_INPUT_POLICY_REVISION}`;
 
 const SAFE_MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._/:+-]{0,159}$/u;
 const PREFLIGHT_HTML = "<!DOCTYPE html><html><head><title>PageRoot preflight</title></head><body><p data-pageroot-id=\"preflight\">ready</p></body></html>";
@@ -213,7 +215,7 @@ export function createOpenAiCompatibleProvider({
     runtimeId: PAGEROOT_RUNTIME_ID,
     displayName: "源页 Agent",
     securityProfile: "client-mediated",
-    capabilityRevision: SUPPORTED_AGENT_MODELS_REVISION,
+    capabilityRevision: HTTP_AGENT_CAPABILITY_REVISION,
     capabilities: {
       availability: true,
       preflight: true,
@@ -230,7 +232,7 @@ export function createOpenAiCompatibleProvider({
         vendorId: credential.vendorId,
         baseUrl: credential.baseUrl,
         version: "2.0.0",
-        capabilityRevision: SUPPORTED_AGENT_MODELS_REVISION,
+        capabilityRevision: HTTP_AGENT_CAPABILITY_REVISION,
         credentialGeneration: credential.credentialGeneration,
         credentialDigest: sha256(Buffer.from(credential.apiKey, "utf8")),
       });
@@ -251,7 +253,7 @@ export function createOpenAiCompatibleProvider({
       const models = modelsForCredential(credential, environment, selection);
       const evidence = Object.freeze({
         version: "2.0.0",
-        capabilityRevision: SUPPORTED_AGENT_MODELS_REVISION,
+        capabilityRevision: HTTP_AGENT_CAPABILITY_REVISION,
         modelCount: models.length,
         models,
         vendorId: credential.vendorId,
@@ -338,13 +340,16 @@ export function createOpenAiCompatibleProvider({
       const localId = localModelId(ticket.selection?.resolvedModelId);
       const model = credential?.vendorId === "custom"
         ? null
-        : supportedAgentModel(credential?.vendorId, localId, { includeBeta: true });
+        : ticket.evidence?.models?.find((entry) => entry.id === ticket.selection?.resolvedModelId);
+      if (credential?.vendorId !== "custom" && !model) {
+        fail("AGENT_CONFIGURATION_CHANGED", "预检模型能力尚未确认，请重新预检。", { status: 409 });
+      }
       return Object.freeze({
         securityProfile: "client-mediated",
         modelId: localId,
         reasoning: normalizeOpenAiCompatibleReasoning(ticket.selection?.reasoning?.applied)
           || DEFAULT_OPENAI_COMPATIBLE_REASONING,
-        modelBudget: model,
+        modelBudget: model ? Object.freeze({ ...model }) : null,
         policy,
         environment: Object.freeze({
           PAGEROOT_API_KEY: String(credential?.apiKey || ""),

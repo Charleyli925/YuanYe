@@ -17,6 +17,15 @@
   已从 no-change 改为 Candidate；后者属于独立 R2。私人全目录 HTML 验收尚待明确目录。
 - final result: scoped empty-Review Electron flows and screenshot inspection passed; broader gate results are recorded separately.
 
+## 2026-09-12 — Shared HTTP Agent input policy
+
+- Mode: DESIGN CHANGE + AI EXPERIENCE LENS; base `353fb6c3`. Scope is admission/attachment policy, with the existing Agent controls and rejection copy. No layout, new mode, chat purpose or additional notification is introduced.
+- Flow: explicit comment submission → current-input estimate → existing frozen Request/ticket → verified serialized Runtime input → Candidate. Attachments increase input demand; expected complete output comes from frozen HTML. Unknown model capability remains unknown, with the existing HTTP byte cap. Runtime verifies every file's actual reread bytes rather than trusting an old label. Failed validation precedes any model request/output publication.
+- Scoped evidence: 131 Node checks passed across shared policy, HTTP runtime/provider, RunWorkflow and Coordinator; typecheck/architecture passed. Boundary checks cover small HTML with large text input, unknown capability, output headroom, BOM/NUL/invalid UTF-8, changed frozen attachment bytes and selected ticket capability snapshots. Existing submission cancellation/configuration and clipboard tests remain in those suites.
+- First new regression run expected an unprefixed policy error code; the existing policy-error adapter correctly returned `AGENT_FROZEN_INPUT_DRIFT`. Only the exact expected code was corrected; the first log remains local. No production check was relaxed.
+- Final frozen-source task gate `2026-09-12T09-42-17-991Z-task`: 6/6 selected steps passed (typecheck, lint, Node targeted 369/369 in 24 files, contract 16/16, desktop build, source Electron AI 13/13). No selected failure, skip, flaky or missing execution; source fingerprints were unchanged and test processes exited. Node groups may overlap. No Browser/core/standalone editing Electron lane was selected.
+- Evidence limits: synthetic local protocol/provider fixtures, no real vendor/tokenizer or timing claim, installed-app or private-corpus validation. The existing identity-repair test does not prove the real Runtime retry budget path; this P2 coverage gap remains recorded without expanding this change. No new layout or pixel-equivalence claim.
+
 ## 2026-09-08 — 独立服务配置与接入恢复
 
 - Truth: 本批三条真实旅程要求；沿用既有桌面视觉语言，共享控件但分别布局设置页与侧栏。

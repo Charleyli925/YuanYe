@@ -596,6 +596,15 @@ a one-use ticket; start compares that ticket to the durable Request selection.
 Malformed policies, cross-provider model ids, unknown providers and selection
 drift fail closed.
 
+For native HTTP execution, the selected preflight ticket also supplies immutable
+model-budget capability. A shared pure input policy applies to candidate
+estimates and actual serialized frozen messages, including identity-repair
+retries. Runtime rereads must match each policy file's frozen size and Hash
+before serialization. UTF-8/NUL/MIME checks and the HTTP total-byte cap do not
+replace Repository attachment, path or complete-HTML verification. Unknown
+custom-model capacity grants no invented token limits; it still obeys the byte
+cap. Qoder/Codex and clipboard retain their separate existing capabilities.
+
 ### Legacy historical activation receipts
 
 Retiring the old activation command does not retire persisted v4 receipts.
