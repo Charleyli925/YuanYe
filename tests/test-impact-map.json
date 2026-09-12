@@ -691,6 +691,7 @@
       "nodeTests": [
         "tests/document-workflow.test.mjs",
         "tests/document-save-plan.test.mjs",
+        "tests/project-workflow.test.mjs",
         "tests/document-session.test.mjs",
         "tests/source-history-session.test.mjs",
         "tests/source-history.test.mjs",

@@ -9,11 +9,8 @@ import {
   resolveProjectOpenSource,
 } from "./project/open-operation-procedure.js";
 import {
-  planProjectSwitchAfterSourceProtection,
-  planProjectSwitchAfterDrain,
   planProjectSwitchEntry,
   planProjectSwitchFence,
-  planProjectSwitchValidationLease,
 } from "./project/switch-plan.js";
 import { reportInternalFailure } from "./internal-failure.js";
 
@@ -679,27 +676,16 @@ export class ProjectWorkflow {
         }
       }
 
-      const document = this.#documentSession.snapshot;
-      const validationLease = planProjectSwitchValidationLease({
-        obligationsResolved: switchObligations.every((status) => status.state === "resolved"),
+      const readiness = this.#documentWorkflow.inspectLeaveReadiness({
         hasPendingNativeEdit: Boolean(this.#canvasPort.hasPendingNativeEdit?.()),
-        hasHistoryAction: this.#documentWorkflow.hasHistoryAction,
-        persistState: document.persistState,
-        pendingWrite: document.hasPendingWrite,
-        flushInFlight: document.isFlushing,
-        editRevision: document.editRevision,
-        lastPersistedRevision: document.lastPersistedRevision,
-        sourcePath: this.#projectSession.sourcePath,
-        persistedSourceSha256: document.persistedSourceSha256,
-        workingHtmlSha256: document.workingHtmlSha256,
-        canvasStatus: document.canvasAuthority?.status,
-        canvasRenderedSha256: document.canvasAuthority?.renderedSha256,
       });
-      if (entry.action === "continue" && validationLease.action === "reuse-verified") {
+      if (entry.action === "continue"
+        && switchObligations.every((status) => status.state === "resolved")
+        && readiness.action === "reuse-verified") {
         this.#emit({
           type: "project-switch-validation-reused",
           operationId,
-          sourceSha256: document.persistedSourceSha256,
+          sourceSha256: readiness.sourceSha256,
         });
         return succeeded({ operationId, validationLease: "reused" });
       }
@@ -724,48 +710,19 @@ export class ProjectWorkflow {
         return blocked(fencePlan.code, fencePlan.reason);
       }
 
-      const cutoffRevision = this.#documentSession.editRevision;
+      const boundary = this.#documentWorkflow.captureLeaveBoundary();
       const drained = await this.#drainCoordinator.drain("switch", {
         deadlineAt: this.#clock.now() + SWITCH_DEADLINE_MS,
       });
       if (!drained.ok) {
         return blocked("PROJECT_SWITCH_DRAIN_BLOCKED", drained.reason);
       }
-      const protectionEvidence = documentProtectionEvidence(this.#documentWorkflow, {
-        context: this.#projectSession.context,
-        revision: cutoffRevision,
+      const verified = this.#documentWorkflow.verifyLeaveBoundary(boundary, {
+        needsSourceProtection: shouldCommitCanvas,
+        committedSourceSha256: committed?.workingSourceSha256 || "",
       });
-      const recoveryProtected = Boolean(protectionEvidence);
-      const afterDrain = planProjectSwitchAfterDrain({
-        editRevision: this.#documentSession.editRevision,
-        cutoffRevision,
-        pendingWrite: Boolean(this.#documentSession.pendingWrite),
-        flushInFlight: Boolean(this.#documentSession.flushPromise),
-        hasHistoryAction: this.#documentWorkflow.hasHistoryAction,
-        recoveryProtected,
-      });
-      if (afterDrain.kind === "reject") {
-        return blocked(afterDrain.code, afterDrain.reason);
-      }
-      if (shouldCommitCanvas) {
-        const settledDocument = this.#documentSession.snapshot;
-        const afterSourceProtection = planProjectSwitchAfterSourceProtection({
-          needsSourceProtection: true,
-          sourcePath: this.#projectSession.sourcePath,
-          lastPersistedRevision: settledDocument.lastPersistedRevision,
-          cutoffRevision,
-          persistedSourceSha256: settledDocument.persistedSourceSha256,
-          workingHtmlSha256: settledDocument.workingHtmlSha256,
-          committedSourceSha256: committed?.workingSourceSha256,
-          protectionHtmlSha256: protectionEvidence?.htmlSha256 || "",
-          recoveryProtected,
-        });
-        if (afterSourceProtection.kind === "reject") {
-          return blocked(
-            afterSourceProtection.code,
-            afterSourceProtection.reason,
-          );
-        }
+      if (verified.kind === "reject") {
+        return blocked(verified.code, verified.reason);
       }
       return succeeded({ operationId });
     } catch (cause) {

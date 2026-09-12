@@ -3,6 +3,9 @@ import { createDocumentWorkflowCodecs } from "./document-workflow-codecs.js";
 import {
   planDocumentEnqueue,
   planDocumentSave,
+  planDocumentLeaveReadiness,
+  planDocumentLeaveAfterDrain,
+  planDocumentLeaveProtection,
 } from "./document/save-plan.js";
 import {
   copyProjectContext as copyContext,
@@ -273,6 +276,82 @@ export class DocumentWorkflow {
 
   get recoveryCheckpoint() {
     return this.#recoveryCheckpoint;
+  }
+
+  inspectLeaveReadiness({ hasPendingNativeEdit = false } = {}) {
+    const document = this.#documentSession.snapshot;
+    const plan = planDocumentLeaveReadiness({
+      obligationsResolved: !this.#disposed,
+      hasPendingNativeEdit,
+      hasHistoryAction: this.hasHistoryAction,
+      persistState: document.persistState,
+      pendingWrite: document.hasPendingWrite,
+      flushInFlight: document.isFlushing,
+      editRevision: document.editRevision,
+      lastPersistedRevision: document.lastPersistedRevision,
+      sourcePath: this.#projectSession.sourcePath,
+      persistedSourceSha256: document.persistedSourceSha256,
+      workingHtmlSha256: document.workingHtmlSha256,
+      canvasStatus: document.canvasAuthority?.status,
+      canvasRenderedSha256: document.canvasAuthority?.renderedSha256,
+    });
+    return Object.freeze({ ...plan, sourceSha256: document.persistedSourceSha256 });
+  }
+
+  captureLeaveBoundary() {
+    // Operation-local immutable references, never a cached permission to leave.
+    return Object.freeze({
+      context: copyContext(this.#projectSession.context || this.#projectSession.locator),
+      epoch: this.#projectSession.epoch,
+      revision: this.#documentSession.editRevision,
+      html: this.#documentSession.html,
+    });
+  }
+
+  verifyLeaveBoundary(boundary, {
+    needsSourceProtection = false,
+    committedSourceSha256 = "",
+  } = {}) {
+    const current = this.#projectSession.context;
+    if (
+      this.#disposed || !boundary
+      || boundary.epoch !== this.#projectSession.epoch
+      || (boundary.context
+        ? (boundary.context.targetKind
+          ? !sameOpenRoute(boundary.context, current, this.#codecs.sameSourcePath)
+          : !this.#isCurrent(boundary.context))
+        : Boolean(current))
+      || boundary.html !== this.#documentSession.html
+    ) {
+      return Object.freeze({
+        kind: "reject", code: "PROJECT_SWITCH_SOURCE_CHANGED",
+        reason: "当前 HTML 在切换边界后仍有修改尚未安全写回。",
+      });
+    }
+    const document = this.#documentSession.snapshot;
+    const evidence = this.verifiedProtectionEvidence({
+      context: current || boundary.context, revision: boundary.revision,
+    });
+    const afterDrain = planDocumentLeaveAfterDrain({
+      editRevision: document.editRevision,
+      cutoffRevision: boundary.revision,
+      pendingWrite: document.hasPendingWrite,
+      flushInFlight: document.isFlushing,
+      hasHistoryAction: this.hasHistoryAction,
+      recoveryProtected: Boolean(evidence),
+    });
+    if (afterDrain.kind === "reject") return afterDrain;
+    return planDocumentLeaveProtection({
+      needsSourceProtection,
+      sourcePath: this.#projectSession.sourcePath,
+      lastPersistedRevision: document.lastPersistedRevision,
+      cutoffRevision: boundary.revision,
+      persistedSourceSha256: document.persistedSourceSha256,
+      workingHtmlSha256: document.workingHtmlSha256,
+      committedSourceSha256,
+      protectionHtmlSha256: evidence?.htmlSha256 || "",
+      recoveryProtected: Boolean(evidence),
+    });
   }
 
   canProtectForDetach(context = this.#projectSession.context) {

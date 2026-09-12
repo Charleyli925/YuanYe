@@ -343,6 +343,40 @@ function createHarness({
     requestFrame: (callback) => callback(),
     ...canvas,
   };
+  // Project tests fake persistence, but leave decisions execute the real owner.
+  const boundaryOwner = new DocumentWorkflow({
+    bridgeClient: { autosave: async () => ({}), resolveConflict: async () => ({}), ...client },
+    ensureRegistered: async () => succeeded(projectSession.context),
+    projectSession, documentSession, commentSession, versionSession,
+    sourceHistorySession: new SourceHistorySession(),
+    codecs: {
+      isRecord, sameSourcePath: (left, right) => left === right,
+      persistedChangeEvent: (value) => value,
+      recoveryIdentityFromRecord: (value) => value,
+      sourceHistoryOperationsFromRecord: (value) => value,
+      changesFromRecords: (value) => value,
+      historyTextSelectionFromRecord: (value) => value,
+      selectionFromRecord: (value) => value,
+      rebindTargetsPreservingGlobal: (_html, targets) => targets,
+      rebindTargetsAcrossHistoryPreservingGlobal: (_before, _after, targets) => targets,
+      canLocateTarget: () => true,
+      appendDirectEditEvent: (value) => value,
+      auditEventKey: (value) => value,
+      removeAcknowledgedAuditEvents: (value) => value,
+      errorMessage: (cause, fallback) => cause?.message || fallback,
+    },
+    ports: { hash: { sha256: async (html) => sha256(html) }, canvas: canvasPort },
+    clock: { now: Date.now },
+  });
+  Object.defineProperty(boundaryOwner, "hasHistoryAction", {
+    get: () => defaultDocumentWorkflow.hasHistoryAction,
+  });
+  boundaryOwner.verifiedProtectionEvidence = (input) => (
+    defaultDocumentWorkflow.verifiedProtectionEvidence?.(input) || null
+  );
+  for (const name of ["inspectLeaveReadiness", "captureLeaveBoundary", "verifyLeaveBoundary"]) {
+    defaultDocumentWorkflow[name] ??= boundaryOwner[name].bind(boundaryOwner);
+  }
   const documentWorkflow = typeof documentWorkflowFactory === "function"
     ? documentWorkflowFactory({
         client,

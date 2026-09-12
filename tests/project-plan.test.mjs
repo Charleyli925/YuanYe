@@ -8,11 +8,8 @@ import {
   planSourceLocatorTransition,
 } from "../app/application/project/source-locator-plan.js";
 import {
-  planProjectSwitchAfterSourceProtection,
-  planProjectSwitchAfterDrain,
   planProjectSwitchEntry,
   planProjectSwitchFence,
-  planProjectSwitchValidationLease,
 } from "../app/application/project/switch-plan.js";
 
 test("project open plan rejects a closing window and classifies the remaining intents", () => {
@@ -35,80 +32,10 @@ test("project switch entry plan fail-closes disposed and drain blocks, and waits
   assert.equal(planProjectSwitchEntry().action, "continue");
 });
 
-test("project switch fence and after-drain plans reject unverified native edits", () => {
+test("project switch fence rejects unverified native edits", () => {
   assert.equal(planProjectSwitchFence({ needsCanvasCommit: false }).kind, "ready");
-  assert.equal(
-    planProjectSwitchFence({ needsCanvasCommit: true, fenceOk: false }).code,
-    "PROJECT_SWITCH_NATIVE_EDIT",
-  );
-  assert.equal(
-    planProjectSwitchAfterDrain({
-      editRevision: 2,
-      cutoffRevision: 1,
-    }).code,
-    "PROJECT_SWITCH_SOURCE_CHANGED",
-  );
-  assert.equal(planProjectSwitchAfterDrain({
-    editRevision: 1,
-    cutoffRevision: 1,
-  }).kind, "ready");
-});
-
-test("project switch reuses only a clean exact Canvas validation lease", () => {
-  const exact = {
-    obligationsResolved: true,
-    persistState: "idle",
-    editRevision: 4,
-    lastPersistedRevision: 4,
-    sourcePath: "/tmp/a.html",
-    persistedSourceSha256: "sha256:aaa",
-    canvasStatus: "verified",
-    renderedSha256: "sha256:aaa",
-  };
-  assert.equal(planProjectSwitchValidationLease(exact).action, "reuse-verified");
-  assert.equal(planProjectSwitchValidationLease({
-    ...exact,
-    obligationsResolved: false,
-  }).action, "full-check");
-  assert.equal(planProjectSwitchValidationLease({
-    ...exact,
-    hasPendingNativeEdit: true,
-  }).action, "full-check");
-  assert.equal(planProjectSwitchValidationLease({
-    ...exact,
-    renderedSha256: "sha256:bbb",
-  }).action, "full-check");
-});
-
-test("project switch after-drain plan validates Working HTML instead of presentation freshness", () => {
-  assert.equal(
-    planProjectSwitchAfterSourceProtection({
-      needsSourceProtection: true,
-      sourcePath: "/tmp/a.html",
-      lastPersistedRevision: 2,
-      cutoffRevision: 1,
-      committedSourceSha256: "sha256:aaa",
-      persistedSourceSha256: "sha256:aaa",
-      workingHtmlSha256: "sha256:aaa",
-    }).code,
-    "PROJECT_SWITCH_SOURCE_MISMATCH",
-  );
-  assert.equal(
-    planProjectSwitchAfterSourceProtection({
-      needsSourceProtection: true,
-      sourcePath: "/tmp/a.html",
-      lastPersistedRevision: 1,
-      cutoffRevision: 1,
-      committedSourceSha256: "sha256:aaa",
-      persistedSourceSha256: "sha256:aaa",
-      workingHtmlSha256: "sha256:aaa",
-    }).kind,
-    "ready",
-  );
-  assert.equal(
-    planProjectSwitchAfterSourceProtection({ needsSourceProtection: false }).kind,
-    "ready",
-  );
+  assert.equal(planProjectSwitchFence({ needsCanvasCommit: true, fenceOk: false }).code,
+    "PROJECT_SWITCH_NATIVE_EDIT");
 });
 
 test("project close plans classify identity, hydration and abort without executing side effects", () => {

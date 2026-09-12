@@ -69,6 +69,13 @@ export type DocumentWorkflowConstruction = Readonly<{
   clock: Readonly<{ now(): number }>;
 }>;
 
+export type DocumentLeaveBoundary = Readonly<{
+  context: ProjectContext | null;
+  epoch: number;
+  revision: number;
+  html: string;
+}>;
+
 export class DocumentWorkflow {
   constructor(options: DocumentWorkflowConstruction);
   subscribeEvents(listener: (event: Readonly<Record<string, unknown>>) => void): () => void;
@@ -78,6 +85,16 @@ export class DocumentWorkflow {
   readonly recoveryCheckpoint: Readonly<Record<string, unknown>> | null;
   readonly pendingAuditEvents: unknown[];
   replaceRecoveryIdentity(identity: unknown): unknown;
+  inspectLeaveReadiness(input?: { hasPendingNativeEdit?: boolean }): Readonly<{
+    kind: "ready";
+    action: "reuse-verified" | "full-check";
+    sourceSha256: string;
+  }>;
+  captureLeaveBoundary(): DocumentLeaveBoundary;
+  verifyLeaveBoundary(boundary: DocumentLeaveBoundary, input?: {
+    needsSourceProtection?: boolean;
+    committedSourceSha256?: string;
+  }): import("./document/save-plan.js").DocumentPlan;
   canProtectForDetach(context?: ProjectContext | null): boolean;
   hasVerifiedRecoveryCheckpoint(input?: {
     context?: ProjectContext | null;

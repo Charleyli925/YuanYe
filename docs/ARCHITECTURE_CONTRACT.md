@@ -1206,7 +1206,9 @@ Source durability and detach protection are separate facts. A failed/conflict
 source write may resolve the reversible switch/close obligation only after
 `DocumentWorkflow` writes and reads back the exact current revision from the
 Main-owned recovery journal (or verifies an exact export receipt) and matches
-`workingHtmlSha256 === canvasRenderedSha256 === protectionHtmlSha256`.
+`workingHtmlSha256 === workingSourceSha256 === protectionHtmlSha256`, where
+`workingSourceSha256` comes from the complete frozen source, not the disposable
+rendered projection.
 `persistedSourceSha256` remains the last disk-confirmed Hash and is not required
 to equal those three values after a failed write. That evidence never changes
 `persistState` to `idle`,
@@ -1226,6 +1228,13 @@ window creation; bounded scans isolate corrupt entries and Start lists only
 verified summaries. Draft, PROJECT.md, attachment and other non-HTML drains
 retain their existing owner-specific policies and are not reclassified as HTML
 protection evidence by this contract.
+
+For a switch, `DocumentWorkflow` captures an operation-local context, epoch,
+revision and immutable HTML reference after the Canvas fence. After the aggregate
+is drained, that owner verifies the same context and bytes and rereads current
+persistence/recovery evidence. `ProjectWorkflow` consumes the result; it does
+not reconstruct save authority from DocumentSession fields or cache a successful
+result for later operations. A changed source or document must be checked anew.
 
 After the aggregate drains, `ProjectWorkflow` asks `DocumentWorkflow` to
 reconcile source close readiness against the independently hashed frozen HTML

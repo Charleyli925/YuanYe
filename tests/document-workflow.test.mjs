@@ -938,11 +938,15 @@ test("DocumentWorkflow registers an unbound source write before its first autosa
   });
 
   harness.workflow.enqueueEdit({ html: after });
+  const boundary = harness.workflow.captureLeaveBoundary();
   const outcome = await harness.workflow.flush();
 
   assert.equal(outcome.status, "succeeded");
   assert.equal(registrations, 1);
   assert.equal(harness.documentSession.persistedSourceSha256, sha256(after));
+  assert.equal(harness.workflow.verifyLeaveBoundary(boundary, {
+    needsSourceProtection: true, committedSourceSha256: sha256(after),
+  }).kind, "ready");
 });
 
 test("DocumentWorkflow settles a failed first registration as a retryable persistence failure", async () => {
@@ -2179,4 +2183,132 @@ test("DocumentWorkflow does not retarget Undo when a newer edit arrives during i
   assert.equal(harness.documentSession.html, newer);
   assert.equal((await harness.workflow.flush()).status, 'succeeded');
   assert.deepEqual(writes.map(write => write.html), [after, newer]);
+});
+
+
+test("leave readiness is current evidence, not a permission retained across an edit", (t) => {
+  const h = createHarness();
+  t.after(() => h.workflow.dispose());
+  assert.equal(h.documentSession.confirmCanvas({ generation: 0,
+    renderedSha256: sha256(h.documentSession.html) }), true);
+  assert.equal(h.workflow.inspectLeaveReadiness().action, "reuse-verified");
+  assert.equal(h.workflow.inspectLeaveReadiness({ hasPendingNativeEdit: true }).action, "full-check");
+  const boundary = h.workflow.captureLeaveBoundary();
+  assert.equal(h.workflow.verifyLeaveBoundary(boundary, { needsSourceProtection: true,
+    committedSourceSha256: sha256(h.documentSession.html) }).kind, "ready");
+  h.documentSession.beginEdit(h.documentSession.html.replace("one", "newer"));
+  assert.equal(h.workflow.inspectLeaveReadiness().action, "full-check");
+  assert.equal(h.workflow.verifyLeaveBoundary(boundary).code, "PROJECT_SWITCH_SOURCE_CHANGED");
+});
+
+test("leave boundary cannot cross a same-byte document switch or source replacement", (t) => {
+  for (const change of ["context", "source"]) {
+    const h = createHarness();
+    t.after(() => h.workflow.dispose());
+    const boundary = h.workflow.captureLeaveBoundary();
+    if (change === "context") h.projectSession.openLocator("/tmp/another-document.html");
+    else h.documentSession.update({ html: h.documentSession.html.replace("one", "replacement") });
+    assert.equal(h.workflow.verifyLeaveBoundary(boundary).code, "PROJECT_SWITCH_SOURCE_CHANGED", change);
+  }
+});
+
+test("leave checks source protection independently of a stale rendered projection", (t) => {
+  const h = createHarness();
+  t.after(() => h.workflow.dispose());
+  const boundary = h.workflow.captureLeaveBoundary();
+  assert.equal(h.workflow.inspectLeaveReadiness().action, "full-check");
+  assert.equal(h.workflow.verifyLeaveBoundary(boundary, {
+    needsSourceProtection: true, committedSourceSha256: sha256(h.documentSession.html),
+  }).kind, "ready");
+  assert.equal(h.workflow.verifyLeaveBoundary(boundary, {
+    needsSourceProtection: true, committedSourceSha256: sha256("different"),
+  }).code, "PROJECT_SWITCH_SOURCE_MISMATCH");
+  h.workflow.dispose();
+  assert.equal(h.workflow.verifyLeaveBoundary(boundary).code, "PROJECT_SWITCH_SOURCE_CHANGED");
+});
+
+for (const change of ["none", "working-copy", "project-root", "epoch"]) {
+  test(`leave boundary consumes an actual managed autosave acknowledgement (${change})`, async (t) => {
+    const before = "<!doctype html><html><body><p>one</p></body></html>";
+    const after = before.replace("one", "two");
+    const target = {
+      projectId: PROJECT_ID, documentId: DOCUMENT_ID,
+      projectRootPath: "/tmp/managed-project", targetKind: "working-copy",
+      workingCopyId: "work_ver_0001", versionId: "ver_0001",
+      exactSourcePath: SOURCE_PATH, sourceSha256: sha256(before),
+    };
+    const h = createHarness({ html: before, bridge: {
+      async autosave(body) {
+        return { ok: true, content: body.html, sha256: sha256(body.html),
+          persistedRevision: body.editRevision, lastModifiedAt: "2026-09-12T00:00:00.000Z",
+          openTarget: { ...target, sourceSha256: sha256(body.html) } };
+      },
+    } });
+    t.after(() => h.workflow.dispose());
+    h.projectSession.refreshOpenTarget(target);
+    assert.equal(h.workflow.enqueueEdit({ html: after, context: h.projectSession.context }).status, "succeeded");
+    const boundary = h.workflow.captureLeaveBoundary();
+    assert.equal(boundary.context.sourceSha256, sha256(before));
+    const saved = await h.workflow.flush();
+    assert.equal(saved.status, "succeeded", JSON.stringify(saved));
+    assert.equal(h.projectSession.context.sourceSha256, sha256(after));
+    assert.equal(h.projectSession.matches(boundary.context), false,
+      "the pre-save target hash is stale even though this is the same managed source");
+    if (change === "working-copy" || change === "project-root") {
+      h.projectSession.refreshOpenTarget({ ...target, sourceSha256: sha256(after),
+        ...(change === "working-copy"
+          ? { workingCopyId: "work_ver_0002", versionId: "ver_0002" }
+          : { projectRootPath: "/tmp/other-project" }) });
+    } else if (change === "epoch") h.projectSession.openLocator(SOURCE_PATH);
+    const result = h.workflow.verifyLeaveBoundary(boundary, {
+      needsSourceProtection: true, committedSourceSha256: sha256(after),
+    });
+    assert.equal(result.kind, change === "none" ? "ready" : "reject", JSON.stringify(result));
+    if (change !== "none") assert.equal(result.code, "PROJECT_SWITCH_SOURCE_CHANGED");
+  });
+}
+
+
+test("unregistered leave boundary still rejects a different source locator", (t) => {
+  const h = createHarness({ registered: false });
+  t.after(() => h.workflow.dispose());
+  const boundary = h.workflow.captureLeaveBoundary();
+  h.projectSession.openLocator("/tmp/different-unregistered.html");
+  assert.equal(h.workflow.verifyLeaveBoundary(boundary).code, "PROJECT_SWITCH_SOURCE_CHANGED");
+});
+
+test("first registration may leave through fresh recovery evidence when source save fails", async (t) => {
+  const before = "<!doctype html><html><body><p>one</p></body></html>";
+  const after = before.replace("one", "protected");
+  const h = createHarness({ html: before, registered: false,
+    ensureRegistered: async () => succeededRegistration(),
+    bridge: { async autosave() { throw new BridgeRequestError("SOURCE_WRITE_FAILED", "disk denied"); } },
+    recoveryJournal: {
+      async commit(input) { return { schemaVersion: "1.0.0", ...input,
+        recoveryHtmlSha256: sha256(input.html), journalSha256: sha256(JSON.stringify(input)),
+        updatedAt: "2026-09-12T00:00:00.000Z", byteLength: Buffer.byteLength(input.html) }; },
+      async readVerified() { return null; },
+      async remove() { return { removed: true }; },
+    },
+  });
+  function succeededRegistration() {
+    return { status: "succeeded", value: h.projectSession.register({
+      epoch: h.projectSession.epoch, projectId: PROJECT_ID, documentId: DOCUMENT_ID, sourcePath: SOURCE_PATH,
+    }) };
+  }
+  t.after(() => h.workflow.dispose());
+  h.workflow.enqueueEdit({ html: after });
+  const boundary = h.workflow.captureLeaveBoundary();
+  assert.equal(boundary.context.projectId, "");
+  assert.notEqual((await h.workflow.flush()).status, "succeeded");
+  assert.equal(h.projectSession.context.projectId, PROJECT_ID);
+  const input = { needsSourceProtection: true, committedSourceSha256: sha256(after) };
+  assert.equal(h.workflow.verifyLeaveBoundary(boundary, input).kind, "reject");
+  assert.equal((await h.workflow.protectForDetach({ context: h.projectSession.context })).status, "succeeded");
+  assert.equal(h.workflow.verifyLeaveBoundary(boundary, input).kind, "ready");
+  assert.equal(h.workflow.verifyLeaveBoundary(boundary, {
+    ...input, committedSourceSha256: sha256("wrong frozen source"),
+  }).code, "PROJECT_SWITCH_PROTECTION_MISMATCH");
+  assert.equal(h.documentSession.persistState, "failed");
+  assert.equal(h.documentSession.persistedSourceSha256, sha256(before));
 });
