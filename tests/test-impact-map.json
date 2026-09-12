@@ -987,6 +987,8 @@
         "^shared/conversation\\.mjs$",
         "^tests/conversation-v2\\.test\\.mjs$",
         "^bridge/conversation-repository\\.mjs$",
+        "^bridge/project-file-repository/submission\\.mjs$",
+        "^tests/submission-noop-write\\.test\\.mjs$",
         "^schemas/conversation(?:-index|-draft)?\\.v[12]\\.schema\\.json$"
       ],
       "suites": [],
@@ -994,7 +996,8 @@
         "tests/conversation-repository.test.mjs",
         "tests/conversation-bridge.test.mjs",
         "tests/conversation-forward-compat.test.mjs",
-        "tests/conversation-v2.test.mjs"
+        "tests/conversation-v2.test.mjs",
+        "tests/submission-noop-write.test.mjs"
       ]
     },
     {

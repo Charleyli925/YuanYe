@@ -601,6 +601,10 @@ AgentRuntimeCoordinator emits bounded, fixed-category execution facts through it
 
 ProjectFileRepository writes terminal Request state and stable Conversation event IDs together in request.json, then projects those facts through the submission receipt into the fixed Conversation. A crash between these files replays the same event IDs; it never restarts generation. initialize() reconciles only submissions created by this flow: accepted without a Request becomes not-started, and processing Requests receive an interrupted fact while retaining existing Request/lease authority. Missing older submissions never cause invented history. Promotion confirmation remains owned by the completed Promotion transaction.
 
+Coordinator persists progress on phase transitions; repeated tool activity in the same phase does not create another durable progress fact. A return to a previous phase remains a new transition. Submission progress retains at most 64 facts, with one durable truncation update at the limit; further omitted progress does not rewrite the receipt. Start, stop, result, decision and final summary facts retain their existing durability boundaries.
+
+Projection still runs for repeated or omitted facts to repair an interrupted receipt → Conversation → index publication. Unchanged Conversation content does not rewrite its record; unchanged summary and current pointer preserve index bytes, ordering, revision and timestamp. A committed record with a missing index update repairs only the index. Replaying an older Conversation never replaces the current Conversation pointer.
+
 ### Public execution progress and stop ordering
 
 The event reducer owns one process-private, bounded public-message accumulator,

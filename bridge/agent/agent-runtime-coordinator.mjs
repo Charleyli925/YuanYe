@@ -726,8 +726,7 @@ export class AgentRuntimeCoordinator {
     if (LIVE_STATES.has(entry.state)) {
       const previousPhase = entry.phase;
       entry.phase = phaseForEvent(reduced.event, entry.phase);
-      if (entry.phase !== "cancelling" && (entry.phase !== previousPhase
-        || ["file-read", "file-written", "terminal-created"].includes(reduced.event.kind))) {
+      if (entry.phase !== "cancelling" && entry.phase !== previousPhase) {
         void this.#queueExecutionFact(entry, entry.phase);
       }
     }

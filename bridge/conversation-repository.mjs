@@ -225,17 +225,17 @@ export async function mutateConversation(
         409,
       );
     }
+    const previousContent = JSON.stringify(current);
     const next = mutate(current);
-    await writeConversation(context, next);
+    if (JSON.stringify(next) !== previousContent) await writeConversation(context, next);
+    // Even an unchanged record may have an index publication left to repair.
     const index = await readConversationIndex(context);
-    await writeConversationIndex(
-      context,
-      recordConversationInIndex(index, next, {
-        current: currentConversationIdForDocument(index, next.documentId)
-          === next.conversationId,
-        now: nowIso,
-      }),
-    );
+    const nextIndex = recordConversationInIndex(index, next, {
+      current: currentConversationIdForDocument(index, next.documentId)
+        === next.conversationId,
+      now: nowIso,
+    });
+    if (nextIndex !== index) await writeConversationIndex(context, nextIndex);
     return next;
   } catch (error) {
     throw serviceError(error);

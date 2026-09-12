@@ -526,6 +526,40 @@ test("explicit public paragraphs remain separate without terminal punctuation", 
   ]);
 });
 
+test("repeated tool activity persists phase transitions and keeps a return to an earlier phase", async () => {
+  const finish = deferred();
+  const facts = [];
+  const coordinator = new AgentRuntimeCoordinator({
+    recordExecutionFact: async (_identity, event) => facts.push(event),
+    providerRegistry: registry({ run: async (_ticket, { onEvent }) => {
+      for (const kind of ["file-read", "file-written", "file-read"]) {
+        for (let i = 0; i < 1000; i += 1) onEvent({ kind });
+      }
+      onEvent({ kind: "visible-text", text: "Finished the requested work." });
+      await finish.promise;
+    } }),
+    resolveTask: async () => executionAuthority(),
+    leaseStore: {
+      acquire: async ({ ownerToken }) => ({ key: "lease", path: "memory", ownerToken }),
+      release: async () => true,
+    },
+  });
+  const ticket = await ready(coordinator);
+  await coordinator.submit({ ...IDENTITY, selection: ticket.selection,
+    trustPolicyAccepted: TRUSTED_LOCAL_AGENT_POLICY_VERSION,
+    preflightId: ticket.preflightId, configurationDigest: ticket.configuration.configurationDigest });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(facts.filter((event) => ["reading-task", "writing-candidate"].includes(event.kind))
+    .map((event) => event.kind), ["reading-task", "writing-candidate", "reading-task"]);
+  assert.equal(new Set(facts.map((event) => event.eventId)).size, facts.length);
+  finish.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(coordinator.executionStatus(IDENTITY).state, "completed");
+  for (const kind of ["started", "public-summary", "execution-ended"]) {
+    assert.equal(facts.filter((event) => event.kind === kind).length, 1, kind);
+  }
+});
+
 test("execution status projects only public Agent text with frozen provider identity", async () => {
   const finish = deferred();
   const persistedFacts = [];

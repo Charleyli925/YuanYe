@@ -1382,11 +1382,14 @@ export function recordConversationInIndex(
   conversation,
   { current = true, now } = {},
 ) {
-  const summary = conversationSummary(conversation);
   const documentId = conversation.documentId;
   const existing = index.documents.find(
     (value) => value.documentId === documentId,
   );
+  const previousSummary = existing?.conversations.find(
+    (value) => value.conversationId === conversation.conversationId,
+  );
+  const summary = { ...previousSummary, ...conversationSummary(conversation) };
   const conversations = existing
     ? [
       ...existing.conversations.filter(
@@ -1409,6 +1412,8 @@ export function recordConversationInIndex(
       )
       ? existing.currentConversationId
       : null;
+  if (previousSummary && nextCurrent === existing.currentConversationId
+    && JSON.stringify(previousSummary) === JSON.stringify(summary)) return index;
   const entry = existing
     ? { ...existing, currentConversationId: nextCurrent, conversations }
     : { documentId, currentConversationId: nextCurrent, conversations };

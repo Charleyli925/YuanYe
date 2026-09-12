@@ -228,10 +228,11 @@ export async function appendSubmissionExecutionFact(loaded, operationId, input) 
       "response-received", "finalizing", "validating-html", "preparing-review"]);
     const omitProgress = progressKinds.has(event.kind)
       && events.filter((value) => progressKinds.has(value.kind)).length >= 64;
-    receipt = { ...current, events: omitProgress ? events : [...events, event],
-      eventsTruncated: current.eventsTruncated === true || omitProgress };
-
-    await atomicWriteProjectJson(loaded.paths.projectRootPath, receiptPath(loaded, operationId), receipt, "submission");
+    if (!omitProgress || current.eventsTruncated !== true) {
+      receipt = { ...current, events: omitProgress ? events : [...events, event],
+        eventsTruncated: current.eventsTruncated === true || omitProgress };
+      await atomicWriteProjectJson(loaded.paths.projectRootPath, receiptPath(loaded, operationId), receipt, "submission");
+    }
   }
   await projectSubmissionReceipt(loaded, receipt);
   return receipt;
