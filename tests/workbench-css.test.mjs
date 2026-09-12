@@ -56,10 +56,7 @@ test("top toolbar keeps one compact cross-mode visual contract", async () => {
   assert.match(modeFrame, /height:\s*34px/u);
   assert.match(modeFrame, /grid-template-columns:\s*repeat\(3, 1fr\)/u);
   assert.match(modeFrame, /padding:\s*2px/u);
-  assert.match(modeFrame, /border-color:\s*var\(--chrome-divider\)/u);
-
-  const selectedLayer = lastCssRule(css, ".canvas-mode-switch::before");
-  assert.match(selectedLayer, /display:\s*none/u);
+  assert.match(modeFrame, /border:\s*1px solid var\(--chrome-divider\)/u);
 
   const sendButton = css.match(
     /\.header-actions \.header-send-button,\n\.workbench-review-tools-slot > \.header-send-button \{[\s\S]*?\}/u,
@@ -211,6 +208,10 @@ test("removed project/status/review navigation surfaces have no CSS or import ow
 
 test("embedded review stays in the content row instead of covering the header", async () => {
   const css = await readWorkbenchCascadeCss();
+  const reviewCss = await readFile(
+    new URL("../app/workbench/ai-review-workspace.module.css", import.meta.url),
+    "utf8",
+  );
   const stage = css.match(/\.workbench > \.review-scroll-stage \{[\s\S]*?\}/u);
   assert.ok(stage, "missing .workbench > .review-scroll-stage rule");
   assert.match(stage[0], /position:\s*relative/u);
@@ -218,6 +219,10 @@ test("embedded review stays in the content row instead of covering the header", 
 
   const header = lastCssRule(css, ".workbench-header");
   assert.doesNotMatch(header, /z-index:\s*80/u);
+  assert.match(
+    reviewCss,
+    /@media \(max-width: 1120px\)[\s\S]*?\.reviewMainWithSidebar \.reviewSidebar \{[\s\S]*?z-index:\s*80[\s\S]*?grid-column:\s*auto[\s\S]*?grid-row:\s*auto/u,
+  );
 });
 
 test("document persistence failures occupy a workspace row with copyable details", async () => {

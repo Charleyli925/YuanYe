@@ -87,8 +87,7 @@ body {
   gap: 6px;
 }
 
-.header-actions button,
-.header-actions .canvas-mode-switch button {
+.header-actions button {
   min-height: 36px;
   display: inline-flex;
   align-items: center;
@@ -108,36 +107,13 @@ body {
     transform 150ms ease;
 }
 
-.header-actions button:hover:not(:disabled),
-.header-actions .canvas-mode-switch button:hover:not(:disabled) {
+.header-actions button:hover:not(:disabled) {
   background: #f1f2f5;
   color: #25262c;
 }
 
 .header-actions button:active:not(:disabled) {
   transform: translateY(1px);
-}
-
-.canvas-mode-switch {
-  gap: 2px;
-  padding: 3px;
-  border: 0;
-  border-radius: 12px;
-  background: #f0f1f4;
-  box-shadow: none;
-}
-
-.header-actions .canvas-mode-switch button {
-  min-width: 62px;
-  min-height: 32px;
-  padding-inline: 10px;
-  border-radius: 9px;
-}
-
-.header-actions .canvas-mode-switch button[aria-pressed="true"] {
-  background: #fff;
-  color: #24252b;
-  box-shadow: 0 1px 3px rgb(26 28 35 / 9%);
 }
 
 .recent-run-button {
@@ -1201,8 +1177,7 @@ body {
     gap: 3px;
   }
 
-  .header-actions button,
-  .header-actions .canvas-mode-switch button {
+  .header-actions button {
     padding-inline: 9px;
   }
 

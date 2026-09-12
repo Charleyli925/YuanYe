@@ -1,5 +1,16 @@
 # Design QA
 
+## 2026-09-12 — Mode switch ownership and available Review controls
+
+- Truth: approved complexity plan M7; preserve the existing visual design and AI draft/no-send behavior.
+- Mode switch rules are consolidated from base/review/chrome layers into top-toolbar.css. Review controls are absent in Edit/Preview while the portal slot remains mounted. A genuinely empty Review hides only its change filters; filtered-empty results retain their filters.
+- Typecheck/architecture and lint passed. The existing CSS test initially rejected the equivalent border shorthand and required a removed empty pseudo-element override; its corresponding source assertions were updated, and all 11 CSS checks passed. Original failure evidence is retained outside Git.
+- An isolated real Chromium comparison loaded the actual before/after full CSS cascade into identical synthetic component DOM: 52 cases (1024/1440 widths, normal/reduced motion, 13 pointer/keyboard/selected/disabled states). Every sampled geometry and computed property matched except five transition fields in the 26 reduced-motion cases: the existing reduced-motion rule now correctly wins (none/0s instead of 150ms). This verifies the component cascade, not application pixels.
+- Independent source review found no P0/P1. Existing empty-Review journeys now check the header, mode switch, center allocation, right actions, AI entry and Canvas row through Preview/Edit/Review; the CSS-only Review journey checks returning from a filtered-empty result.
+- Focused real Electron execution passed 2/2 at the normal window and at 1024px with a long source name, dark authored HTML, hover/focus/disabled states and reduced motion. Screenshot inspection exposed a pre-existing narrow-Review Grid bug: the overlay sidebar retained `grid-column: 2` after the layout became one column, creating a zero-width implicit track offscreen. The narrow rule now releases both Grid axes and raises the overlay above the Review directory; an exact hit-test plus close/reopen journey verifies it. Post-rebase verification also passed real Electron 4/4, including R4 annotation-capacity adoption and discard.
+- Final completion gate `2026-09-12T15-39-43-004Z-task` passed all 10/10 steps against `origin/main`: type/architecture, lint with 0 errors, Node contract/core, web and desktop builds, Browser 36/36, Electron 53/53 and AI 30/30; every selected Playwright test reported 0 failed / 0 skipped / 0 not executed. Independent review remained PASS with no P0/P1. This is not a complete stylesheet migration or full accessibility audit; shared trailing transition/focus ownership is recorded as P2, and stale changelog wording plus a fuller sidebar-bounds assertion as P3 without widening this package.
+
+
 ## 2026-09-12 — 合法空差异候选进入同一审阅页
 
 - Truth: 用户确认即使没有可定位变化也应进入审阅，保留 AI 草稿作为未来对话入口。

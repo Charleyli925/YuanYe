@@ -120,30 +120,25 @@
   display: none;
 }
 
+/* Mode switch owns its geometry and all material states here. */
 .canvas-mode-switch {
   position: relative;
   width: 180px;
   height: 34px;
   flex: none;
   display: grid;
+  align-items: center;
   grid-template-columns: repeat(3, 1fr);
   gap: 2px;
   padding: 2px;
   margin: 0;
-  border: 1px solid rgb(46 43 58 / 8%);
+  border: 1px solid var(--chrome-divider);
   border-radius: 9px;
-  background: rgb(43 40 53 / 3%);
+  background: var(--chrome-hover);
   box-shadow: none;
 }
 
-.canvas-mode-switch::before {
-  display: none;
-}
-
-.header-actions .canvas-mode-switch button,
-.header-actions .canvas-mode-switch button:hover:not(:disabled),
-.header-actions .canvas-mode-switch button[aria-pressed="true"],
-.header-actions .canvas-mode-switch button[aria-pressed="true"]:hover {
+.header-actions .canvas-mode-switch button {
   position: relative;
   width: auto;
   min-width: 0;
@@ -164,12 +159,31 @@
   transform: none;
 }
 
+.header-actions .canvas-mode-switch button:hover:not(:disabled) {
+  background: var(--chrome-hover);
+  color: var(--chrome-text);
+  box-shadow: none;
+  transform: none;
+}
+
 .header-actions .canvas-mode-switch button[aria-pressed="true"],
+.header-actions .canvas-mode-switch button[aria-pressed="true"]:hover,
 .header-actions .canvas-mode-switch button[aria-pressed="true"]:disabled {
-  background: #fff;
-  color: #37343e;
-  box-shadow: 0 1px 3px rgb(43 40 53 / 9%);
+  background: var(--chrome-toolbar-surface);
+  color: var(--chrome-text);
+  box-shadow: inset 0 0 0 1px rgb(91 83 143 / 16%), 0 1px 2px rgb(42 39 57 / 8%);
   opacity: 1;
+  transform: none;
+}
+
+.header-actions .canvas-mode-switch button:active:not(:disabled) {
+  background: var(--chrome-active);
+  box-shadow: none;
+}
+
+.header-actions .canvas-mode-switch button:focus-visible {
+  outline: 2px solid var(--chrome-focus);
+  outline-offset: 2px;
 }
 
 .canvas-mode-switch button > svg {
@@ -203,10 +217,6 @@
   display: flex;
   align-items: center;
   gap: 4px;
-}
-
-.unified-review-tools[data-disabled="true"] {
-  opacity: .42;
 }
 
 .toolbar-control-group {
@@ -349,9 +359,6 @@
     display: none;
   }
 
-  .workbench-toolbar-center .unified-review-tools[data-disabled="true"] {
-    display: none;
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {

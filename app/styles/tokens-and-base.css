@@ -106,42 +106,6 @@ input:focus-visible,
   min-width: 0;
 }
 
-.canvas-mode-switch {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  padding: 3px;
-  border: 1px solid #d9d6cf;
-  border-radius: 10px;
-  background: #eeece7;
-}
-
-.header-actions .canvas-mode-switch button {
-  min-width: 48px;
-  min-height: 28px;
-  padding: 0 10px;
-  border-radius: 7px;
-  color: #66676e;
-  font-size: 10px;
-  font-weight: 690;
-}
-
-.header-actions .canvas-mode-switch button[aria-pressed="true"] {
-  background: #fff;
-  color: var(--indigo-deep);
-  box-shadow: 0 1px 5px rgb(28 30 38 / 12%);
-}
-
-.header-actions .canvas-mode-switch button:hover:not(:disabled) {
-  background: rgb(255 255 255 / 72%);
-  color: var(--ink);
-}
-
-.header-actions .canvas-mode-switch button[aria-pressed="true"]:hover {
-  background: #fff;
-  color: var(--indigo-deep);
-}
-
 .header-actions button {
   min-height: 34px;
   padding: 0 10px;

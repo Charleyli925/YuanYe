@@ -23,6 +23,14 @@ React views
 Workbench renders a snapshot and dispatches product intent. It does not import
 the Bridge client, construct Sessions, or own debounce, polling, or drain.
 
+The top mode switch owns its geometry and material states in `app/styles/top-toolbar.css`.
+Shared chrome tokens remain in `workbench-chrome.css`; earlier base/review layers
+do not override this component. `file-header-view.tsx` keeps the Review portal
+slot mounted, while `review-toolbar-controls.tsx` renders only current capabilities.
+Embedded Review keeps its narrow conversation overlay in
+`ai-review-workspace.module.css`; the one-column breakpoint must release the
+sidebar's Grid row and column before positioning it against the right edge.
+
 ## Capability domains
 
 | Domain | Fact owner | Operation owner | Entry |

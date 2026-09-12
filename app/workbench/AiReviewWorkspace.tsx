@@ -2273,6 +2273,7 @@ export default function AiReviewWorkspace({
       {embedded && toolbarHost ? createPortal((
         <>
           <ReviewToolbarControls
+            hasChanges={reviewChanges.length > 0}
             pageView={canvasView}
             changeFilter={filter}
             scrollMode={scrollMode}
