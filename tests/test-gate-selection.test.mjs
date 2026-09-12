@@ -96,6 +96,7 @@ const TASK_OWNER_CASES = [
     file: "app/workbench/review-document.ts",
     nodeTests: [
       "tests/review-analysis-session.test.mjs",
+      "tests/review-annotation-fallback.test.mjs",
       "tests/review-badge-aggregation.test.mjs",
       "tests/review-projection-facts.test.mjs",
     ],
@@ -112,6 +113,7 @@ const TASK_OWNER_CASES = [
       "tests/review-analysis-session.test.mjs",
       "tests/review-badge-aggregation.test.mjs",
       "tests/review-projection-facts.test.mjs",
+      "tests/review-annotation-fallback.test.mjs",
     ],
     unrelatedOwners: [
       "tests/desktop-package.test.mjs",
@@ -123,6 +125,7 @@ const TASK_OWNER_CASES = [
   {
     file: "app/workbench/review/parse.ts",
     nodeTests: [
+      "tests/review-annotation-fallback.test.mjs",
       "tests/review-badge-aggregation.test.mjs",
       "tests/review-projection-facts.test.mjs",
     ],
@@ -135,7 +138,7 @@ const TASK_OWNER_CASES = [
       "build-desktop",
       "ai-review-smoke",
     ],
-    directOwners: ["tests/review-badge-aggregation.test.mjs", "tests/review-projection-facts.test.mjs"],
+    directOwners: ["tests/review-badge-aggregation.test.mjs", "tests/review-projection-facts.test.mjs", "tests/review-annotation-fallback.test.mjs"],
     unrelatedOwners: [
       "tests/desktop-package.test.mjs",
       "tests/desktop-preload-ipc.test.mjs",

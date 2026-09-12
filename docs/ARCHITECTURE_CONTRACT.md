@@ -831,9 +831,17 @@ Topology groups common IDs by source parent in one pass before sibling-order
 analysis, and each parent's identified-child indexes are built once. Per-parent
 rescans of the complete inventory and per-child rescans of siblings are forbidden.
 Analysis-local signature caches and projection facts are
-disposable; a trusted 25th distinct fact is an explicit analysis failure, while
-an oversized serialized payload fails closed rather than being treated as a
-complete review.
+disposable. Only the actual `ReviewProjectionFactOverflowError` from a trusted
+25th distinct canonical fact degrades optional annotations. After that failure,
+the analyzer reparses both original sources, clears reserved markup and repeats
+panel/action pairing; it never serializes the partially annotated DOM. The same
+formal comment-binding, serializer and bootstrap pipeline builds the pages.
+Transient `annotationAvailability: unavailable` retains visual source binding
+and evidence, with empty changes, outline and focus groups; the toolbar says
+“变化标注暂不可用，可直接查看前后页面。” instead of claiming equality.
+Cancellation discards the result before publication or cache insertion. Unknown
+errors, forged error codes, exact-atom/transport budgets, parse/pair/serialization
+and bootstrap failures remain failures; none enter a catch-all or old shell path.
 
 Exact completed review entries survive unrelated tab applications; only stale
 in-flight analysis is cancelled. Candidate-ready state does not start analysis;

@@ -63,6 +63,7 @@ corruption or lost user work.
 | Access-repair resend identity | Resend continues only the stored Request/document; switching files is not authorization to retarget | authority | in-place “当前文件已变化，不会重新发送” | RunWorkflow repair intent | stay on the original document or start a new round | keep |
 | Login stop unconfirmed | User cancel is not a confirmed stop; cleanup failure must not become cancelled or signed-in | reversible | in-card “停止未确认”; cancel drain returns false | Bridge `AgentAccessAuth` job state | retry cancel or wait for a later confirmed terminal | keep |
 | Review nonempty-change admission | Locate changes only when evidence exists; it does not establish Candidate validity | presentation | formerly refused the comparison for source-only output | validated Candidate plus existing VersionWorkflow adoption | same Review with an inline empty state | retired; empty-fact adopt/discard Electron coverage replaces the presentation gate |
+| Review canonical-fact annotation overflow | One element accepts at most 24 nonmergeable canonical facts; this does not establish Candidate validity | presentation | optional change annotations unavailable | Candidate identity/hash/path and explicit adoption remain authoritative | only the actual trusted overflow class rebuilds both original pages, pairs interactions and uses the same formal Review projection | degrade; unknown errors, serialization/transport budgets and cancellation still reject |
 
 ## Sample now exists; deletion still needs shadow
 

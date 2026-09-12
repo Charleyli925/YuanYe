@@ -2499,7 +2499,9 @@ export default function AiReviewWorkspace({
                 </div>
               </details> : (
                 <span className={styles.reviewEmpty} data-testid="review-empty-changes">
-                  {sourceContentEqual
+                  {documents.annotationAvailability === "unavailable"
+                    ? "变化标注暂不可用，可直接查看前后页面。"
+                    : sourceContentEqual
                     ? "前后 HTML 内容相同。"
                     : filter !== "all" && reviewChanges.length
                       ? "此筛选下没有可定位的变化。"

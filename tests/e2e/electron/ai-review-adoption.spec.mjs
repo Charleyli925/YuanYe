@@ -3349,3 +3349,76 @@ test("two lost committed adoption replies stay pending and recover one decision 
     removeSourceFixture(fixture.sourceDirectory);
   }
 });
+
+
+for (const adopt of [true, false]) {
+  test(`annotation capacity fallback keeps formal Review and ${adopt ? "adoption" : "discard"}`, {
+    tag: ["@gate-smoke", "@smoke-review"],
+  }, async ({}, testInfo) => {
+    test.setTimeout(120_000);
+    const fixture = createSourceFixture("annotation-capacity-fallback.html");
+    const original = readFileSync(fixture.sourcePath);
+    const launched = await launchPageRoot({ activeSourcePath: fixture.sourcePath });
+    try {
+      await installReviewObservationProbe(launched.page);
+      const request = await addCommentAndSubmit(launched.page, launched.electronApp, fixture.sourcePath);
+      writeAiOutput(request.requestRoot, (base) => base.replace(ORIGINAL_TEXT, UPDATED_TEXT));
+      runOfficialFinalizer(request.requestRoot, request.changeRequest);
+      await expect(launched.page.getByTestId("ai-conversation-action-bar"))
+        .toContainText("修改已准备好，尚未采用", { timeout: 30_000 });
+      await launched.page.evaluate(() => {
+        // Supply 24 valid facts at the parser's next append. The production
+        // accumulator itself throws the real overflow class on its 25th fact.
+        // This is a controlled capacity fault, not a forged Error or Candidate.
+        const get = Element.prototype.getAttribute;
+        window.__annotationCapacityFault = 0;
+        Element.prototype.getAttribute = function(name) {
+          if (name === "data-pageroot-review-projection-facts" && this.ownerDocument !== document
+            && window.__annotationCapacityFault === 0) {
+            window.__annotationCapacityFault += 1;
+            Element.prototype.getAttribute = get;
+            return JSON.stringify(Array.from({ length: 24 }, (_, index) => ({
+              id: `capacity-${index}`, type: "structure", semanticOwnerId: `owner-${index}`,
+              geometryOwnerId: `geometry-${index}`, scope: "element", operation: "insert", tone: "added",
+            })));
+          }
+          return Reflect.apply(get, this, [name]);
+        };
+      });
+      await launched.page.getByRole("button", { name: "查看修改" }).click();
+      await expect(launched.page.getByTestId("ai-review-workspace")).toBeVisible({ timeout: 30_000 });
+      await expect(launched.page.getByTestId("review-empty-changes"))
+        .toHaveText("变化标注暂不可用，可直接查看前后页面。");
+      expect(await launched.page.evaluate(() => window.__annotationCapacityFault)).toBe(1);
+      const before = launched.page.frameLocator('iframe[title^="修改前"]');
+      const after = launched.page.frameLocator('iframe[title^="修改后"]');
+      await expect(before.locator("body")).toContainText(ORIGINAL_TEXT);
+      await expect(after.locator("body")).toContainText(UPDATED_TEXT);
+      for (const frame of [before, after]) {
+        await expect(frame.locator("[data-pageroot-review-marker], span[data-pageroot-review-text]"))
+          .toHaveCount(0);
+        await expect(frame.locator("html")).toHaveAttribute("data-pageroot-review-focus", "all");
+      }
+      await expectReviewProjectionWithoutObservations(launched.page);
+      await expect(launched.page.getByRole("button", { name: "采用修改", exact: true })).toBeEnabled();
+      await launched.page.screenshot({ path: testInfo.outputPath("annotation-fallback.png"), animations: "disabled" });
+      if (adopt) {
+        await adoptReadyResult(launched.page);
+        await assertReviewAcceptPersistence({ page: launched.page, sourcePath: fixture.sourcePath,
+          original, expectedText: UPDATED_TEXT, versionPathPattern: /\.html$/u });
+      } else {
+        await launched.page.getByRole("button", { name: "不用这次", exact: true }).click();
+        await launched.page.getByRole("dialog", { name: /返回 AI 修改前（版本 \d+）？/u })
+          .getByRole("button", { name: "返回修改前版本" }).click();
+        await expect(launched.page.getByTestId("ai-review-workspace")).toHaveCount(0);
+        expect(readFileSync(fixture.sourcePath).equals(original)).toBe(true);
+        const project = await launched.page.evaluate(() => window.htmlAIProjects?.getActiveProject());
+        expect(readFileSync(project.sourcePath, "utf8")).not.toContain(UPDATED_TEXT);
+        await expect(launched.page.locator(".comment-card")).not.toHaveCount(0);
+      }
+    } finally {
+      await stopPageRoot(launched.electronApp, launched.isolatedUserData);
+      removeSourceFixture(fixture.sourceDirectory);
+    }
+  });
+}

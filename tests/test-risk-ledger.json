@@ -217,6 +217,12 @@
       "primaryOwner": "review-document-orchestrator",
       "oracle": "Candidate HTML + Version identity + Review projection",
       "stage": "on-demand"
+    },
+    "tests/e2e/browser/native-dom-review-annotation-fallback.spec.mjs": {
+      "riskId": "ai-candidate-review-annotation-capacity",
+      "primaryOwner": "review-document-orchestrator",
+      "oracle": "actual per-element fact overflow discards partial markers and preserves original-page projection; exact-atom transport overflow still rejects",
+      "stage": "draft-canary"
     }
   }
 }

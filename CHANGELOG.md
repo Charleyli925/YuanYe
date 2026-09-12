@@ -4,6 +4,8 @@ Notable user-visible changes are documented here. This project follows Semantic 
 
 ## [Unreleased]
 
+- 审阅的变化标注达到事实容量上限时，保留前后页面、评论与决定流程，并明确说明标注暂不可用。
+
 - AI 审阅只为可能显示样式框的区域采集可选视觉证据，移除已停用的 shell 准备链；文字和结构标注、评论、页面交互与采用决定保持原有流程。
 
 - AI 返回的完整 HTML 即使与本轮输入相同，也可进入同一审阅流程，由用户决定采用或不用。采用前会说明仍将创建正式版本并归档本轮未再修改的要求；既有无修改终态保持原历史记录。

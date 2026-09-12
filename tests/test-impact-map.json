@@ -1437,7 +1437,8 @@
       ],
       "nodeTests": [
         "tests/review-badge-aggregation.test.mjs",
-        "tests/review-projection-facts.test.mjs"
+        "tests/review-projection-facts.test.mjs",
+        "tests/review-annotation-fallback.test.mjs"
       ]
     },
     {

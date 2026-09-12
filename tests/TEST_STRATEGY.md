@@ -267,7 +267,11 @@ Workbench 只确认已提交 loading surface、传入窄 port 并消费快照。
   Electron AI 闭环还必须从真实评论附件上传开始，验证 Request 内冻结文件的
   实际字节、manifest Hash 与删除 Draft 原件后的可读性，不得只断言 JSON 元数据。
   `ReviewAnalysisSession` 的 Node oracle 另证明确切 key 合并、异步让步、运行中
-  取消和按字节 LRU。Node oracle 必须区分普通插入、同父重排与跨父移动，证明
+  取消和按字节 LRU。`review-annotation-fallback` 的 Node oracle 执行生产编排与真实
+  canonical fact 累计器，证明 24/25/可合并边界、仅实际溢出类降级、恢复失败继续拒绝、
+  取消后不发布或缓存；真实 Chromium companion 在已插入文本标记后注入同一累计器
+  的溢出，证明重解析原始双页、清除临时标记、保留评论、panel/action 配对及正式 bootstrap。
+  Node fixture 不替代真实 DOM 或 Electron 中的采用/不用验收。Node oracle 必须区分普通插入、同父重排与跨父移动，证明
   Stable ID 支持多宿主 evidence 映射，并证明重复/非法/缺失 ID 只禁用视觉增强，
   不取消既有源码 matcher。纯函数 oracle 覆盖 `changed / unchanged / unverified`、
   source Hash、Session、generation、隐藏内容、外链运行库、1001 个 Stable ID 后的
