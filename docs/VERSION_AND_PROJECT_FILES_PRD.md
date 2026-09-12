@@ -361,26 +361,15 @@ V2 工作文件第一次建立时与 V2 正式快照逐字节一致。V2 正式�
 - 保存工作 HTML 时不得以无条件替换覆盖可见文件：系统先在私有恢复目录保留旧源字节，再以 no-replace 方式发布已验证的新字节。窗口期出现的外部写入必须保留并报告冲突；即使外部编辑器持有已停放旧 inode 的文件描述符并在发布后继续写入，清理前也必须复验并保留该恢复副本，不能删除。若进程已写入 `committed` 但私有恢复目录仍在，重开时也必须先做同一复验，不能跳过为已完成。崩溃恢复只能完成已安全停放的事务或恢复旧字节，不能猜测或删除外部文件。
 - `Cmd+S` 可立即触发同一保存机制，但不创建正式版本。
 
-### 8.3 从历史版本继续编辑
+### 8.3 从历史版本开始新迭代
 
-历史查看和继续编辑是两个动作：
+历史查看和编辑是两个动作。打开版本 2 时精确显示 V2 的不可变快照，保持只读且不替换当前 DocumentSession。工具栏“编辑”先确认创建下一正式版本；取消保持历史视图和原工作文件。确认后使用现行历史创建事务，由 create、query 和 openCreatedHistoryVersion 完成创建、结果核对和打开。创建结果未知时只查询同一 operation，已创建但打开失败时只重试打开，不分配第二个版本。
 
-1. 在版本历史中打开版本 2，先精确显示版本 2 的不可变快照，状态为只读。
-2. 用户点击“基于版本 2 继续编辑”后：
-   - 系统只接受 manifest 中 `versionId=V2` 且 `basedOnVersionId=V2` 的唯一原有 Working Copy；缺失、重复、状态/快照 Hash 不完整时失败关闭，不从快照临时重建或猜测另一份文件。
-   - 在切换前完整校验该 Working Copy state、可见工作文件、不可变 V2 快照、Registry 根目录和完整 OpenTarget 身份；成功后打开原有工作文件，不根据快照字节差异生成额外的用户状态徽标。
-   - Finder 定位该历史 Version 的可见工作文件时也执行同一受控重命名恢复：只在旧映射缺失、`workingCopyId` 不变且同根文件标识唯一时更新 manifest，不能因非活动文件路径陈旧而改为定位隐藏快照或猜测另一份 HTML。
-3. 后续编辑全部保存到 V2 工作文件，不覆盖正式 V2，也不创建新项目。
+Finder 定位历史 Version 的可见工作文件仍执行受控重命名恢复：只有稳定 `workingCopyId` 和同根唯一文件标识足以核对，才更新 manifest；不能改为定位隐藏快照或猜测另一份 HTML。
 
-该动作是窄的、可重试的“激活指定 Version 的 Working Copy”操作。Repository 先原子写入 V2 指针和 `desktop-pending` 回执；Bridge、桌面激活或确认响应在提交后丢失时，重放该回执的 `operationId` 与 Version 必须仍指向同一 `workingCopyId`，不得因为当前 Registry runtime 已经指向 V2 而拒绝重试，也不得伪造回滚到 V6。Desktop 对新操作只接受仍以原 `previousSourcePath` 为活动文件的前序，完成字节 Hash 校验后 Bridge 确认同一回执；随后才在一个无 `await` 的发布边界同步更新 `ProjectSession`、`DocumentSession`、`VersionSession`、`DraftSession` 与 `CommentSession`，再允许新 Canvas generation 接受回报。
+旧版本已经写入的 `historyActivation` 保持兼容：当前 Renderer 不再提供旧激活命令；旧 `/history-version/continue` 只能重放匹配的存量回执，不能创建回执或更换活动工作稿。项目、文档、Version、前序和目标 Working Copy 必须完整一致；缺失或不匹配时，在任何 Workspace 恢复、改名修复或外部源协调之前拒绝。重复点击返回原 operation ID；桌面确认只将原回执从 pending 改为 confirmed 一次，重复确认返回 `confirmed: false`。
 
-若项目最新正式版本已经是版本 6，界面必须同时显示：
-
-> 基于版本 2 的本地编辑 · 已保存
->
-> 项目最新正式版本：版本 6
-
-用户无需“恢复当前版本”，也不需要先创建分支。系统不能因为 V2 与某个较新版本 Hash 相同而跳转到较新文件。
+存量项目若最新正式版本为 V6、活动工作稿仍基于 V2，重启、打开和保存继续保留该 V2 工作稿，不因最新指针或相同 Hash 跳到 V6，也不改写不可变 V2 快照。以后明确采纳 Candidate 创建 V7，其谱系仍为 `basedOnVersionId=V2`、`previousVersionId=V6`。当前历史创建与 Promotion 成功时继续按各自既有事务清除旧激活回执；不批量迁移历史记录。
 
 ### 8.4 从 Finder 打开与受管 HTML 路径变化
 
@@ -529,7 +518,7 @@ AI 只能写入固定 Attempt 输出 `.pageroot/requests/<requestId>/attempts/<a
 |---|---|---|
 | 首次导入 | `V1 · 已导入 PageRoot` | `在文件夹中打开` |
 | V1 本地修改 | `基于 V1 · 本地修改已保存` | `项目最新 V1` |
-| 打开历史快照 | `正在查看 V2 · 只读浏览` | `基于此版本继续编辑` |
+| 打开历史快照 | `正在查看 V2 · 只读浏览` | `编辑`（确认创建新版本） |
 | 编辑历史 V2 | `基于 V2 · 项目最新 V6 · 本地修改已保存` | `当前编辑基础 V2` |
 | AI 已返回 | `基于 V2 · 项目最新 V6 · 候选 V7 待审阅` | `审阅候选` |
 | 候选已采纳 | `基于 V2 · 项目最新 V7` | `在文件夹中打开` |

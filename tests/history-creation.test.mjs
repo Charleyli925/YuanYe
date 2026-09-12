@@ -1,3 +1,4 @@
+import { seedLegacyHistoryActivation } from "./helpers/legacy-history-activation.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { sha256 } from "../bridge/lifecycle-core.mjs";
@@ -128,8 +129,8 @@ test("legacy current Working Copy remains selected until explicit historical cre
   const value = await fixture(t);
   const { target } = await importSource(value);
   const latest = await promoteNextVersion(value.repository, target, "latest");
-  const activated = await value.repository.activateVersionWorkingCopy({ target: latest, versionId: "ver_0001",
-    operationId: "legacy_activation_0001", expectedActiveWorkingCopyId: "work_ver_0002" });
+  const activated = await value.repository.replayHistoryVersionActivation(await seedLegacyHistoryActivation({ target: latest, versionId: "ver_0001",
+    operationId: "legacy_activation_0001", expectedActiveWorkingCopyId: "work_ver_0002" }));
   await value.repository.confirmVersionWorkingCopyActivation({ target: latest, operationId: "legacy_activation_0001",
     previousWorkingCopyId: "work_ver_0002", activatedWorkingCopyId: "work_ver_0001", versionId: "ver_0001" });
   const before = await value.repository.workspace({ sourcePath: activated.target.exactSourcePath });

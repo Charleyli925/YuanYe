@@ -1,3 +1,4 @@
+import { seedLegacyHistoryActivation } from "./helpers/legacy-history-activation.mjs";
 import assert from "node:assert/strict";
 import {
   lstat,
@@ -198,7 +199,7 @@ test("legacy Promotion journals without a Working Copy hash remain recoverable",
   }
 });
 
-test("a historical Version reactivates its original Working Copy without changing its immutable snapshot", async (t) => {
+test("a legacy activation receipt retains its original Working Copy, immutable snapshot and later V7 lineage", async (t) => {
   const value = await fixture(t);
   const imported = await importSource(value, "history-lineage.html");
   let active = imported.target;
@@ -245,18 +246,19 @@ test("a historical Version reactivates its original Working Copy without changin
   assert.equal(visibleV2.workingCopyPath, v2Target?.exactSourcePath);
   assert.equal(visibleV2.sourceSha256, v2Target?.sourceSha256);
 
-  const activated = await value.repository.activateVersionWorkingCopy({
+  const activated = await value.repository.replayHistoryVersionActivation(await seedLegacyHistoryActivation({
     target: active,
     versionId: "ver_0002",
     operationId: "history_continue_v2_0001",
     expectedActiveWorkingCopyId: "work_ver_0006",
-  });
-  assert.equal(activated.activated, true);
+  }));
+  assert.equal(activated.activated, false);
+  assert.equal(activated.replayed, true);
   assert.equal(activated.previousWorkingCopyId, "work_ver_0006");
   assert.equal(activated.target.versionId, "ver_0002");
   assert.equal(activated.target.workingCopyId, "work_ver_0002");
   assert.equal(activated.historyActivation.state, "desktop-pending");
-  const retried = await value.repository.activateVersionWorkingCopy({
+  const retried = await value.repository.replayHistoryVersionActivation({
     target: active,
     versionId: "ver_0002",
     operationId: "history_continue_v2_0001",
@@ -267,7 +269,7 @@ test("a historical Version reactivates its original Working Copy without changin
   assert.equal(retried.previousWorkingCopyId, "work_ver_0006");
   assert.equal(retried.target.workingCopyId, activated.target.workingCopyId);
 
-  const resumedAfterLostResponse = await value.repository.activateVersionWorkingCopy({
+  const resumedAfterLostResponse = await value.repository.replayHistoryVersionActivation({
     target: active,
     versionId: "ver_0002",
     operationId: "history_retry_after_lost_response_0001",
@@ -304,7 +306,7 @@ test("a historical Version reactivates its original Working Copy without changin
   assert.equal(runtimeAfterActivation.activeWorkingCopyId, "work_ver_0002");
   assert.equal(runtimeAfterActivation.historyActivation.state, "desktop-confirmed");
 
-  const resumedAfterConfirmationLoss = await value.repository.activateVersionWorkingCopy({
+  const resumedAfterConfirmationLoss = await value.repository.replayHistoryVersionActivation({
     target: active,
     versionId: "ver_0002",
     operationId: "history_retry_after_confirmation_loss_0001",
@@ -317,14 +319,14 @@ test("a historical Version reactivates its original Working Copy without changin
   );
 
   await assert.rejects(
-    value.repository.activateVersionWorkingCopy({
+    value.repository.replayHistoryVersionActivation({
       target: active,
       versionId: "ver_0003",
       operationId: "history_stale_v3_0001",
       expectedActiveWorkingCopyId: "work_ver_0006",
     }),
     (error) => error instanceof ProjectFileRepositoryError
-      && error.code === "HISTORY_ACTIVATION_PREDECESSOR_CONFLICT",
+      && error.code === "HISTORY_ACTIVATION_RECEIPT_MISMATCH",
   );
 
   const v2Edited = html("editable V2 after history continuation");

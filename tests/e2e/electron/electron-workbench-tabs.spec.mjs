@@ -1,3 +1,4 @@
+import { seedLegacyHistoryActivation } from "../../helpers/legacy-history-activation.mjs";
 import { expect, test } from "@playwright/test";
 import { loadedDiskFrame as loadedStaticDiskFrame } from "./helpers/pageroot-app-fixture.mjs";
 import {
@@ -462,10 +463,10 @@ test("Electron sidebar opens an imported historical version in the existing proj
     let target = imported.target;
     for (const [ordinal, title] of Array.from({ length: 7 }, (_, index) => [index + 2, `sidebar history V${index + 2}`])) {
       if (ordinal === 3) {
-        const continued = await repository.activateVersionWorkingCopy({
+        const continued = await repository.replayHistoryVersionActivation(await seedLegacyHistoryActivation({
           target, versionId: "ver_0001", operationId: "e2e_sidebar_branch_v1_0001",
           expectedActiveWorkingCopyId: "work_ver_0002",
-        });
+        }));
         await repository.confirmVersionWorkingCopyActivation({
           target, operationId: continued.historyActivation.operationId,
           previousWorkingCopyId: "work_ver_0002", activatedWorkingCopyId: "work_ver_0001", versionId: "ver_0001",

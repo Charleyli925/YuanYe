@@ -1,3 +1,4 @@
+import { seedLegacyHistoryActivation } from "../../helpers/legacy-history-activation.mjs";
 import { expect, test } from "@playwright/test";
 import {
   ORIGINAL_LIST_TEXT,
@@ -292,12 +293,12 @@ test("Electron Finder reveals verified project, visible Version Working Copy and
       if (ordinal === 2) v2Target = active;
     }
     expect(v2Target?.workingCopyId).toBe("work_ver_0002");
-    const continued = await repository.activateVersionWorkingCopy({
+    const continued = await repository.replayHistoryVersionActivation(await seedLegacyHistoryActivation({
       target: active,
       versionId: "ver_0002",
       operationId: "e2e_finder_continue_v2_0001",
       expectedActiveWorkingCopyId: "work_ver_0006",
-    });
+    }));
     const desktopV2 = await launched.page.evaluate((payload) => (
       window.htmlAIProjects.activateManagedWorkingCopy(payload)
     ), {

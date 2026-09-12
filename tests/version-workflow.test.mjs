@@ -128,8 +128,6 @@ function createHarness({
   queryCreation = null,
   workspaceRead = null,
   confirmCreation = async () => ({}),
-  continueHistory = null,
-  confirmHistory = null,
   verifyRendered = null,
   onDrain = null,
   observeExternalSourceChange = async () => ({ status: "succeeded" }),
@@ -163,7 +161,6 @@ function createHarness({
     queryCreation: [],
     activate: 0,
     activateInputs: [],
-    continueHistory: [],
     versionFile: [],
     source: [],
     drain: [],
@@ -178,7 +175,6 @@ function createHarness({
     resetComments: 0,
     queueDraft: 0,
     draftAuthorities: [],
-    confirmHistory: [],
     catalogAfterSettlement: [],
     order: [],
   };
@@ -239,76 +235,7 @@ function createHarness({
         version,
       };
     },
-    async continueEditingHistoryVersion(input) {
-      calls.continueHistory.push(input);
-      if (continueHistory) return continueHistory(input);
-      return {
-        ok: true,
-        status: "history-working-copy-activated",
-        projectId: "project_a",
-        documentId: "document_a",
-        sourcePath: SOURCE_A,
-        openTarget: {
-          projectId: "project_a",
-          documentId: "document_a",
-          projectRootPath: "/tmp/project-a",
-          targetKind: "working-copy",
-          workingCopyId: "work_ver_0001",
-          versionId: "ver_0001",
-          exactSourcePath: SOURCE_A,
-          sourceSha256: sha256(BASE_HTML),
-        },
-        currentHtmlSha256: sha256(BASE_HTML),
-        currentBasedOnVersionId: "ver_0001",
-        currentExactVersionId: "ver_0001",
-        restoredFromVersionId: null,
-        latestVersionId: "ver_0001",
-        versions: [versionRecord({ id: "ver_0001", content: BASE_HTML })],
-        content: BASE_HTML,
-        lastModifiedAt: "2026-08-12T00:00:02.000Z",
-        historyActivation: {
-          operationId: input.operationId,
-          projectId: "project_a",
-          documentId: "document_a",
-          previousWorkingCopyId: "work_ver_0001",
-          activatedWorkingCopyId: "work_ver_0001",
-          versionId: "ver_0001",
-          state: "desktop-pending",
-          createdAt: "2026-08-12T00:00:03.000Z",
-        },
-        operationId: input.operationId,
-        activeDraft: {
-          draftRevision: 0,
-          comments: [],
-          changeEvents: [],
-          deletedCommentIds: [],
-          appliedOperationIds: [],
-        },
-      };
-    },
-    async confirmEditingHistoryVersion(input) {
-      calls.confirmHistory.push(input);
-      calls.order.push("confirm");
-      if (confirmHistory) return confirmHistory(input);
-      return {
-        ok: true,
-        status: "history-working-copy-desktop-confirmed",
-        projectId: input.projectId,
-        documentId: input.documentId,
-        operationId: input.operationId,
-        confirmed: true,
-        historyActivation: {
-          operationId: input.operationId,
-          projectId: input.projectId,
-          documentId: input.documentId,
-          previousWorkingCopyId: input.previousWorkingCopyId,
-          activatedWorkingCopyId: input.activatedWorkingCopyId,
-          versionId: input.versionId,
-          state: "desktop-confirmed",
-          createdAt: "2026-08-12T00:00:03.000Z",
-        },
-      };
-    },
+
   };
   const projectWorkflow = {
     projectHydrating: false,
@@ -871,285 +798,6 @@ test("failed history load leaves the current source and navigation exit availabl
   assert.equal((await harness.workflow.returnToCurrent({ context: harness.context })).status, "succeeded");
 });
 
-test("history continuation synchronously publishes the V2 Working Copy authority to every Session", async () => {
-  const v2 = versionRecord({ id: "ver_0002", content: HISTORY_HTML });
-  const v6 = versionRecord({ id: "ver_0006", content: CANDIDATE_HTML });
-  const historyDraft = {
-    draftRevision: 4,
-    comments: [{ commentId: "comment_v2", text: "V2 draft comment", target: { targetId: "target_v2", selector: "body", tagName: "body", level: "module" } }],
-    changeEvents: [{ eventId: "change_v2", kind: "text", createdAt: "2026-08-14T00:00:00.000Z", target: { targetId: "target_v2", selector: "body", tagName: "body", level: "module" }, before: "old", after: "new", basedOnVersionId: "ver_0002", revision: 1 }],
-    deletedCommentIds: ["comment_deleted_v2"],
-    appliedOperationIds: ["operation_v2"],
-  };
-  const harness = createHarness({
-    onCatalogAfterSettlement: () => new Promise(() => {}),
-    versionRead: async (sourcePath, versionId) => ({
-      projectId: "project_a",
-      documentId: "document_a",
-      versionId,
-      content: versionId === "ver_0002" ? HISTORY_HTML : CANDIDATE_HTML,
-      sha256: sha256(versionId === "ver_0002" ? HISTORY_HTML : CANDIDATE_HTML),
-      sourcePath,
-    }),
-    continueHistory: async (input) => ({
-      ok: true,
-      status: "history-working-copy-activated",
-      projectId: "project_a",
-      documentId: "document_a",
-      sourcePath: HISTORY_WORKING_COPY_PATH,
-      openTarget: {
-        projectId: "project_a",
-        documentId: "document_a",
-        projectRootPath: "/tmp/project-a",
-        targetKind: "working-copy",
-        workingCopyId: "work_ver_0002",
-        versionId: "ver_0002",
-        exactSourcePath: HISTORY_WORKING_COPY_PATH,
-        sourceSha256: sha256(HISTORY_HTML),
-      },
-      currentHtmlSha256: sha256(HISTORY_HTML),
-      currentBasedOnVersionId: "ver_0002",
-      currentExactVersionId: "ver_0002",
-      restoredFromVersionId: null,
-      latestVersionId: "ver_0006",
-      versions: [v2, v6],
-      content: HISTORY_HTML,
-      lastModifiedAt: "2026-08-14T00:00:00.000Z",
-      historyActivation: {
-        operationId: input.operationId,
-        projectId: "project_a",
-        documentId: "document_a",
-        previousWorkingCopyId: "work_ver_0006",
-        activatedWorkingCopyId: "work_ver_0002",
-        versionId: "ver_0002",
-        state: "desktop-pending",
-        createdAt: "2026-08-14T00:00:00.000Z",
-      },
-      operationId: input.operationId,
-      activeDraft: historyDraft,
-    }),
-  });
-  harness.versionSession.hydrate({
-    versions: decodedVersions([v2, v6]),
-    latestVersionId: "ver_0006",
-    currentBasedOnVersionId: "ver_0006",
-    currentExactVersionId: "ver_0006",
-  });
-
-  const viewed = await harness.workflow.viewHistory({
-    version: decodedVersions([v2])[0],
-    context: harness.context,
-  });
-  assert.equal(viewed.status, "succeeded");
-  assert.equal(harness.versionSession.snapshot.viewMode, "history");
-  assert.equal(harness.documentSession.html, BASE_HTML);
-  assert.equal(harness.versionSession.snapshot.historyPreview.content, HISTORY_HTML);
-  assert.equal(harness.versionSession.snapshot.latestVersionId, "ver_0006");
-
-  const continued = await harness.workflow.continueEditingHistoryVersion({
-    context: harness.projectSession.context,
-  });
-  assert.equal(continued.status, "succeeded");
-  assert.equal(continued.value.workingCopyId, "work_ver_0002");
-  assert.equal(harness.projectSession.context.sourcePath, HISTORY_WORKING_COPY_PATH);
-  assert.equal(harness.projectSession.context.workingCopyId, "work_ver_0002");
-  assert.equal(harness.documentSession.html, HISTORY_HTML);
-  assert.equal(harness.versionSession.snapshot.viewMode, "current");
-  assert.equal(harness.versionSession.snapshot.currentBasedOnVersionId, "ver_0002");
-  assert.equal(harness.versionSession.snapshot.currentExactVersionId, "ver_0002");
-  assert.equal(harness.versionSession.snapshot.latestVersionId, "ver_0006");
-  assert.deepEqual(harness.commentSession.snapshot.comments, commentsFromRecords(historyDraft.comments));
-  assert.deepEqual(harness.commentSession.snapshot.changeEvents, changesFromDraftRecords(historyDraft.changeEvents));
-  assert.deepEqual(
-    harness.commentSession.snapshot.deletedCommentIds,
-    historyDraft.deletedCommentIds,
-  );
-  assert.equal(harness.calls.draftAuthorities.length, 1);
-  assert.equal(harness.calls.draftAuthorities[0].draftRevision, historyDraft.draftRevision);
-  assert.deepEqual(harness.calls.draftAuthorities[0].authority.comments, historyDraft.comments);
-  assert.equal(harness.calls.continueHistory.length, 1);
-  assert.equal(harness.calls.continueHistory[0].versionId, "ver_0002");
-  assert.equal(harness.calls.prepare[0].openTarget.workingCopyId, "work_ver_0002");
-  assert.equal(harness.calls.prepare[0].operationId, harness.calls.confirmHistory[0].operationId);
-  assert.equal(harness.calls.confirmHistory.length, 1);
-  assert.equal(harness.calls.render.at(-1)?.html, HISTORY_HTML);
-  assert.deepEqual(harness.calls.order, ["confirm", "catalog"]);
-  assert.equal(harness.calls.catalogAfterSettlement.length, 1);
-  assert.equal(harness.calls.catalogAfterSettlement[0].sourcePath, HISTORY_WORKING_COPY_PATH);
-});
-
-test("history continuation retries one lost Bridge response with the same receipt operation", async () => {
-  const v2 = versionRecord({ id: "ver_0002", content: HISTORY_HTML });
-  const v6 = versionRecord({ id: "ver_0006", content: CANDIDATE_HTML });
-  let attempts = 0;
-  const harness = createHarness({
-    versionRead: async (_sourcePath, versionId) => ({
-      projectId: "project_a",
-      documentId: "document_a",
-      versionId,
-      content: versionId === "ver_0002" ? HISTORY_HTML : CANDIDATE_HTML,
-      sha256: sha256(versionId === "ver_0002" ? HISTORY_HTML : CANDIDATE_HTML),
-    }),
-    continueHistory: async (input) => {
-      attempts += 1;
-      if (attempts === 1) {
-        throw new BridgeRequestError("response lost", { outcome: "unknown" });
-      }
-      return {
-        ok: true,
-        status: "history-working-copy-activated",
-        projectId: "project_a",
-        documentId: "document_a",
-        sourcePath: HISTORY_WORKING_COPY_PATH,
-        openTarget: {
-          projectId: "project_a",
-          documentId: "document_a",
-          projectRootPath: "/tmp/project-a",
-          targetKind: "working-copy",
-          workingCopyId: "work_ver_0002",
-          versionId: "ver_0002",
-          exactSourcePath: HISTORY_WORKING_COPY_PATH,
-          sourceSha256: sha256(HISTORY_HTML),
-        },
-        currentHtmlSha256: sha256(HISTORY_HTML),
-        currentBasedOnVersionId: "ver_0002",
-        currentExactVersionId: "ver_0002",
-        restoredFromVersionId: null,
-        latestVersionId: "ver_0006",
-        versions: [v2, v6],
-        content: HISTORY_HTML,
-        lastModifiedAt: "2026-08-14T00:00:00.000Z",
-        historyActivation: {
-          operationId: input.operationId,
-          projectId: "project_a",
-          documentId: "document_a",
-          previousWorkingCopyId: "work_ver_0006",
-          activatedWorkingCopyId: "work_ver_0002",
-          versionId: "ver_0002",
-          state: "desktop-pending",
-          createdAt: "2026-08-14T00:00:00.000Z",
-        },
-        operationId: input.operationId,
-        activeDraft: {
-          draftRevision: 0,
-          comments: [],
-          changeEvents: [],
-          deletedCommentIds: [],
-          appliedOperationIds: [],
-        },
-      };
-    },
-  });
-  harness.versionSession.hydrate({
-    versions: decodedVersions([v2, v6]),
-    latestVersionId: "ver_0006",
-    currentBasedOnVersionId: "ver_0006",
-    currentExactVersionId: "ver_0006",
-  });
-  assert.equal((await harness.workflow.viewHistory({ version: decodedVersions([v2])[0], context: harness.context })).status, "succeeded");
-
-  const outcome = await harness.workflow.continueEditingHistoryVersion({
-    context: harness.projectSession.context,
-  });
-
-  assert.equal(outcome.status, "succeeded");
-  assert.equal(harness.calls.continueHistory.length, 2);
-  assert.equal(
-    harness.calls.continueHistory[0].operationId,
-    harness.calls.continueHistory[1].operationId,
-  );
-  assert.equal(harness.calls.prepare[0].operationId, harness.calls.continueHistory[0].operationId);
-  assert.equal(harness.calls.confirmHistory[0].operationId, harness.calls.continueHistory[0].operationId);
-});
-
-test("history continuation keeps the V2 Working Copy active when Canvas validation fails", async () => {
-  let failHistoryRender = false;
-  const harness = createHarness({
-    versionRead: async () => ({
-      projectId: "project_a",
-      documentId: "document_a",
-      versionId: "ver_0002",
-      content: HISTORY_HTML,
-      sha256: sha256(HISTORY_HTML),
-    }),
-    continueHistory: async (input) => ({
-      ok: true,
-      status: "history-working-copy-activated",
-      projectId: "project_a",
-      documentId: "document_a",
-      sourcePath: HISTORY_WORKING_COPY_PATH,
-      openTarget: {
-        projectId: "project_a",
-        documentId: "document_a",
-        projectRootPath: "/tmp/project-a",
-        targetKind: "working-copy",
-        workingCopyId: "work_ver_0002",
-        versionId: "ver_0002",
-        exactSourcePath: HISTORY_WORKING_COPY_PATH,
-        sourceSha256: sha256(HISTORY_HTML),
-      },
-      currentHtmlSha256: sha256(HISTORY_HTML),
-      currentBasedOnVersionId: "ver_0002",
-      currentExactVersionId: "ver_0002",
-      restoredFromVersionId: null,
-      latestVersionId: "ver_0006",
-      versions: [
-        versionRecord({ id: "ver_0002", content: HISTORY_HTML }),
-        versionRecord({ id: "ver_0006", content: CANDIDATE_HTML }),
-      ],
-      content: HISTORY_HTML,
-      lastModifiedAt: "2026-08-14T00:00:00.000Z",
-      historyActivation: {
-        operationId: input.operationId,
-        projectId: "project_a",
-        documentId: "document_a",
-        previousWorkingCopyId: "work_ver_0006",
-        activatedWorkingCopyId: "work_ver_0002",
-        versionId: "ver_0002",
-        state: "desktop-pending",
-        createdAt: "2026-08-14T00:00:00.000Z",
-      },
-      operationId: input.operationId,
-      activeDraft: {
-        draftRevision: 0,
-        comments: [],
-        changeEvents: [],
-        deletedCommentIds: [],
-        appliedOperationIds: [],
-      },
-    }),
-    verifyRendered: async (html) => {
-      if (failHistoryRender && html === HISTORY_HTML) throw new Error("history canvas failed");
-    },
-  });
-  harness.versionSession.hydrate({
-    versions: decodedVersions([
-      versionRecord({ id: "ver_0002", content: HISTORY_HTML }),
-      versionRecord({ id: "ver_0006", content: CANDIDATE_HTML }),
-    ]),
-    latestVersionId: "ver_0006",
-    currentBasedOnVersionId: "ver_0006",
-    currentExactVersionId: "ver_0006",
-  });
-  const viewed = await harness.workflow.viewHistory({
-    version: { id: "ver_0002", contentSha256: sha256(HISTORY_HTML) },
-    context: harness.context,
-  });
-  assert.equal(viewed.status, "succeeded");
-  failHistoryRender = true;
-
-  const outcome = await harness.workflow.continueEditingHistoryVersion({
-    context: harness.context,
-  });
-
-  assert.equal(outcome.status, "unknown");
-  assert.equal(harness.calls.confirmHistory.length, 1);
-  assert.equal(harness.projectSession.context.sourcePath, HISTORY_WORKING_COPY_PATH);
-  assert.equal(harness.versionSession.snapshot.viewMode, "current");
-  assert.equal(harness.versionSession.snapshot.currentBasedOnVersionId, "ver_0002");
-  assert.equal(harness.documentSession.html, HISTORY_HTML);
-});
-
 test("return-current preserves working authority and checks external changes independently", async () => {
   const observation = deferred();
   let observedPath;
@@ -1169,23 +817,6 @@ test("return-current preserves working authority and checks external changes ind
   assert.equal(harness.versionSession.snapshot.historyPreview, null);
   assert.equal(harness.versionSession.snapshot.currentExactVersionId, "ver_0001");
   observation.resolve({ status: "rejected", reason: "file unavailable" });
-});
-
-test("malformed committed history response remains unknown and preserves Session authority", async () => {
-  const harness = createHarness({ continueHistory: async () => ({
-    ok: true, status: "history-working-copy-activated", projectId: "project_a", documentId: "document_a",
-    versions: [versionRecord({ id: "ver_0001" }), versionRecord({ id: "ver_0001" })],
-  }) });
-  harness.versionSession.enterHistory("ver_0001");
-  const previous = harness.versionSession.snapshot;
-  const project = harness.projectSession.context;
-  const html = harness.documentSession.html;
-  const outcome = await harness.workflow.continueEditingHistoryVersion({ context: project });
-  assert.equal(outcome.status, "unknown");
-  assert.equal(harness.versionSession.snapshot, previous);
-  assert.equal(harness.projectSession.context.sourcePath, project.sourcePath);
-  assert.equal(harness.documentSession.html, html);
-  assert.equal(harness.calls.confirmHistory.length, 0);
 });
 
 test("a late historical read cannot publish into another project", async () => {
@@ -1278,7 +909,6 @@ test("created history opens through verified workspace and lost opened acknowled
   assert.equal(harness.versionSession.snapshot.viewMode, "current");
   assert.equal(harness.workflow.getSnapshot().creation.phase, "opened");
   assert.equal(harness.calls.createHistory.length, 0);
-  assert.equal(harness.calls.continueHistory.length, 0);
 });
 
 test("created history workspace failure keeps history usable and retries only opening", async () => {

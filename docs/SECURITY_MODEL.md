@@ -587,6 +587,17 @@ a one-use ticket; start compares that ticket to the durable Request selection.
 Malformed policies, cross-provider model ids, unknown providers and selection
 drift fail closed.
 
+### Legacy historical activation receipts
+
+Retiring the old activation command does not retire persisted v4 receipts.
+The compatibility continuation and confirmation routes validate registered
+project/document identity and the complete receipt before any Workspace recovery,
+registered-root repair or external-source coordination. Missing or mismatched
+receipts grant no write authority. Continuation only replays the existing original
+operation; confirmation changes its pending state once. Neither route may author
+another activation receipt or select a different active Working Copy. Existing
+state/snapshot/source integrity checks and Desktop managed-source fencing remain.
+
 ### Manual historical Version creation
 
 The existing Registry-authorized Repository serializes manual creation and its

@@ -505,13 +505,13 @@ export class ProjectFileRepository {
     return this.#serial(() => this.#withRegistryWriteLock(() => this.#queryHistoryCreation(input)));
   }
 
-  async activateVersionWorkingCopy({
+  async replayHistoryVersionActivation({
     target,
     versionId: requestedVersionId,
     operationId,
     expectedActiveWorkingCopyId,
   } = {}) {
-    return this.#serial(() => this.#activateVersionWorkingCopy({
+    return this.#serial(() => this.#replayHistoryVersionActivation({
       target,
       requestedVersionId,
       operationId,
@@ -3578,13 +3578,24 @@ export class ProjectFileRepository {
     };
   }
 
-  async #activateVersionWorkingCopy({
+  async #replayHistoryVersionActivation({
     target,
     requestedVersionId,
     operationId: requestedOperationId,
     expectedActiveWorkingCopyId: requestedExpectedActiveWorkingCopyId,
   }) {
-    const loaded = await this.#resolveMutationTarget(target);
+    // This legacy boundary may only replay a receipt already on disk. A
+    // read-only Registry lookup must precede rename/external-source coordination:
+    // a retired command without a matching receipt has no mutation authority.
+    if (!isObject(target)) {
+      throw new ProjectFileRepositoryError("OPEN_TARGET_REQUIRED", "A managed OpenTarget is required.");
+    }
+    let loaded = await this.#loadRegisteredProject({
+      projectId: assertId(target.projectId, PROJECT_ID, "projectId"),
+      documentId: assertId(target.documentId, DOCUMENT_ID, "documentId"),
+      declaredProjectRootPath: target.projectRootPath ? normalizedPath(target.projectRootPath) : null,
+      readOnly: true,
+    });
     const requested = assertId(requestedVersionId, VERSION_ID, "versionId");
     const operationId = String(requestedOperationId || "");
     if (!SAFE_OPERATION_ID.test(operationId)) {
@@ -3593,30 +3604,61 @@ export class ProjectFileRepository {
         "The history Working Copy activation operationId is invalid.",
       );
     }
+    const sourceWorkingCopy = loaded.manifest.workingCopies.find((entry) => (
+      (!target.workingCopyId || target.workingCopyId === entry.workingCopyId)
+      && (target.exactSourcePath
+        ? samePath(workingCopySourcePath(loaded.paths, entry), target.exactSourcePath)
+        : target.workingCopyId === entry.workingCopyId)
+    ));
     const expectedActiveWorkingCopyId = assertId(
-      requestedExpectedActiveWorkingCopyId,
+      requestedExpectedActiveWorkingCopyId || sourceWorkingCopy?.workingCopyId,
       WORKING_COPY_ID,
       "expectedActiveWorkingCopyId",
     );
-    const version = loaded.manifest.versions.find(
-      (entry) => entry.versionId === requested,
-    );
-    if (!version) {
-      throw new ProjectFileRepositoryError("VERSION_NOT_FOUND", "The requested Version was not found.");
+    const matchesReceipt = (current) => {
+      const receipt = current.runtime.historyActivation;
+      const source = current.manifest.workingCopies.find(
+        (entry) => entry.workingCopyId === sourceWorkingCopy?.workingCopyId,
+      );
+      return Boolean(receipt && source
+        && receipt.projectId === current.project.projectId
+        && receipt.documentId === current.project.documentId
+        && receipt.versionId === requested
+        && receipt.previousWorkingCopyId === expectedActiveWorkingCopyId
+        && receipt.activatedWorkingCopyId === current.runtime.activeWorkingCopyId
+        && [receipt.previousWorkingCopyId, receipt.activatedWorkingCopyId].includes(source.workingCopyId)
+        && (!target.exactSourcePath || samePath(workingCopySourcePath(current.paths, source), target.exactSourcePath)));
+    };
+    if (!matchesReceipt(loaded)) {
+      throw new ProjectFileRepositoryError(
+        "HISTORY_ACTIVATION_RECEIPT_MISMATCH",
+        "The retired history command can only replay an existing matching activation receipt.",
+      );
     }
-    const matches = loaded.manifest.workingCopies.filter((workingCopy) => (
-      workingCopy.versionId === requested
-      && workingCopy.basedOnVersionId === requested
+    const receiptOperationId = loaded.runtime.historyActivation.operationId;
+    loaded = await this.#resolveMutationTarget({
+      ...target,
+      projectRootPath: loaded.paths.projectRootPath,
+      workingCopyId: sourceWorkingCopy.workingCopyId,
+    });
+    if (!matchesReceipt(loaded) || loaded.runtime.historyActivation.operationId !== receiptOperationId) {
+      throw new ProjectFileRepositoryError(
+        "HISTORY_ACTIVATION_RECEIPT_MISMATCH",
+        "The history activation receipt changed before replay.",
+      );
+    }
+    const version = loaded.manifest.versions.find((entry) => entry.versionId === requested);
+    const matches = loaded.manifest.workingCopies.filter((entry) => (
+      entry.versionId === requested && entry.basedOnVersionId === requested
     ));
-    if (matches.length !== 1) {
+    if (!version || matches.length !== 1
+      || matches[0].workingCopyId !== loaded.runtime.historyActivation.activatedWorkingCopyId) {
       throw new ProjectFileRepositoryError(
         "WORKING_COPY_VERSION_MISMATCH",
-        "The requested Version does not have one unambiguous editable Working Copy.",
-        { versionId: requested, workingCopyIds: matches.map((entry) => entry.workingCopyId) },
+        "The historical receipt no longer has one unambiguous Version Working Copy.",
       );
     }
     const workingCopy = matches[0];
-    const previousWorkingCopyId = loaded.runtime.activeWorkingCopyId;
     const state = await readJsonFile(
       workingCopyStatePath(loaded.paths, workingCopy),
       "Working Copy state",
@@ -3644,7 +3686,8 @@ export class ProjectFileRepository {
       state,
       source,
     });
-    const activationResult = (historyActivation, { activated, replayed }) => ({
+    const historyActivation = loaded.runtime.historyActivation;
+    return {
       target: publicOpenTarget({
         project: loaded.project,
         projectRootPath: loaded.paths.projectRootPath,
@@ -3655,64 +3698,11 @@ export class ProjectFileRepository {
         sourceSha256: source.sha256,
       }),
       workingCopyState: structuredClone(reconciled.state),
-      activated,
-      replayed,
+      activated: false,
+      replayed: true,
       previousWorkingCopyId: historyActivation.previousWorkingCopyId,
       historyActivation: structuredClone(historyActivation),
-    });
-    const existing = loaded.runtime.historyActivation || null;
-    const matchesExisting = (activation, { requireOperationId = false } = {}) => Boolean(
-      activation
-      && (!requireOperationId || activation.operationId === operationId)
-      && activation.projectId === loaded.project.projectId
-      && activation.documentId === loaded.project.documentId
-      && activation.versionId === requested
-      && activation.previousWorkingCopyId === expectedActiveWorkingCopyId
-      && activation.activatedWorkingCopyId === workingCopy.workingCopyId
-    );
-    if (matchesExisting(existing, { requireOperationId: true })) {
-      return activationResult(existing, { activated: false, replayed: true });
-    }
-    // A repeated click after a lost Bridge, Desktop, or confirmation response
-    // resumes the one durable operation. The receipt's original operationId is
-    // returned so Desktop and the confirmation replay against the same key.
-    if (
-      ["desktop-pending", "desktop-confirmed"].includes(existing?.state)
-      && matchesExisting(existing)
-    ) {
-      return activationResult(existing, { activated: false, replayed: true });
-    }
-    if (loaded.runtime.activeRequest) {
-      throw new ProjectFileRepositoryError(
-        "ACTIVE_REQUEST_EXISTS",
-        "A Working Copy cannot change while an AI Request remains active.",
-      );
-    }
-    if (loaded.runtime.activeWorkingCopyId !== expectedActiveWorkingCopyId) {
-      throw new ProjectFileRepositoryError(
-        "HISTORY_ACTIVATION_PREDECESSOR_CONFLICT",
-        "The active Working Copy changed before this history activation could commit.",
-        {
-          expectedActiveWorkingCopyId,
-          activeWorkingCopyId: loaded.runtime.activeWorkingCopyId,
-          versionId: requested,
-        },
-      );
-    }
-    const historyActivation = {
-      operationId,
-      projectId: loaded.project.projectId,
-      documentId: loaded.project.documentId,
-      previousWorkingCopyId,
-      activatedWorkingCopyId: workingCopy.workingCopyId,
-      versionId: requested,
-      state: "desktop-pending",
-      createdAt: nowIso(this.#clock),
     };
-    loaded.runtime.activeWorkingCopyId = workingCopy.workingCopyId;
-    loaded.runtime.historyActivation = historyActivation;
-    await this.#writeRuntime(loaded);
-    return activationResult(historyActivation, { activated: true, replayed: false });
   }
 
   async #confirmVersionWorkingCopyActivation({
@@ -3722,7 +3712,15 @@ export class ProjectFileRepository {
     activatedWorkingCopyId: requestedActivatedWorkingCopyId,
     versionId: requestedVersionId,
   }) {
-    const loaded = await this.#resolveMutationTarget(target);
+    if (!isObject(target)) {
+      throw new ProjectFileRepositoryError("OPEN_TARGET_REQUIRED", "A managed OpenTarget is required.");
+    }
+    let loaded = await this.#loadRegisteredProject({
+      projectId: assertId(target.projectId, PROJECT_ID, "projectId"),
+      documentId: assertId(target.documentId, DOCUMENT_ID, "documentId"),
+      declaredProjectRootPath: target.projectRootPath ? normalizedPath(target.projectRootPath) : null,
+      readOnly: true,
+    });
     const operationId = String(requestedOperationId || "");
     if (!SAFE_OPERATION_ID.test(operationId)) {
       throw new ProjectFileRepositoryError(
@@ -3739,22 +3737,41 @@ export class ProjectFileRepository {
       "activatedWorkingCopyId",
     );
     const versionId = assertId(requestedVersionId, VERSION_ID, "versionId");
-    const historyActivation = loaded.runtime.historyActivation || null;
-    if (
-      !historyActivation
-      || historyActivation.operationId !== operationId
-      || historyActivation.projectId !== loaded.project.projectId
-      || historyActivation.documentId !== loaded.project.documentId
-      || historyActivation.previousWorkingCopyId !== previousWorkingCopyId
-      || historyActivation.activatedWorkingCopyId !== activatedWorkingCopyId
-      || historyActivation.versionId !== versionId
-      || loaded.runtime.activeWorkingCopyId !== activatedWorkingCopyId
-    ) {
+    const sourceWorkingCopy = loaded.manifest.workingCopies.find((entry) => (
+      (!target.workingCopyId || target.workingCopyId === entry.workingCopyId)
+      && (target.exactSourcePath
+        ? samePath(workingCopySourcePath(loaded.paths, entry), target.exactSourcePath)
+        : target.workingCopyId === entry.workingCopyId)
+    ));
+    const matchesReceipt = (current) => {
+      const receipt = current.runtime.historyActivation;
+      return Boolean(sourceWorkingCopy && receipt
+        && receipt.operationId === operationId
+        && receipt.projectId === current.project.projectId
+        && receipt.documentId === current.project.documentId
+        && receipt.previousWorkingCopyId === previousWorkingCopyId
+        && receipt.activatedWorkingCopyId === activatedWorkingCopyId
+        && receipt.versionId === versionId
+        && current.runtime.activeWorkingCopyId === activatedWorkingCopyId);
+    };
+    if (!matchesReceipt(loaded)) {
       throw new ProjectFileRepositoryError(
         "HISTORY_ACTIVATION_RECEIPT_MISMATCH",
         "The history activation confirmation does not match the durable activation receipt.",
       );
     }
+    loaded = await this.#resolveMutationTarget({
+      ...target,
+      projectRootPath: loaded.paths.projectRootPath,
+      workingCopyId: sourceWorkingCopy.workingCopyId,
+    });
+    if (!matchesReceipt(loaded)) {
+      throw new ProjectFileRepositoryError(
+        "HISTORY_ACTIVATION_RECEIPT_MISMATCH",
+        "The history activation receipt changed before confirmation.",
+      );
+    }
+    const historyActivation = loaded.runtime.historyActivation;
     if (historyActivation.state === "desktop-confirmed") {
       return { historyActivation: structuredClone(historyActivation), confirmed: false };
     }

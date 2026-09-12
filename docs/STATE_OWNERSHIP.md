@@ -596,12 +596,19 @@ VersionWorkflow suppresses superseded receipts and checks again before opening.
 If hydration has already opened the matching current Working Copy, it verifies
 that Canvas and repairs openedAt without another workspace load or publication.
 
-Legacy activation seam: no production Workbench/UI caller uses
-`continueEditingHistoryVersion`. The Controller forwarding method and workflow
-remain deprecated compatibility surfaces exercised by the legacy activation
-protocol tests (`tests/version-workflow.test.mjs`); Repository recovery of old
-`historyActivation` journals remains separate. New UI commands must use create,
-query and openCreatedHistoryVersion. This batch does not remove the disk protocol.
+Legacy activation compatibility is disk-only: the retired Renderer, Controller,
+VersionWorkflow and BridgeClient continue/confirm commands are removed. Current
+UI commands use create, query and openCreatedHistoryVersion. The old HTTP
+`/history-version/continue` route calls Repository `replayHistoryVersionActivation`
+and can only return an existing `historyActivation` receipt. Project, document,
+selected Version, predecessor and activated Working Copy must all agree; even a
+new click ID replays the receipt's original operation ID. Missing or mismatched
+receipts are rejected through a read-only Registry lookup before Workspace
+recovery, root rename repair or external-source coordination. Confirmation keeps
+its full receipt checks and only changes pending to confirmed once. Runtime
+receipt decoding, restart hydration and generic Desktop managed-source activation
+remain compatible; no old activation command creates a receipt or changes the
+active Working Copy.
 
 ## Preflight submission receipts
 

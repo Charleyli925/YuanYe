@@ -73,7 +73,7 @@ records must not be silently filtered into a partial success.
 | Ordinary open, reload, restart recovery: workspace Core + Supplemental | `decodeWorkspaceResponse` → `versionsFromWorkspace`, `draftAuthorityFromWorkspace`, comment/event codecs | Project, Document, Version, Draft, Comment Sessions |
 | Registration / canonical refresh: `ensureProject` | same decoder before registration publication | Project, Document, Version, Draft; CommentWorkflow reconciles its projection |
 | Draft authority rebound: `workspace` | same decoder before replacing draft authority | Draft; CommentWorkflow reconciles Comment |
-| Continue editing history: activation receipt | same decoder before managed-source publication | Project, Document, Version, Draft, Comment Sessions |
+| Open a created historical Version | VersionWorkflow uses the same decoder before managed-source publication | Project, Document, Version, Draft, Comment Sessions |
 | AI adoption refresh | ProjectWorkflow workspace path above | same existing Session owners |
 
 Bridge/disk records keep `versionId`; decoded Version models keep `id`.
@@ -320,3 +320,10 @@ Codex execution transport: `bridge/agent/runtimes/codex-client-tools.mjs` adapts
 verified native client tools into the shared ACP host; lifecycle remains in
 `acp-process.mjs`, authority in `hosts/execution-host.mjs`. See ADR 0053's
 2026-09-09 client-tool execution section.
+
+Legacy `historyActivation` records remain Repository/Runtime facts. The retired
+continue-editing Renderer command and its response decoder are removed. The old
+HTTP continuation route only replays a matching persisted receipt; it cannot
+create one. Replay and confirmation reject mismatches before any Workspace or
+external-source coordination. Ordinary hydration and generic Desktop managed
+source activation retain compatibility with already active historical files.

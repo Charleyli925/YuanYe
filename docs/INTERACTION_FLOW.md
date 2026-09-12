@@ -1169,15 +1169,12 @@ Attempt。旧记录中的脚本结论不再改变状态或产生提示；归档�
 
 ### 11.4 历史版本保持只读
 
-历史卡片不提供“用此版本替换当前 HTML”“设为当前 HTML”或同义入口，也不写入不可变 Version 快照。进入精确历史视图后，横幅额外提供唯一的二级动作“基于此版本继续编辑”：
+历史卡片不提供“用此版本替换当前 HTML”“设为当前 HTML”或同义入口，也不写入不可变 Version 快照。精确历史视图的“编辑”沿用历史创建闭环：先确认创建下一正式版本，取消保持历史视图，成功后打开新 Working Copy。当前入口只调用 create、query 和 openCreatedHistoryVersion；未知创建结果只查询同一 operation，打开失败只重试打开已创建版本。
 
-1. 它只在项目空闲、当前 `viewMode=history` 且 `viewingVersionId` 与按钮 Version 完全相同的情况下可用；处理、保存、项目读取或历史切换期间禁用。
-2. Renderer 以当前项目完整身份和精确 Version ID 调用窄的 `/history-version/continue`；该路由不接受 HTML、Draft、Candidate 或任意路径覆盖字段。
-3. Repository 只激活 manifest 中该 Version 的唯一原有 Working Copy，先验证其完整 state、不可变 Version 快照、当前工作文件 Hash 与 Registry 登记根目录。缺失、重复、Hash 不符或状态不完整时原历史画布保持只读并显示可重试错误，不得从快照静默新建文件。
-4. Repository 原子写入 `desktop-pending` 回执；Desktop 以 `operationId + previousSourcePath + nextSourcePath + projectId + documentId + workingCopyId + versionId + Hash` 激活该 Working Copy，并只接受当前活动路径仍等于 `previousSourcePath` 的新操作。若首个响应已丢失但主进程已提交新活动路径，重放同一回执仍成功并返回同一 `workingCopyId`。
-5. Desktop 成功后 Bridge 确认同一回执，统一托管源切换才在一个无异步间隙的发布边界同步更新 Project、Document、Version、Draft、Comment Session，并让 Canvas 按新的 source Hash 重新确认。回执已提交后的 Bridge、Desktop、确认或 Canvas 故障进入“可安全重试”的未知态，绝不把已激活的 V2 伪造回 V6。
+旧版本已经写入的 `historyActivation` 回执继续支持重启与幂等确认。旧 `/history-version/continue` 只重放完整匹配的存量回执，不再激活另一份 Working Copy 或创建回执；不匹配请求在 Workspace 恢复、改名修复和外部源协调之前拒绝。重复点击即使带新 operation ID，也返回存量回执的原 operation ID；重复桌面确认返回 `confirmed: false`。通用 Desktop 托管源激活与会话 hydration 保留。
 
-例如最新正式版本为 V6 时，只读查看 V2 必须仍展示 V2 快照、不能跳到 V6。点击“基于此版本继续编辑”后打开原有 V2 Working Copy；之后从该工作文件采纳 Candidate 创建 V7 时，谱系为 `basedOnVersionId=V2`，而时间线前序仍为 `previousVersionId=V6`。
+例如旧项目最新正式版本为 V6、已激活的工作稿基于 V2 时，重启和读取仍保留 V2，不会跳到 V6。保存继续写该 V2 工作稿且不改变不可变快照；以后明确采纳 Candidate 创建 V7，谱系仍为 `basedOnVersionId=V2`、`previousVersionId=V6`。新“编辑”操作则按当前历史创建流程创建下一版本，不调用这个旧激活入口。
+
 ## 12. 项目切换
 
 点击“新建项目”选择 HTML，或从左侧项目栏、开始页的“继续编辑”与可操作待办进入已导入项目时，系统先只读分类目标 HTML。已导入项目随后才完成当前编辑 drain，再核对当前
@@ -1347,7 +1344,7 @@ Request 仍为 `processing` 但同一 request/attempt 的受管 handoff 失败�
 20. 文字、样式、插入换行和同级下移落盘后，系统 Edit 菜单可在当前打开 HTML 内逐项按原始字节撤销/重做，最多 20 次；切换 HTML、关闭或重启后不继续旧栈。
 21. 评论正文和 `PROJECT.md` 获得焦点时，Edit > Undo 只恢复该输入框文字；评论/附件卡片状态与源 HTML 均不变化。
 22. Registry 有 A/B 且 Recent 只有 A 时，项目列表同时显示 A/B，A 仅因 Recent 排序优先；Recent 外的项目可安全打开，未登记 Recent 文件不能成为项目。
-23. V6 的历史 V2 继续编辑后，左侧版本列表与历史仍保留“基于 V2”“项目最新 V6”“当前编辑基础/有本地修改”事实；顶栏不显示保存状态，历史只读不改变当前编辑目标。
+23. 旧回执已经激活 V2、最新为 V6 的存量项目中，左侧版本列表与历史仍保留“基于 V2”“项目最新 V6”“当前编辑基础/有本地修改”事实；顶栏不显示保存状态，历史只读不改变当前编辑目标。
 24. Version Finder 定位可见 Working Copy，Candidate Finder 只打开 `AI任务/`；删除或篡改 AI任务 后，隐藏 Candidate 仍可审阅和 Promotion，P2 不创建 `附件与图片/`。
 25. 受支持的 parser-blocking、inline、defer、无 import module、DOMContentLoaded
     listener 与受控相对 `<base>` 页面在真实 Electron Edit iframe 中运行；不能等价

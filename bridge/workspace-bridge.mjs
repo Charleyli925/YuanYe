@@ -1913,22 +1913,15 @@ async function continueProjectFileHistoryVersion(body) {
   if (!/^[A-Za-z0-9_-]{8,160}$/.test(String(body.operationId || ""))) {
     throw new HttpError(400, "INVALID_OPERATION_ID", "operationId is invalid.");
   }
-  const workspace = await projectFileWorkspaceForSource(body.sourcePath);
-  if (!workspace) return null;
-  if (!projectFileBodyIdentityMatches(workspace, body)) {
-    throw new HttpError(
-      409,
-      "PROJECT_CONTEXT_IDENTITY_MISMATCH",
-      "The history continuation identity does not match the selected project.",
-    );
-  }
   try {
-    const sourceTarget = projectFileTargetFromWorkspace(workspace);
-    const activated = await projectFileRepository.activateVersionWorkingCopy({
-      target: sourceTarget,
+    const activated = await projectFileRepository.replayHistoryVersionActivation({
+      target: {
+        projectId: body.projectId,
+        documentId: body.documentId,
+        exactSourcePath: body.sourcePath,
+      },
       versionId: String(body.versionId),
       operationId: String(body.operationId),
-      expectedActiveWorkingCopyId: sourceTarget.workingCopyId,
     });
     const next = await projectFileWorkspaceForSource(activated.target.exactSourcePath);
     return {
@@ -1959,15 +1952,6 @@ async function confirmProjectFileHistoryVersion(body) {
   if (Object.keys(body).some((key) => !allowedKeys.has(key))) {
     throw new HttpError(400, "INVALID_HISTORY_CONFIRM", "The history activation confirmation payload has unsupported fields.");
   }
-  const workspace = await projectFileWorkspaceForSource(body.sourcePath);
-  if (!workspace) return null;
-  if (!projectFileBodyIdentityMatches(workspace, body)) {
-    throw new HttpError(
-      409,
-      "PROJECT_CONTEXT_IDENTITY_MISMATCH",
-      "The history activation confirmation identity does not match the selected project.",
-    );
-  }
   if (
     body.previousWorkingCopyId !== null
     && !/^work_ver_\d{4,}$/.test(String(body.previousWorkingCopyId || ""))
@@ -1983,7 +1967,11 @@ async function confirmProjectFileHistoryVersion(body) {
   }
   try {
     const confirmed = await projectFileRepository.confirmVersionWorkingCopyActivation({
-      target: projectFileTargetFromWorkspace(workspace),
+      target: {
+        projectId: body.projectId,
+        documentId: body.documentId,
+        exactSourcePath: body.sourcePath,
+      },
       operationId: String(body.operationId),
       previousWorkingCopyId: body.previousWorkingCopyId,
       activatedWorkingCopyId: String(body.activatedWorkingCopyId),
@@ -1991,8 +1979,8 @@ async function confirmProjectFileHistoryVersion(body) {
     });
     return {
       ok: true,
-      projectId: workspace.project.projectId,
-      documentId: workspace.project.documentId,
+      projectId: confirmed.historyActivation.projectId,
+      documentId: confirmed.historyActivation.documentId,
       status: "history-working-copy-desktop-confirmed",
       historyActivation: confirmed.historyActivation,
       confirmed: confirmed.confirmed,
