@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import {
   cp,
   link,
@@ -1087,3 +1089,93 @@ test("unknown Runtime root and historyActivation members survive a confirmation"
 // on disk, so resending the whole comment list cannot turn authorship into
 // "who saved last", and a caller that supplies its own provenance is ignored in
 // both directions.
+
+// Observe the real recovery directory reads rather than exposing a production
+// counter or replacing the Repository's recovery implementation.
+async function observeWorkspaceRecovery(action, afterRead = null) {
+  const original = fs.readdir;
+  const recoveredProjects = [];
+  fs.readdir = async (...args) => {
+    const result = await original(...args);
+    const directory = String(args[0]);
+    if (directory.endsWith(`${path.sep}.pageroot${path.sep}transactions`)) {
+      const project = await json(path.join(path.dirname(directory), "project.json"));
+      recoveredProjects.push(project.projectId);
+    }
+    if (afterRead) await afterRead(directory);
+    return result;
+  };
+  syncBuiltinESMExports();
+  try { return { workspace: await action(), recoveredProjects }; }
+  finally { fs.readdir = original; syncBuiltinESMExports(); }
+}
+
+for (const recovery of ["none", "missing-save-source", "promotion"]) {
+  test(`workspace recovers one exact project once (${recovery})`, async (t) => {
+    const value = await fixture(t);
+    const imported = await importSource(value);
+    await value.repository.initialize();
+    const changed = html("settled before workspace facts");
+    if (recovery === "missing-save-source") {
+      const interrupted = new ProjectFileRepository({ projectsRoot: value.projects,
+        failpoint: (name) => name === "save-source-displaced" });
+      await assert.rejects(interrupted.saveWorkingCopy({ target: imported.target,
+        expectedSourceSha256: imported.target.sourceSha256, html: changed, editRevision: 1 }), { code: "INJECTED_FAILPOINT" });
+      await assert.rejects(readFile(imported.target.exactSourcePath), { code: "ENOENT" });
+    } else if (recovery === "promotion") {
+      const candidate = await value.repository.createCandidate({ target: imported.target,
+        requestId: "req_catalog_recovery", candidateId: "candidate_catalog_recovery",
+        expectedSourceSha256: imported.target.sourceSha256, html: changed });
+      const interrupted = new ProjectFileRepository({ projectsRoot: value.projects,
+        failpoint: (name) => name === "promotion-working-copy-created" });
+      await assert.rejects(interrupted.promoteCandidate({ target: imported.target,
+        candidateId: candidate.candidate.candidateId }), { code: "INJECTED_FAILPOINT" });
+    }
+    const observed = await observeWorkspaceRecovery(() => value.repository.workspace({ sourcePath: imported.target.exactSourcePath }));
+    assert.deepEqual(observed.recoveredProjects, [imported.target.projectId]);
+    assert.equal(observed.workspace.target.projectId, imported.target.projectId);
+    assert.equal(observed.workspace.target.documentId, imported.target.documentId);
+    assert.equal(observed.workspace.manifest.versions.length, recovery === "promotion" ? 2 : 1);
+    assert.equal(await readFile(imported.target.exactSourcePath, "utf8"), recovery === "missing-save-source" ? changed : html("V1"));
+    if (recovery === "promotion") {
+      const latest = observed.workspace.manifest.workingCopies.find((workingCopy) => workingCopy.versionId === "ver_0002");
+      assert.equal(await readFile(path.join(imported.target.projectRootPath, latest.sourceRelativePath), "utf8"), changed);
+    }
+    t.diagnostic(`${recovery}: 1 transaction-directory scan; source and recovered Version bytes verified`);
+  });
+}
+
+test("workspace recovers a different resolved project after an external directory exchange", async (t) => {
+  const value = await fixture(t);
+  const first = await importSource(value, "first/shared.html", html("first project"));
+  const second = await importSource(value, "second/shared.html", html("second project"));
+  await value.repository.initialize();
+  const firstRoot = first.target.projectRootPath;
+  const secondRoot = second.target.projectRootPath;
+  const firstSubmissions = path.join(firstRoot, ".pageroot", "submissions");
+  await mkdir(firstSubmissions, { recursive: true });
+  await mkdir(path.join(secondRoot, ".pageroot", "submissions"), { recursive: true });
+  let exchanged = false;
+  const observed = await observeWorkspaceRecovery(
+    () => value.repository.workspace({ sourcePath: first.target.exactSourcePath }),
+    async (directory) => {
+      // This is the final read of the first recovery. Exchange complete valid
+      // synthetic projects before resolveOpenTarget performs its fresh reads.
+      if (directory !== firstSubmissions || exchanged) return;
+      exchanged = true;
+      const parked = path.join(value.root, "parked-project");
+      await rename(firstRoot, parked);
+      await rename(secondRoot, firstRoot);
+      await rename(parked, secondRoot);
+      const registry = await json(registryPath(value));
+      registry.projects[first.target.projectId].registeredProjectRootPath = secondRoot;
+      registry.projects[second.target.projectId].registeredProjectRootPath = firstRoot;
+      await writeFile(registryPath(value), JSON.stringify(registry));
+    },
+  );
+  assert.equal(exchanged, true);
+  assert.deepEqual(observed.recoveredProjects, [first.target.projectId, second.target.projectId]);
+  assert.equal(observed.workspace.target.projectId, second.target.projectId);
+  assert.equal(observed.workspace.target.documentId, second.target.documentId);
+  assert.equal(observed.workspace.content, html("second project"));
+});

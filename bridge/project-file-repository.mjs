@@ -876,8 +876,15 @@ export class ProjectFileRepository {
     // A Promotion transaction means the user already chose adoption.  Resume
     // it before exposing any workspace facts, so a crash cannot leave a
     // half-Version between Candidate review and a formal Version.
-    const recovered = await this.#recoverProject(target.projectRootPath);
-    performanceTiming.checkpoint("recoveryMs");
+    // Resolution may refresh locators/bindings, but creates no recovery task.
+    // Reuse only the completed recovery for this exact business identity/root;
+    // target resolution and the following load still validate disk afresh.
+    const alreadyRecovered = registered
+      && registered.project.projectId === target.projectId
+      && registered.project.documentId === target.documentId
+      && samePath(registered.paths.projectRootPath, target.projectRootPath);
+    const recovered = alreadyRecovered ? [] : await this.#recoverProject(target.projectRootPath);
+    if (!alreadyRecovered) performanceTiming.checkpoint("recoveryMs");
     if (recovered.length > 0) {
       target = await this.#resolveOpenTarget({ sourcePath });
       performanceTiming.checkpoint("registryResolveMs");
@@ -4671,14 +4678,16 @@ export class ProjectFileRepository {
     return { paths, project, manifest, runtime };
   }
 
-  async #discoverRegisteredRoot(projectId, record, { documentId = null } = {}) {
-    const registeredRootPath = normalizedPath(record.registeredProjectRootPath);
-    const registered = await this.#assertRegisteredProjectRootPath(registeredRootPath, { allowMissing: true });
-    if (registered.information) await this.#loadProject(registeredRootPath);
-    // Detect duplicate stable IDs even while the registered name still exists.
-    // Physical observations are refreshed only after this unique business proof.
-    const candidates = [];
-    const entries = await readdir(this.#projectsRoot, { withFileTypes: true });
+  async #registeredRootCensus() {
+    const pathsByProjectId = new Map();
+    let entries;
+    try {
+      entries = await readdir(this.#projectsRoot, { withFileTypes: true });
+    } catch (error) {
+      // Catalog rows retain their individual unavailable/error projection when
+      // the common directory cannot be scanned. Formal discovery still throws.
+      return { pathsByProjectId, error };
+    }
     for (const entry of entries) {
       if (!entry.isDirectory() || entry.isSymbolicLink() || entry.name.startsWith(".")) continue;
       const candidatePath = path.join(this.#projectsRoot, entry.name);
@@ -4687,12 +4696,34 @@ export class ProjectFileRepository {
           path.join(candidatePath, ".pageroot", "project.json"), "project.json",
           { projectRootPath: candidatePath },
         ));
-        if (project.projectId === projectId) {
-          await this.#loadProject(candidatePath);
-          candidates.push({ candidatePath, project });
-        }
+        const paths = pathsByProjectId.get(project.projectId) || [];
+        paths.push(candidatePath);
+        pathsByProjectId.set(project.projectId, paths);
       } catch {
         // Unrelated malformed folders cannot prevent a registered project opening.
+      }
+    }
+    return { pathsByProjectId, error: null };
+  }
+
+  async #discoverRegisteredRoot(projectId, record, { documentId = null, rootCensus = null } = {}) {
+    const registeredRootPath = normalizedPath(record.registeredProjectRootPath);
+    const registered = await this.#assertRegisteredProjectRootPath(registeredRootPath, { allowMissing: true });
+    if (registered.information) await this.#loadProject(registeredRootPath);
+    // The census is a query-local identity hint, never a validated Project.
+    // Keep all candidates and validate their complete current contracts before
+    // declaring a unique identity, even while the registered name still exists.
+    const census = rootCensus || await this.#registeredRootCensus();
+    if (census.error) throw census.error;
+    const candidates = [];
+    for (const candidatePath of census.pathsByProjectId.get(projectId) || []) {
+      try {
+        const loaded = await this.#loadProject(candidatePath);
+        if (loaded.project.projectId === projectId) {
+          candidates.push({ candidatePath, project: loaded.project });
+        }
+      } catch {
+        // Malformed/unavailable candidates remain isolated as before.
       }
     }
     if (candidates.length > 1) {
@@ -4733,6 +4764,7 @@ export class ProjectFileRepository {
     documentId = null,
     declaredProjectRootPath = null,
     readOnly = false,
+    rootCensus = null,
   }) {
     const id = assertId(projectId, PROJECT_ID, "projectId");
     const expectedDocumentId = documentId
@@ -4761,7 +4793,7 @@ export class ProjectFileRepository {
       );
     }
     const projectRootPath = readOnly
-      ? (await this.#discoverRegisteredRoot(id, record, { documentId: expectedDocumentId }))?.projectRootPath
+      ? (await this.#discoverRegisteredRoot(id, record, { documentId: expectedDocumentId, rootCensus }))?.projectRootPath
       : await this.#recoverRegisteredRootRename(id, record, { documentId: expectedDocumentId });
     if (!projectRootPath) {
       throw new ProjectFileRepositoryError(
@@ -4887,11 +4919,14 @@ export class ProjectFileRepository {
 
   async #listRegisteredProjects() {
     const registry = await this.#readRegistry();
+    const registeredEntries = Object.entries(registry.projects);
+    if (registeredEntries.length === 0) return [];
+    const rootCensus = await this.#registeredRootCensus();
     const rows = [];
-    for (const [projectId, record] of Object.entries(registry.projects)) {
+    for (const [projectId, record] of registeredEntries) {
       let row = this.#registeredProjectCatalogFallback(projectId, record, "invalid");
       try {
-        const loaded = await this.#loadRegisteredProject({ projectId, readOnly: true });
+        const loaded = await this.#loadRegisteredProject({ projectId, readOnly: true, rootCensus });
         const workingCopy = await this.#activeRegisteredWorkingCopy(loaded);
         row = {
           ...row,

@@ -46,6 +46,13 @@ the Bridge client, construct Sessions, or own debounce, polling, or drain.
 | Conversation handoff | `ConversationRepository` / `ConversationSession` | `ConversationWorkflow` | `app/workbench/AiConversationSidebar.tsx` |
 | Agent session Token | Coordinator owns the live session Token in process memory; Main `desktop/agent-session-credential-store.mjs` owns optional `safeStorage` ciphertext after an explicit remember | Catalog/Workbench persist or clear only through narrow IPC; never plaintext, logs, GET responses or `ui-preferences.json` | `desktop/agent-session-credential-store.mjs`, `shared/agent-vendor-key-url.mjs` |
 
+Repository catalog queries share one query-local census of candidate project
+identities and still validate each registered project's complete metadata. This
+only removes repeated identity discovery, not the remaining per-project checks;
+there is no long-lived cache or write authority in the census. Workspace recovery
+before source resolution is reused only for the same project/document/canonical
+root; a changed target is recovered independently before fresh metadata loading.
+
 Project identity, hydration, switch, rename and managed-source handoff stay
 with `ProjectSession` + `ProjectWorkflow`. Open/switch/close now have
 `ready | wait | reject` plans; the executor remains the unique

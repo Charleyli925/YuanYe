@@ -515,8 +515,20 @@ Repository catalog and summary reads validate metadata and probe locators withou
 HTML loading, activation, recovery or registry/binding writes. Catalog readiness
 means metadata is available; `sourceStatus: unknown` means file content still needs
 checking. Real open/save/restore retains full identity and content validation.
-Startup recovery is unchanged. A discovered folder name is only a display hint
-until an authorized file operation revalidates and records it.
+Each catalog query builds one short-lived project-identity census, keeping all
+candidate paths for an ID. Every registered row still loads and validates its
+complete current Project/Manifest/Runtime contract; malformed candidates remain
+isolated and duplicate valid IDs remain ambiguous. The census is neither retained
+across queries nor accepted by a write path. A discovered folder name is only a
+display hint until an authorized file operation revalidates and records it.
+
+Workspace hydration recovers the registered project before source resolution,
+including when an interrupted save has temporarily removed the visible source.
+If the freshly resolved target has that exact projectId, documentId and canonical
+root, that completed recovery is reused. Resolution can refresh locators/bindings
+but creates no recovery transaction. A different target still receives its own
+recovery; subsequent target/metadata reads remain fresh. This does not change
+startup recovery, transaction ownership or commit sequencing.
 
 Catalog reads capture the Controller's in-memory catalog revision. If a verified
 Session publishes while a read is pending, ProjectWorkflow discards that result
