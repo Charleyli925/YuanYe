@@ -217,6 +217,7 @@ const TASK_OWNER_CASES = [
     nodeTests: [
       "tests/durable-working-copy-binding.test.mjs",
       "tests/history-creation.test.mjs",
+      "tests/legacy-history-activation.test.mjs",
       "tests/project-ai-task-projection.test.mjs",
       "tests/project-candidate-promotion.test.mjs",
       "tests/project-catalog-readonly.test.mjs",
@@ -804,6 +805,19 @@ test("Qoder ACP transport changes select Qoder and ACP owners without the packag
     "tests/qoder-acp-spike-client.test.mjs",
   ]);
   assert.equal(plan.selectedNodeTests.includes("tests/desktop-package.test.mjs"), false);
+});
+
+test("native HTTP provider imports retain the packaged Bridge resource closure", () => {
+  for (const file of [
+    "shared/agent-input-policy.mjs",
+    "bridge/agent/providers/openai-compatible-provider.mjs",
+  ]) {
+    const plan = selectGatePlan({ map, lane: "task", changedFiles: [file] });
+    assert.ok(
+      plan.selectedNodeTests.includes("tests/desktop-package.test.mjs"),
+      file,
+    );
+  }
 });
 
 test("notification, comment, and presentation Browser owners select their smoke lane", () => {

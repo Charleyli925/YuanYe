@@ -5,7 +5,7 @@ import test from "node:test";
 import { CommentSession } from "../app/application/comment-session.js";
 import { DocumentSession } from "../app/application/document-session.js";
 import { ProjectSession } from "../app/application/project-session.js";
-import { RunSession } from "../app/application/run-session.js";
+import { RUN_SESSION_COORDINATION, RunSession } from "../app/application/run-session.js";
 import { RunWorkflow } from "../app/application/run-workflow.js";
 import { VersionSession } from "../app/application/version-session.js";
 import {
@@ -1047,6 +1047,94 @@ test("a failed authority read keeps the Request uncertain until a later read rec
   assert.equal(harness.runSession.activeSubmission, null);
 });
 
+test("reconciling an unknown submission does not remove another document's pending run", async (t) => {
+  const nextRequest = deferred();
+  const nextDispatched = deferred();
+  let reads = 0;
+  let harness;
+  harness = createHarness({
+    ensureRegistered: () => succeeded(harness.projectSession.context),
+    bridge: {
+      async createRequest(request) {
+        if (request.sourcePath === SOURCE_A) throw new Error("POST response lost");
+        nextDispatched.resolve();
+        return nextRequest.promise;
+      },
+      async workspace() {
+        if (++reads === 1) throw new Error("authority temporarily unavailable");
+        return {};
+      },
+    },
+  });
+  t.after(() => harness.workflow.dispose());
+  assert.equal((await harness.workflow.submit()).status, "unknown");
+  const first = harness.runSession.activeRun;
+  harness.projectSession.openLocator(SOURCE_B);
+  harness.projectSession.register({
+    epoch: harness.projectSession.epoch, sourcePath: SOURCE_B,
+    projectId: "project_b", documentId: "document_b",
+  });
+  harness.runSession.activate(SOURCE_B);
+  const submitting = harness.workflow.submit();
+  await nextDispatched.promise;
+  const pending = harness.runSession.activeRun;
+  const submission = harness.runSession.activeSubmission;
+  try {
+    assert.equal(first.requestId, "pending");
+    assert.equal(pending.requestId, "pending");
+    assert.equal(pending.submissionToken, submission.token);
+    assert.notEqual(first.submissionToken, pending.submissionToken);
+    await harness.workflow.reconcileSubmission({ sourcePath: SOURCE_A });
+    assert.equal(harness.runSession.runForSource(SOURCE_A), null);
+    assert.equal(harness.runSession.runForSource(SOURCE_B), pending);
+    assert.equal(harness.runSession.activeRun, pending);
+    assert.equal(harness.runSession.activeSubmission, submission);
+    assert.equal(harness.runSession.activeLocked, true);
+  } finally {
+    nextRequest.resolve({ activeRun: runRecord({ sourcePath: SOURCE_B }) });
+    await submitting;
+  }
+});
+
+test("a managed submission retains its origin and reconciles a mismatched Working Copy reply", async (t) => {
+  let harness;
+  let reads = 0;
+  let posts = 0;
+  harness = createHarness({
+    ensureRegistered: () => succeeded(harness.projectSession.context),
+    bridge: {
+      async createRequest() {
+        posts += 1;
+        return { activeRun: runRecord({ sourceWorkingCopyId: "work_ver_0002" }) };
+      },
+      async workspace() {
+        reads += 1;
+        return { activeRun: runRecord({ sourceWorkingCopyId: "work_ver_0001" }) };
+      },
+    },
+  });
+  t.after(() => harness.workflow.dispose());
+  harness.projectSession.register({
+    ...harness.context, projectRootPath: "/tmp/project-a",
+    targetKind: "working-copy", workingCopyId: "work_ver_0001", versionId: "ver_0001",
+    exactSourcePath: SOURCE_A, sourceSha256: sha256(HTML_A),
+  });
+  const pendingOrigins = [];
+  const unsubscribe = harness.runSession.subscribe((snapshot) => {
+    if (snapshot.activeRun?.requestId === "pending") {
+      pendingOrigins.push(snapshot.activeRun.sourceWorkingCopyId);
+    }
+  });
+  t.after(unsubscribe);
+
+  assert.equal((await harness.workflow.submit()).status, "succeeded");
+  assert.equal(posts, 1);
+  assert.equal(reads, 1, "a mismatched response must read authority without another Request POST");
+  assert.ok(pendingOrigins.length > 0);
+  assert.equal(pendingOrigins.every((id) => id === "work_ver_0001"), true);
+  assert.equal(harness.runSession.activeRun.sourceWorkingCopyId, "work_ver_0001");
+});
+
 test("clipboard failure retains the durable Request and a retry copies without another Request POST", async () => {
   let copyAttempts = 0;
   const harness = createHarness({
@@ -1994,6 +2082,700 @@ test("a late cancel result cannot unlock or clear a reopened project generation"
   assert.equal(harness.calls.unlock, 0);
   const event = events.find((entry) => entry.type === "run-cancelled");
   assert.equal(event?.current, false);
+});
+
+test("a result-ready cancel cannot overwrite a newer Request at the same locator", async () => {
+  const cancellation = deferred();
+  const status = deferred();
+  let statusCalled = false;
+  const harness = createHarness({
+    bridge: {
+      async cancelActiveRun() {
+        return cancellation.promise;
+      },
+      async status() {
+        statusCalled = true;
+        return status.promise;
+      },
+    },
+  });
+  const previousRun = runRecord({ requestId: "request_previous", attemptId: "attempt_previous" });
+  harness.runSession.trackRun(previousRun, { activate: "always" });
+
+  const cancelling = harness.workflow.cancel({ run: previousRun });
+  await new Promise((resolve) => setImmediate(resolve));
+  cancellation.resolve({ status: "result-ready" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(statusCalled, true);
+
+  const newerRun = runRecord({ requestId: "request_newer", attemptId: "attempt_newer" });
+  const newerHandoff = {
+    sourcePath: SOURCE_A,
+    requestId: newerRun.requestId,
+    attemptId: newerRun.attemptId,
+    mode: "clipboard",
+    status: "copied",
+  };
+  const newerResult = {
+    state: "processing",
+    label: "新 Request 正在处理",
+    updatedAt: 2,
+  };
+  const newerOutcome = { ...newerRun, status: "error" };
+  harness.runSession.trackRun(newerRun, { activate: "always" });
+  harness.runSession.publishHandoff(newerHandoff);
+  harness.runSession.markResult(SOURCE_A, newerResult);
+  harness.runSession.rememberOutcome(newerOutcome);
+  status.resolve({ status: "error", error: "旧 Request 的结果" });
+
+  const outcome = await cancelling;
+
+  assert.equal(outcome.status, "stale");
+  assert.equal(harness.runSession.activeRun?.requestId, newerRun.requestId);
+  assert.deepEqual(harness.runSession.handoffForSource(SOURCE_A), newerHandoff);
+  assert.deepEqual(harness.runSession.resultForSource(SOURCE_A), newerResult);
+  assert.deepEqual(harness.runSession.outcomeForSource(SOURCE_A), newerOutcome);
+  assert.equal(harness.calls.unlock, 0);
+});
+
+test("late background hydration cannot replace a newer same-locator Request", async () => {
+  const workspace = deferred();
+  const workspaceStarted = deferred();
+  const harness = createHarness({
+    bridge: {
+      async workspace(sourcePath) {
+        workspaceStarted.resolve(sourcePath);
+        return workspace.promise;
+      },
+    },
+  });
+  const hydration = harness.workflow.hydrateRecentRuns({
+    projects: [{
+      sourcePath: SOURCE_B,
+      projectId: "project_b",
+      documentId: "document_b",
+    }],
+    activeSourcePath: SOURCE_A,
+  });
+  assert.equal(await workspaceStarted.promise, SOURCE_B);
+
+  harness.projectSession.openLocator(SOURCE_B);
+  harness.projectSession.register({
+    epoch: harness.projectSession.epoch,
+    sourcePath: SOURCE_B,
+    projectId: "project_b",
+    documentId: "document_b",
+  });
+  harness.runSession.activate(SOURCE_B);
+  const newerRun = runRecord({
+    sourcePath: SOURCE_B,
+    requestId: "request_newer_background",
+    attemptId: "attempt_newer_background",
+  });
+  const newerHandoff = {
+    sourcePath: SOURCE_B,
+    requestId: newerRun.requestId,
+    attemptId: newerRun.attemptId,
+    mode: "clipboard",
+    status: "copied",
+  };
+  const newerResult = {
+    state: "processing",
+    label: "新 Request 正在处理",
+    updatedAt: 3,
+  };
+  const newerOutcome = { ...newerRun, status: "error" };
+  harness.runSession.trackRun(newerRun, { activate: "always" });
+  harness.runSession.publishHandoff(newerHandoff);
+  harness.runSession.markResult(SOURCE_B, newerResult);
+  harness.runSession.rememberOutcome(newerOutcome);
+
+  workspace.resolve({
+    runtimeState: {
+      activeRun: runRecord({
+        sourcePath: SOURCE_B,
+        requestId: "request_old_background",
+        attemptId: "attempt_old_background",
+      }),
+    },
+  });
+  const outcome = await hydration;
+
+  assert.equal(outcome.status, "succeeded");
+  assert.equal(outcome.value.recovered, 0);
+  assert.equal(harness.runSession.activeRun?.requestId, newerRun.requestId);
+  assert.deepEqual(harness.runSession.handoffForSource(SOURCE_B), newerHandoff);
+  assert.deepEqual(harness.runSession.resultForSource(SOURCE_B), newerResult);
+  assert.deepEqual(harness.runSession.outcomeForSource(SOURCE_B), newerOutcome);
+});
+
+test("production-shaped recent ABA does not revive a legacy no-identity response", async () => {
+  const workspace = deferred();
+  const workspaceStarted = deferred();
+  const harness = createHarness({
+    bridge: {
+      async workspace(sourcePath) {
+        workspaceStarted.resolve(sourcePath);
+        return workspace.promise;
+      },
+    },
+  });
+  const hydration = harness.workflow.hydrateRecentRuns({
+    projects: [{
+      sourcePath: SOURCE_B,
+      name: "B",
+      updatedAt: "2026-08-11T00:00:00.000Z",
+    }],
+    activeSourcePath: SOURCE_A,
+  });
+  await workspaceStarted.promise;
+
+  const newerRun = runRecord({
+    sourcePath: SOURCE_B,
+    projectId: "project_b",
+    documentId: "document_b",
+    requestId: "request_aba_newer",
+    attemptId: "attempt_aba_newer",
+  });
+  harness.runSession.trackRun(newerRun, { activate: "never" });
+  harness.runSession.removeRun(newerRun);
+  workspace.resolve({
+    runtimeState: {
+      activeRun: {
+        sourcePath: SOURCE_B,
+        requestId: "request_aba_old",
+        attemptId: "attempt_aba_old",
+        status: "processing",
+      },
+    },
+  });
+
+  const outcome = await hydration;
+
+  assert.equal(outcome.status, "succeeded");
+  assert.equal(outcome.value.recovered, 0);
+  assert.equal(harness.runSession.runForSource(SOURCE_B), null);
+  assert.equal(harness.runSession.handoffForSource(SOURCE_B), null);
+  assert.equal(harness.runSession.resultForSource(SOURCE_B), null);
+  assert.equal(harness.runSession.outcomeForSource(SOURCE_B), null);
+});
+
+test("recent hydration carries authoritative workspace identity despite a path-only recent row", async () => {
+  const harness = createHarness({
+    bridge: {
+      async workspace() {
+        return {
+          projectId: "project_b_authoritative",
+          documentId: "document_b_authoritative",
+          sourcePath: SOURCE_B,
+          openTarget: {
+            projectId: "project_b_authoritative",
+            documentId: "document_b_authoritative",
+            projectRootPath: "/tmp/project-b-authoritative",
+            targetKind: "working-copy",
+            workingCopyId: "work_b_authoritative",
+            versionId: "version_b_authoritative",
+            exactSourcePath: SOURCE_B,
+            sourceSha256: sha256(HTML_B),
+          },
+          runtimeState: {
+            activeRun: {
+              sourcePath: SOURCE_B,
+              requestId: "request_authoritative",
+              attemptId: "attempt_authoritative",
+              status: "processing",
+            },
+          },
+        };
+      },
+    },
+  });
+
+  const outcome = await harness.workflow.hydrateRecentRuns({
+    projects: [{ sourcePath: SOURCE_B, name: "B", updatedAt: 1 }],
+    activeSourcePath: SOURCE_A,
+  });
+
+  assert.equal(outcome.status, "succeeded");
+  assert.equal(outcome.value.recovered, 1);
+  assert.equal(
+    harness.runSession.runForSource(SOURCE_B)?.projectId,
+    "project_b_authoritative",
+  );
+  assert.equal(
+    harness.runSession.runForSource(SOURCE_B)?.documentId,
+    "document_b_authoritative",
+  );
+  assert.equal(
+    harness.runSession.runForSource(SOURCE_B)?.sourceWorkingCopyId,
+    null,
+  );
+});
+
+test("recent hydration requires a complete top-level workspace authority", async () => {
+  const harness = createHarness({
+    bridge: {
+      async workspace() {
+        return {
+          runtimeState: {
+            activeRun: runRecord({
+              sourcePath: SOURCE_B,
+              requestId: "request_identity_only",
+              attemptId: "attempt_identity_only",
+            }),
+          },
+        };
+      },
+    },
+  });
+
+  const outcome = await harness.workflow.hydrateRecentRuns({
+    projects: [{ sourcePath: SOURCE_B, name: "B", updatedAt: 1 }],
+    activeSourcePath: SOURCE_A,
+  });
+
+  assert.equal(outcome.status, "succeeded");
+  assert.equal(outcome.value.recovered, 0);
+  assert.equal(harness.runSession.runForSource(SOURCE_B), null);
+});
+
+test("recent hydration rejects a working-copy authority without versionId", async () => {
+  const harness = createHarness({
+    bridge: {
+      async workspace() {
+        return {
+          projectId: "project_b_missing_version",
+          documentId: "document_b_missing_version",
+          sourcePath: SOURCE_B,
+          openTarget: {
+            projectId: "project_b_missing_version",
+            documentId: "document_b_missing_version",
+            projectRootPath: "/tmp/project-b-missing-version",
+            targetKind: "working-copy",
+            workingCopyId: "work_ver_0001",
+            exactSourcePath: SOURCE_B,
+            sourceSha256: sha256(HTML_B),
+          },
+          runtimeState: {
+            activeRun: runRecord({
+              sourcePath: SOURCE_B,
+              projectId: "project_b_missing_version",
+              documentId: "document_b_missing_version",
+              requestId: "request_missing_version",
+              attemptId: "attempt_missing_version",
+            }),
+          },
+        };
+      },
+    },
+  });
+
+  const outcome = await harness.workflow.hydrateRecentRuns({
+    projects: [{ sourcePath: SOURCE_B, name: "B", updatedAt: 1 }],
+    activeSourcePath: SOURCE_A,
+  });
+
+  assert.equal(outcome.status, "succeeded");
+  assert.equal(outcome.value.recovered, 0);
+  assert.equal(harness.runSession.runForSource(SOURCE_B), null);
+});
+
+test("recent hydration rejects a workspace and OpenTarget that identify another path", async () => {
+  const harness = createHarness({
+    bridge: {
+      async workspace() {
+        return {
+          projectId: "project_c",
+          documentId: "document_c",
+          sourcePath: "/tmp/run-workflow-c.html",
+          openTarget: {
+            projectId: "project_c",
+            documentId: "document_c",
+            projectRootPath: "/tmp/project-c",
+            targetKind: "working-copy",
+            workingCopyId: "work_c",
+            versionId: "version_c",
+            exactSourcePath: "/tmp/run-workflow-c.html",
+            sourceSha256: sha256(HTML_B),
+          },
+          runtimeState: {
+            activeRun: runRecord({
+              sourcePath: SOURCE_B,
+              projectId: "project_c",
+              documentId: "document_c",
+              requestId: "request_wrong_path",
+              attemptId: "attempt_wrong_path",
+            }),
+          },
+        };
+      },
+    },
+  });
+
+  const outcome = await harness.workflow.hydrateRecentRuns({
+    projects: [{ sourcePath: SOURCE_B, name: "B", updatedAt: 1 }],
+    activeSourcePath: SOURCE_A,
+  });
+
+  assert.equal(outcome.status, "succeeded");
+  assert.equal(outcome.value.recovered, 0);
+  assert.equal(harness.runSession.runForSource(SOURCE_B), null);
+});
+
+test("recent hydration preserves an immutable Request origin when the current Working Copy differs", async () => {
+  const origin = runRecord({
+    sourcePath: SOURCE_B,
+    sourceWorkingCopyId: "work_b_origin",
+    requestId: "request_origin_wc1",
+    attemptId: "attempt_origin_wc1",
+  });
+  const harness = createHarness({
+    bridge: {
+      async workspace() {
+        return {
+          projectId: "project_b",
+          documentId: "document_b",
+          sourcePath: SOURCE_B,
+          openTarget: {
+            projectId: "project_b",
+            documentId: "document_b",
+            projectRootPath: "/tmp/project-b",
+            targetKind: "working-copy",
+            workingCopyId: "work_b_current",
+            versionId: "version_b_current",
+            exactSourcePath: SOURCE_B,
+            sourceSha256: sha256(HTML_B),
+          },
+          runtimeState: { activeRun: origin },
+        };
+      },
+    },
+  });
+
+  const outcome = await harness.workflow.hydrateRecentRuns({
+    projects: [{ sourcePath: SOURCE_B, name: "B", updatedAt: 1 }],
+    activeSourcePath: SOURCE_A,
+  });
+
+  assert.equal(outcome.status, "succeeded");
+  assert.equal(outcome.value.recovered, 1);
+  assert.equal(harness.runSession.runForSource(SOURCE_B)?.sourceWorkingCopyId, "work_b_origin");
+});
+
+test("recent hydration preserves the verified Candidate and stable adoption identity", async () => {
+  const candidate = {
+    candidateId: "candidate_ready_0001",
+    projectId: "project_b",
+    documentId: "document_b",
+    requestId: "request_ready_candidate",
+    attemptId: "attempt_ready_candidate",
+    sourceWorkingCopyId: "work_b_origin",
+    proposedVersionId: "ver_0002",
+    proposedVersionOrdinal: 2,
+    expectedSourceSha256: sha256(HTML_B),
+    outputSha256: sha256(HTML_B),
+    createdAt: "2026-08-11T00:00:00.000Z",
+  };
+  const readyRun = runRecord({
+    sourcePath: SOURCE_B,
+    projectId: "project_b",
+    documentId: "document_b",
+    sourceWorkingCopyId: "work_b_origin",
+    requestId: candidate.requestId,
+    attemptId: candidate.attemptId,
+    status: "ready-to-open",
+    candidateVersionId: candidate.proposedVersionId,
+    readyPayload: {
+      status: "ready-to-open",
+      candidateId: candidate.candidateId,
+      candidate,
+    },
+  });
+  const harness = createHarness({
+    bridge: {
+      async workspace() {
+        return {
+          projectId: "project_b",
+          documentId: "document_b",
+          sourcePath: SOURCE_B,
+          sourceSha256: sha256(HTML_B),
+          openTarget: {
+            projectId: "project_b",
+            documentId: "document_b",
+            projectRootPath: "/tmp/project-b",
+            targetKind: "working-copy",
+            workingCopyId: "work_b_current",
+            versionId: "ver_0002",
+            exactSourcePath: SOURCE_B,
+            sourceSha256: sha256(HTML_B),
+          },
+          runtimeState: { activeRun: readyRun },
+        };
+      },
+    },
+  });
+
+  const outcome = await harness.workflow.hydrateRecentRuns({
+    projects: [{ sourcePath: SOURCE_B, name: "B", updatedAt: 1 }],
+    activeSourcePath: SOURCE_A,
+  });
+
+  assert.equal(outcome.status, "succeeded");
+  assert.equal(outcome.value.recovered, 1);
+  const recovered = harness.runSession.runForSource(SOURCE_B);
+  assert.equal(recovered?.readyPayload?.candidateId, candidate.candidateId);
+  assert.equal(recovered?.readyPayload?.candidate?.candidateId, candidate.candidateId);
+  assert.equal(recovered?.sourceWorkingCopyId, "work_b_origin");
+});
+
+test("a late hydration response cannot revive facts after absence, a new document, and a new query", async () => {
+  const first = deferred();
+  const second = deferred();
+  let reads = 0;
+  const harness = createHarness({
+    bridge: {
+      async workspace() {
+        reads += 1;
+        return reads === 1 ? first.promise : second.promise;
+      },
+    },
+  });
+  const firstHydration = harness.workflow.hydrateRecentRuns({
+    projects: [{ sourcePath: SOURCE_B, name: "B", updatedAt: 1 }],
+    activeSourcePath: SOURCE_A,
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const newerRun = runRecord({
+    sourcePath: SOURCE_B,
+    projectId: "project_b_new",
+    documentId: "document_b_new",
+    requestId: "request_new_document",
+    attemptId: "attempt_new_document",
+  });
+  harness.runSession.trackRun(newerRun, { activate: "never" });
+  harness.runSession.removeRun(newerRun);
+  const secondHydration = harness.workflow.hydrateRecentRuns({
+    projects: [{ sourcePath: SOURCE_B, name: "B", updatedAt: 2 }],
+    activeSourcePath: SOURCE_A,
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  second.resolve({
+    projectId: "project_b_new",
+    documentId: "document_b_new",
+    sourcePath: SOURCE_B,
+    openTarget: {
+      projectId: "project_b_new",
+      documentId: "document_b_new",
+      projectRootPath: "/tmp/project-b-new",
+      targetKind: "working-copy",
+      workingCopyId: "work_b_new",
+      versionId: "version_b_new",
+      exactSourcePath: SOURCE_B,
+      sourceSha256: sha256(HTML_B),
+    },
+    runtimeState: { activeRun: null },
+  });
+  first.resolve({
+    projectId: "project_b_old",
+    documentId: "document_b_old",
+    sourcePath: SOURCE_B,
+    openTarget: {
+      projectId: "project_b_old",
+      documentId: "document_b_old",
+      projectRootPath: "/tmp/project-b-old",
+      targetKind: "working-copy",
+      workingCopyId: "work_b_old",
+      versionId: "version_b_old",
+      exactSourcePath: SOURCE_B,
+      sourceSha256: sha256(HTML_B),
+    },
+    runtimeState: {
+      activeRun: runRecord({
+        sourcePath: SOURCE_B,
+        projectId: "project_b_old",
+        documentId: "document_b_old",
+        requestId: "request_old_after_aba",
+        attemptId: "attempt_old_after_aba",
+      }),
+    },
+  });
+
+  const outcomes = await Promise.all([firstHydration, secondHydration]);
+  assert.deepEqual(outcomes.map((value) => value.value.recovered), [0, 0]);
+  assert.equal(harness.runSession.runForSource(SOURCE_B), null);
+  assert.equal(harness.runSession.handoffForSource(SOURCE_B), null);
+  assert.equal(harness.runSession.resultForSource(SOURCE_B), null);
+  assert.equal(harness.runSession.outcomeForSource(SOURCE_B), null);
+});
+
+test("canonical locator query identity fences a private-var ABA without a revision change", async () => {
+  const privateVarSource = "/private/var/folders/run-workflow-alias-b.html";
+  const varSource = "/var/folders/run-workflow-alias-b.html";
+  const first = deferred();
+  const second = deferred();
+  let reads = 0;
+  const harness = createHarness({
+    bridge: {
+      async workspace(sourcePath) {
+        reads += 1;
+        assert.ok(sourcePath === privateVarSource || sourcePath === varSource);
+        return reads === 1 ? first.promise : second.promise;
+      },
+    },
+  });
+  const coordination = harness.runSession[RUN_SESSION_COORDINATION];
+  const revisionBefore = coordination.locatorRevision(privateVarSource);
+  const firstHydration = harness.workflow.hydrateRecentRuns({
+    projects: [{ sourcePath: privateVarSource, name: "B", updatedAt: 1 }],
+    activeSourcePath: SOURCE_A,
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const secondHydration = harness.workflow.hydrateRecentRuns({
+    projects: [{ sourcePath: varSource, name: "B", updatedAt: 2 }],
+    activeSourcePath: SOURCE_A,
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  second.resolve({});
+  const secondOutcome = await secondHydration;
+  first.resolve({
+    projectId: "project_alias_old",
+    documentId: "document_alias_old",
+    sourcePath: privateVarSource,
+    openTarget: {
+      projectId: "project_alias_old",
+      documentId: "document_alias_old",
+      projectRootPath: "/tmp/project-alias-old",
+      targetKind: "working-copy",
+      workingCopyId: "work_ver_0001",
+      versionId: "ver_0001",
+      exactSourcePath: privateVarSource,
+      sourceSha256: sha256(HTML_B),
+    },
+    runtimeState: {
+      activeRun: runRecord({
+        sourcePath: privateVarSource,
+        projectId: "project_alias_old",
+        documentId: "document_alias_old",
+        requestId: "request_alias_old",
+        attemptId: "attempt_alias_old",
+      }),
+    },
+  });
+  const firstOutcome = await firstHydration;
+
+  assert.equal(secondOutcome.value.recovered, 0);
+  assert.equal(firstOutcome.value.recovered, 0);
+  assert.equal(coordination.locatorRevision(privateVarSource), revisionBefore);
+  assert.equal(harness.runSession.runForSource(privateVarSource), null);
+  assert.equal(harness.runSession.runForSource(varSource), null);
+  assert.equal(harness.runSession.handoffForSource(privateVarSource), null);
+  assert.equal(harness.runSession.resultForSource(privateVarSource), null);
+  assert.equal(harness.runSession.outcomeForSource(privateVarSource), null);
+});
+
+test("late hydration cannot restore a locator that was rebased away while absent", async () => {
+  const workspace = deferred();
+  const workspaceStarted = deferred();
+  const destination = "/tmp/run-workflow-rebased-away.html";
+  const harness = createHarness({
+    bridge: {
+      async workspace(sourcePath) {
+        workspaceStarted.resolve(sourcePath);
+        return workspace.promise;
+      },
+    },
+  });
+  const hydration = harness.workflow.hydrateRecentRuns({
+    projects: [{ sourcePath: SOURCE_B, name: "B", updatedAt: 1 }],
+    activeSourcePath: SOURCE_A,
+  });
+  await workspaceStarted.promise;
+
+  assert.equal(harness.runSession.rebaseSource({
+    previousSourcePath: SOURCE_B,
+    sourcePath: destination,
+    projectId: "project_b",
+    documentId: "document_b",
+  }), true);
+  workspace.resolve({
+    projectId: "project_b",
+    documentId: "document_b",
+    openTarget: { workingCopyId: "work_b" },
+    runtimeState: {
+      activeRun: runRecord({
+        sourcePath: SOURCE_B,
+        requestId: "request_rebased_away_old",
+        attemptId: "attempt_rebased_away_old",
+      }),
+    },
+  });
+
+  const outcome = await hydration;
+
+  assert.equal(outcome.status, "succeeded");
+  assert.equal(outcome.value.recovered, 0);
+  assert.equal(harness.runSession.runForSource(SOURCE_B), null);
+  assert.equal(harness.runSession.runForSource(destination), null);
+  assert.equal(harness.runSession.outcomeForSource(SOURCE_B), null);
+});
+
+test("same-path different-document reuse fences a late recent response", async () => {
+  const workspace = deferred();
+  const workspaceStarted = deferred();
+  const harness = createHarness({
+    bridge: {
+      async workspace(sourcePath) {
+        workspaceStarted.resolve(sourcePath);
+        return workspace.promise;
+      },
+    },
+  });
+  const hydration = harness.workflow.hydrateRecentRuns({
+    projects: [{ sourcePath: SOURCE_B, name: "B", updatedAt: 1 }],
+    activeSourcePath: SOURCE_A,
+  });
+  await workspaceStarted.promise;
+
+  harness.projectSession.openLocator(SOURCE_B);
+  harness.projectSession.register({
+    epoch: harness.projectSession.epoch,
+    sourcePath: SOURCE_B,
+    projectId: "project_b_reused",
+    documentId: "document_b_reused",
+  });
+  harness.runSession.activate(SOURCE_B);
+  harness.projectSession.openLocator(SOURCE_A);
+  harness.projectSession.register({
+    epoch: harness.projectSession.epoch,
+    sourcePath: SOURCE_A,
+    projectId: "project_a",
+    documentId: "document_a",
+  });
+  harness.runSession.activate(SOURCE_A);
+  workspace.resolve({
+    projectId: "project_b_old",
+    documentId: "document_b_old",
+    openTarget: { workingCopyId: "work_b_old" },
+    runtimeState: {
+      activeRun: runRecord({
+        sourcePath: SOURCE_B,
+        projectId: "project_b_old",
+        documentId: "document_b_old",
+        requestId: "request_reused_old",
+        attemptId: "attempt_reused_old",
+      }),
+    },
+  });
+
+  const outcome = await hydration;
+
+  assert.equal(outcome.status, "succeeded");
+  assert.equal(outcome.value.recovered, 0);
+  assert.equal(harness.runSession.runForSource(SOURCE_B), null);
+  assert.equal(harness.runSession.outcomeForSource(SOURCE_B), null);
 });
 
 test("managed cancellation publishes cancelling before waiting for Bridge cleanup", async () => {

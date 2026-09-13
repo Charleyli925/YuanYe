@@ -57,6 +57,7 @@ export type DocumentWorkflowConstruction = Readonly<{
     expectedSourceSha256?: string | null;
     adoptCanonicalSource?: boolean;
   }): Promise<DocumentWorkflowOutcome<ProjectContext>>;
+  registrationPending?(): boolean;
   projectSession: ProjectSession;
   documentSession: DocumentSession;
   commentSession: CommentSession;

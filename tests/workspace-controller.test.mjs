@@ -102,6 +102,27 @@ const codecs = {
   })),
 };
 
+const documentWorkflowCodecs = {
+  isRecord,
+  sameSourcePath: (left, right) => Boolean(left && right && left === right),
+  persistedChangeEvent: (value) => value,
+  recoveryIdentityFromRecord: (value) => value || null,
+  sourceHistoryOperationsFromRecord: (value) => Array.isArray(value) ? value : [],
+  changesFromRecords: (value) => Array.isArray(value) ? value : [],
+  historyTextSelectionFromRecord: (value) => value || null,
+  selectionFromRecord: (value) => value || null,
+  rebindTargetsPreservingGlobal: (_html, targets) => targets,
+  rebindTargetsAcrossHistoryPreservingGlobal: (_before, _after, targets) => targets,
+  canLocateTarget: () => true,
+  appendDirectEditEvent: ({ events = [], pendingEvents = [] }) => ({
+    events,
+    pendingEvents,
+  }),
+  auditEventKey: (value) => String(value?.eventId || ""),
+  removeAcknowledgedAuditEvents: (events) => events,
+  errorMessage: (cause, fallback) => String(cause?.message || fallback),
+};
+
 function authoritativeDraft(revision = 0) {
   return {
     draftRevision: revision,
@@ -143,10 +164,16 @@ function createHarness({
   html = "<main>local source</main>",
   bridgeClient = null,
   projectSource = null,
+  projectRulesWorkflow: projectRulesWorkflowConfig = null,
   editRuntimePort = null,
   initialDocument = null,
   conversationSession = null,
   controllerCodecs = codecs,
+  versionSession: providedVersionSession = null,
+  sourceHistorySession: providedSourceHistorySession = null,
+  recoveryPort = null,
+  canvasPort = null,
+  documentWorkflow: documentWorkflowConfig = null,
 } = {}) {
   const projectSession = new ProjectSession();
   projectSession.openLocator(SOURCE_PATH);
@@ -168,8 +195,8 @@ function createHarness({
   };
   const commentSession = new CommentSession();
   const draftSession = new DraftSession({ bridgeClient: client });
-  const versionSession = new VersionSession();
-  const sourceHistorySession = new SourceHistorySession();
+  const versionSession = providedVersionSession || new VersionSession();
+  const sourceHistorySession = providedSourceHistorySession || new SourceHistorySession();
   const recovery = [];
   let canvasInvalidations = 0;
   const events = [];
@@ -185,11 +212,17 @@ function createHarness({
     codecs: controllerCodecs,
     ports: {
       hash: { sha256: async (value) => sha256(value) },
-      recovery: { replace: (identity) => recovery.push(identity) },
-      canvas: { invalidateRenderAcks: () => { canvasInvalidations += 1; } },
+      recovery: recoveryPort || { replace: (identity) => recovery.push(identity) },
+      canvas: canvasPort || { invalidateRenderAcks: () => { canvasInvalidations += 1; } },
       ...(projectSource ? { projectSource } : {}),
       ...(editRuntimePort ? { editRuntime: editRuntimePort } : {}),
     },
+    ...(projectRulesWorkflowConfig
+      ? { projectRulesWorkflow: projectRulesWorkflowConfig }
+      : {}),
+    ...(documentWorkflowConfig
+      ? { documentWorkflow: documentWorkflowConfig }
+      : {}),
     clock: { now: () => 1_726_000_000_000 },
   });
   controller.subscribeEvents((event) => events.push(event));
@@ -201,6 +234,7 @@ function createHarness({
     draftSession,
     versionSession,
     sourceHistorySession,
+    runSession: projectRulesWorkflowConfig?.runSession || null,
     recovery,
     events,
     client,
@@ -333,6 +367,12 @@ test("workspace controller publishes one recovered Working Copy signal from Brid
       async saveDraft() {
         return {};
       },
+      async projectFile() {
+        return { content: "" };
+      },
+      async updateProjectFile() {
+        return {};
+      },
     },
   });
 
@@ -344,7 +384,7 @@ test("workspace controller publishes one recovered Working Copy signal from Brid
   assert.equal(harness.events[0].workingCopyRecovered, true);
 });
 
-test("managed registration activates the exact V1 Working Copy before publishing Sessions", async () => {
+test("managed registration activates the exact V1 Working Copy before publishing Sessions", async (t) => {
   const workingCopyPath = "/tmp/PageRoot/项目/managed/managed-V1.html";
   const managedHtml = "<main>managed V1 source</main>";
   const target = {
@@ -358,6 +398,7 @@ test("managed registration activates the exact V1 Working Copy before publishing
     sourceSha256: sha256(managedHtml),
   };
   const calls = [];
+  const runSession = new RunSession({ sourcePath: SOURCE_PATH });
   const harness = createHarness({
     html: managedHtml,
     bridgeClient: {
@@ -382,11 +423,19 @@ test("managed registration activates the exact V1 Working Copy before publishing
       async saveDraft() {
         return {};
       },
+      async projectFile() {
+        return { content: "" };
+      },
+      async updateProjectFile() {
+        return {};
+      },
     },
+    projectRulesWorkflow: { runSession },
     projectSource: {
       async activateManagedWorkingCopy(input) {
         calls.push(input);
         return {
+          operationId: input.operationId,
           sourcePath: workingCopyPath,
           sha256: sha256(managedHtml),
           html: managedHtml,
@@ -394,6 +443,13 @@ test("managed registration activates the exact V1 Working Copy before publishing
       },
     },
   });
+  const aggregateSnapshots = [];
+  const unsubscribe = harness.controller.subscribe((snapshot) => {
+    if (snapshot.projectSession?.sourcePath === workingCopyPath) {
+      aggregateSnapshots.push(snapshot);
+    }
+  });
+  t.after(unsubscribe);
 
   const beforeGeneration = harness.documentSession.canvasGeneration;
   const outcome = await harness.controller.ensureRegistered();
@@ -407,8 +463,36 @@ test("managed registration activates the exact V1 Working Copy before publishing
   assert.equal(harness.documentSession.sourceReceipt.context.documentId, outcome.value.documentId);
   assert.equal(harness.documentSession.sourceReceipt.context.sourcePath, outcome.value.sourcePath);
   assert.equal(harness.documentSession.sourceReceipt.context.workingCopyId, outcome.value.workingCopyId);
+  assert.equal(
+    harness.documentSession.sourceReceipt.operationId,
+    "workspace-register-authority",
+  );
+  assert.ok(aggregateSnapshots.length >= 1);
+  for (const snapshot of aggregateSnapshots) {
+    assert.equal(
+      snapshot.projectSession.sourcePath,
+      snapshot.runSession.activeSourcePath,
+    );
+    assert.equal(
+      snapshot.document.sourceReceipt.context.sourcePath,
+      snapshot.projectSession.sourcePath,
+    );
+    assert.equal(
+      snapshot.document.sourceReceipt.context.sourcePath,
+      snapshot.runSession.activeSourcePath,
+    );
+    assert.equal(snapshot.document.canvasGeneration, beforeGeneration + 1);
+    assert.equal(
+      snapshot.document.sourceReceipt.operationId,
+      "workspace-register-authority",
+    );
+  }
   assert.equal(calls.length, 1);
-  assert.deepEqual(calls[0], {
+  assert.match(calls[0].operationId, /^registration_/u);
+  const activationCall = Object.fromEntries(
+    Object.entries(calls[0]).filter(([key]) => key !== "operationId"),
+  );
+  assert.deepEqual(activationCall, {
     previousSourcePath: SOURCE_PATH,
     nextSourcePath: workingCopyPath,
     expectedSha256: sha256(managedHtml),
@@ -418,6 +502,1145 @@ test("managed registration activates the exact V1 Working Copy before publishing
     versionId: "ver_0001",
     projectRootPath: "/tmp/PageRoot/项目/managed",
   });
+});
+
+test("managed registration resumes a post-commit publication under the same operation", async (t) => {
+  class FailOnceVersionSession extends VersionSession {
+    attempts = 0;
+
+    hydrate(input) {
+      this.attempts += 1;
+      if (this.attempts === 1) throw new Error("injected version publication failure");
+      return super.hydrate(input);
+    }
+  }
+
+  const managedHtml = "<main>managed continuation</main>";
+  const target = {
+    projectId: "project_registration_continuation",
+    documentId: "document_registration_continuation",
+    projectRootPath: "/tmp/PageRoot/项目/registration-continuation",
+    targetKind: "working-copy",
+    workingCopyId: "work_registration_continuation",
+    versionId: "ver_registration_continuation",
+    exactSourcePath: NEXT_SOURCE_PATH,
+    sourceSha256: sha256(managedHtml),
+  };
+  const versionSession = new FailOnceVersionSession();
+  const runSession = new RunSession({ sourcePath: SOURCE_PATH });
+  let ensureCalls = 0;
+  const activationCalls = [];
+  const harness = createHarness({
+    html: managedHtml,
+    versionSession,
+    bridgeClient: {
+      async ensureProject() {
+        ensureCalls += 1;
+        return registrationPayload({
+          sourcePath: NEXT_SOURCE_PATH,
+          projectId: target.projectId,
+          documentId: target.documentId,
+          html: managedHtml,
+          openTarget: target,
+        });
+      },
+      async workspace() {
+        throw new Error("continuation must not use the Draft-only recovery path");
+      },
+      async saveDraft() {
+        return {};
+      },
+      async projectFile() {
+        return { content: "" };
+      },
+      async updateProjectFile() {
+        return {};
+      },
+    },
+    projectRulesWorkflow: { runSession },
+    projectSource: {
+      async activateManagedWorkingCopy(input) {
+        activationCalls.push(input);
+        return {
+          operationId: input.operationId,
+          sourcePath: NEXT_SOURCE_PATH,
+          sha256: sha256(managedHtml),
+          html: managedHtml,
+        };
+      },
+    },
+  });
+  t.after(() => harness.controller.dispose());
+  const beforeGeneration = harness.documentSession.canvasGeneration;
+
+  const first = await harness.controller.ensureRegistered();
+
+  assert.equal(first.status, "unknown");
+  assert.equal(first.operationId, activationCalls[0].operationId);
+  assert.equal(ensureCalls, 1);
+  assert.equal(activationCalls.length, 1);
+  assert.equal(versionSession.attempts, 1);
+  assert.equal(harness.documentSession.canvasGeneration, beforeGeneration + 1);
+  assert.equal(
+    harness.controller.getSnapshot().projectSession.sourcePath,
+    SOURCE_PATH,
+    "an incomplete core tuple must stay behind the aggregate publication fence",
+  );
+  assert.equal(
+    harness.controller.getSnapshot().document.sourceReceipt?.context?.sourcePath
+      || null,
+    null,
+  );
+
+  const retry = await harness.controller.ensureRegistered();
+
+  assert.equal(retry.status, "succeeded");
+  assert.equal(ensureCalls, 1);
+  assert.equal(activationCalls.length, 1);
+  assert.equal(versionSession.attempts, 2);
+  assert.equal(harness.documentSession.canvasGeneration, beforeGeneration + 1);
+  assert.equal(harness.events.filter((event) => event.type === "registration-published").length, 1);
+  assert.equal(harness.projectSession.context?.sourcePath, NEXT_SOURCE_PATH);
+  assert.equal(runSession.snapshot.activeSourcePath, NEXT_SOURCE_PATH);
+  assert.equal(harness.documentSession.sourceReceipt.context.sourcePath, NEXT_SOURCE_PATH);
+  assert.equal(harness.controller.getSnapshot().projectSession.sourcePath, NEXT_SOURCE_PATH);
+  assert.equal(harness.controller.getSnapshot().versionSession.versions[0].id, "V1");
+});
+
+test("first autosave resumes registration before persisting a later same-document edit", async (t) => {
+  class FailOnceVersionSession extends VersionSession {
+    attempts = 0;
+
+    hydrate(input) {
+      this.attempts += 1;
+      if (this.attempts === 1) throw new Error("injected version publication failure");
+      return super.hydrate(input);
+    }
+  }
+
+  const originalHtml = "<main>managed original</main>";
+  const firstEditHtml = "<main>managed first edit</main>";
+  const latestHtml = "<main>managed latest edit</main>";
+  const target = {
+    projectId: "project_registration_autosave",
+    documentId: "document_registration_autosave",
+    projectRootPath: "/tmp/PageRoot/项目/registration-autosave",
+    targetKind: "working-copy",
+    workingCopyId: "work_registration_autosave",
+    versionId: "ver_registration_autosave",
+    exactSourcePath: NEXT_SOURCE_PATH,
+    sourceSha256: sha256(originalHtml),
+  };
+  const sourceTransaction = (before, after) => ({
+    kind: "setText",
+    beforeSourceSha256: sha256(before),
+    afterSourceSha256: sha256(after),
+    forwardPatches: [],
+    reversePatches: [],
+    beforeTarget: { id: "target_registration_autosave" },
+    afterTarget: { id: "target_registration_autosave" },
+  });
+  const versionSession = new FailOnceVersionSession();
+  let ensureCalls = 0;
+  let workspaceCalls = 0;
+  let activationCalls = 0;
+  const autosaves = [];
+  const bridgeClient = {
+    async ensureProject() {
+      ensureCalls += 1;
+      return {
+        ...registrationPayload({
+          sourcePath: NEXT_SOURCE_PATH,
+          projectId: target.projectId,
+          documentId: target.documentId,
+          html: originalHtml,
+          openTarget: target,
+        }),
+        currentBasedOnVersionId: "V1",
+        currentExactVersionId: "V1",
+        latestVersionId: "V1",
+      };
+    },
+    async workspace() {
+      workspaceCalls += 1;
+      throw new Error("continuation must not use the Draft-only recovery path");
+    },
+    async autosave(input) {
+      autosaves.push(input);
+      const sourceSha256 = sha256(input.html);
+      return {
+        ok: true,
+        content: input.html,
+        sha256: sourceSha256,
+        currentHtmlSha256: sourceSha256,
+        persistedRevision: input.editRevision,
+        lastModifiedAt: "2026-09-13T00:00:00.000Z",
+        lastSavedAt: "2026-09-13T00:00:00.000Z",
+        currentExactVersionId: null,
+        recoveryIdentity: { token: "recovery_after_autosave" },
+        openTarget: { ...target, sourceSha256 },
+      };
+    },
+    async source() {
+      return {
+        content: latestHtml,
+        sha256: sha256(latestHtml),
+        lastModifiedAt: "2026-09-13T00:00:00.000Z",
+      };
+    },
+    async resolveConflict() {
+      return {};
+    },
+    async saveDraft() {
+      return {};
+    },
+  };
+  const harness = createHarness({
+    html: originalHtml,
+    bridgeClient,
+    versionSession,
+    documentWorkflow: {
+      codecs: documentWorkflowCodecs,
+      scheduler: {
+        setTimeout: () => 1,
+        clearTimeout() {},
+      },
+    },
+    projectSource: {
+      async activateManagedWorkingCopy(input) {
+        activationCalls += 1;
+        return {
+          operationId: input.operationId,
+          sourcePath: NEXT_SOURCE_PATH,
+          sha256: sha256(originalHtml),
+          html: originalHtml,
+        };
+      },
+    },
+  });
+  t.after(() => harness.controller.dispose());
+
+  assert.equal(harness.controller.enqueueDocumentEdit({
+    html: firstEditHtml,
+    sourceTransaction: sourceTransaction(originalHtml, firstEditHtml),
+  }).status, "succeeded");
+  const first = await harness.controller.flushDocument({ throughRevision: 1 });
+
+  assert.equal(first.status, "unknown");
+  assert.equal(ensureCalls, 1);
+  assert.equal(activationCalls, 1);
+  assert.equal(versionSession.attempts, 1);
+  assert.equal(harness.documentSession.pendingWrite?.revision, 1);
+  assert.equal(harness.documentSession.pendingWrite?.sourcePath, NEXT_SOURCE_PATH);
+  assert.equal(harness.documentSession.persistState, "failed");
+  assert.equal(harness.sourceHistorySession.isActive(harness.projectSession.context), true);
+
+  harness.commentSession.update({
+    comments: [{
+      commentId: "comment_registration_autosave",
+      sourceAnchor: { id: "target_registration_autosave", selector: "main" },
+    }],
+    composerTarget: { id: "target_registration_autosave", selector: "main" },
+  });
+  assert.equal(harness.controller.enqueueDocumentEdit({
+    html: latestHtml,
+    sourceTransaction: sourceTransaction(firstEditHtml, latestHtml),
+    context: harness.controller.getCurrentProjectContext(),
+  }).status, "succeeded");
+
+  const saved = await harness.controller.flushDocument({ throughRevision: 2 });
+
+  assert.equal(saved.status, "succeeded", JSON.stringify(saved));
+  assert.equal(ensureCalls, 1);
+  assert.equal(workspaceCalls, 0);
+  assert.equal(activationCalls, 1);
+  assert.equal(versionSession.attempts, 2);
+  assert.equal(autosaves.length, 1);
+  assert.equal(autosaves[0].html, latestHtml);
+  assert.equal(autosaves[0].sourceHistoryOperations.length, 2);
+  assert.equal(harness.documentSession.html, latestHtml);
+  assert.equal(harness.documentSession.persistedSourceSha256, sha256(latestHtml));
+  assert.equal(harness.documentSession.workingHtmlSha256, sha256(latestHtml));
+  assert.equal(harness.documentSession.lastPersistedRevision, 2);
+  assert.equal(harness.documentSession.pendingWrite, null);
+  assert.equal(harness.documentSession.persistState, "idle");
+  assert.equal(harness.projectSession.context.sourceSha256, sha256(latestHtml));
+  assert.equal(
+    harness.documentSession.sourceReceipt.sourceSha256,
+    sha256(latestHtml),
+  );
+  assert.equal(harness.draftSession.isActive(harness.projectSession.context), true);
+  assert.equal(harness.versionSession.snapshot.currentExactVersionId, null);
+  assert.equal(harness.sourceHistorySession.capabilities.sourceSha256, sha256(latestHtml));
+  assert.equal(harness.sourceHistorySession.capabilities.canUndo, true);
+  assert.equal(
+    harness.commentSession.comments[0].commentId,
+    "comment_registration_autosave",
+  );
+  assert.equal(
+    harness.events.filter((event) => event.type === "registration-published").length,
+    1,
+  );
+  assert.equal((await harness.controller.ensureRegistered()).status, "succeeded");
+  assert.equal(workspaceCalls, 0);
+});
+
+test("registration rejects a stale-frame edit and rebinds late comments to canonical HTML", async (t) => {
+  class FailOnceVersionSession extends VersionSession {
+    attempts = 0;
+
+    hydrate(input) {
+      this.attempts += 1;
+      if (this.attempts === 1) throw new Error("injected canonical publication failure");
+      return super.hydrate(input);
+    }
+  }
+
+  const versionSession = new FailOnceVersionSession();
+  const harness = createHarness({
+    html: "<main>stale presented source</main>",
+    versionSession,
+  });
+  t.after(() => harness.controller.dispose());
+
+  const first = await harness.controller.ensureRegistered();
+  assert.equal(first.status, "unknown");
+  assert.equal(
+    harness.documentSession.html,
+    "<main>canonical source</main>",
+  );
+
+  harness.commentSession.update({
+    comments: [{
+      commentId: "comment_after_canonical_registration",
+      sourceAnchor: { id: "target_after_canonical_registration", selector: "main" },
+    }],
+    composerTarget: {
+      id: "target_after_canonical_registration",
+      selector: "main",
+    },
+  });
+  const staleEdit = harness.controller.enqueueDocumentEdit({
+    html: "<main>stale frame edit</main>",
+    context: harness.controller.getCurrentProjectContext(),
+  });
+  assert.equal(staleEdit.status, "blocked");
+  assert.equal(staleEdit.code, "PROJECT_REGISTRATION_RECONCILIATION_REQUIRED");
+  assert.equal(
+    harness.documentSession.html,
+    "<main>canonical source</main>",
+  );
+
+  const retry = await harness.controller.ensureRegistered();
+
+  assert.equal(retry.status, "succeeded");
+  assert.equal(versionSession.attempts, 2);
+  assert.equal(
+    harness.commentSession.comments[0].sourceAnchor.selector,
+    "main[data-rebound]",
+  );
+  assert.equal(
+    harness.commentSession.composerTarget.selector,
+    "main[data-rebound]",
+  );
+  assert.equal(
+    harness.events.filter((event) => event.type === "registration-published").length,
+    1,
+  );
+});
+
+test("registration keeps the stale-frame fence through SourceHistory publication", async (t) => {
+  class FailOnceSourceHistorySession extends SourceHistorySession {
+    attempts = 0;
+
+    activate(...args) {
+      this.attempts += 1;
+      if (this.attempts === 1) throw new Error("injected source history publication failure");
+      return super.activate(...args);
+    }
+  }
+
+  const presentedHtml = "<main>stale source-history frame</main>";
+  const canonicalHtml = "<main>canonical source</main>";
+  const staleEditedHtml = "<main>stale source-history edit</main>";
+  const staleTransaction = {
+    kind: "setText",
+    beforeSourceSha256: sha256(presentedHtml),
+    afterSourceSha256: sha256(staleEditedHtml),
+    forwardPatches: [],
+    reversePatches: [],
+    beforeTarget: { id: "target_stale_source_history" },
+    afterTarget: { id: "target_stale_source_history" },
+  };
+  const sourceHistorySession = new FailOnceSourceHistorySession();
+  let ensureCalls = 0;
+  const harness = createHarness({
+    html: presentedHtml,
+    sourceHistorySession,
+    bridgeClient: {
+      async ensureProject() {
+        ensureCalls += 1;
+        return registrationPayload({ html: canonicalHtml });
+      },
+      async workspace() {
+        throw new Error("continuation must not restore only Draft authority");
+      },
+      async saveDraft() {
+        return {};
+      },
+      async projectFile() {
+        return { content: "" };
+      },
+      async updateProjectFile() {
+        return {};
+      },
+    },
+  });
+  t.after(() => harness.controller.dispose());
+
+  const first = await harness.controller.ensureRegistered();
+  assert.equal(first.status, "unknown");
+  assert.equal(sourceHistorySession.attempts, 1);
+  assert.equal(harness.documentSession.html, canonicalHtml);
+
+  const staleEdit = harness.controller.enqueueDocumentEdit({
+    html: staleEditedHtml,
+    sourceTransaction: staleTransaction,
+    context: harness.controller.getCurrentProjectContext(),
+  });
+  assert.equal(staleEdit.status, "blocked");
+  assert.equal(staleEdit.code, "PROJECT_REGISTRATION_RECONCILIATION_REQUIRED");
+  assert.equal(harness.documentSession.html, canonicalHtml);
+  assert.equal(
+    sourceHistorySession.isActive(harness.projectSession.context),
+    false,
+  );
+  harness.commentSession.update({
+    comments: [{
+      commentId: "comment_stale_source_history",
+      sourceAnchor: {
+        id: "target_stale_source_history",
+        selector: "main",
+      },
+    }],
+    composerCommentId: "comment_stale_source_history_composer",
+    composerDraft: "late stage-six comment",
+    composerTarget: {
+      id: "target_stale_source_history_composer",
+      selector: "main",
+    },
+  });
+
+  const retry = await harness.controller.ensureRegistered();
+
+  assert.equal(retry.status, "succeeded");
+  assert.equal(ensureCalls, 1);
+  assert.equal(sourceHistorySession.attempts, 2);
+  assert.equal(harness.documentSession.html, canonicalHtml);
+  assert.equal(
+    harness.commentSession.comments[0].sourceAnchor.selector,
+    "main[data-rebound]",
+  );
+  assert.equal(
+    harness.commentSession.composerTarget.selector,
+    "main[data-rebound]",
+  );
+  assert.equal(
+    harness.events.filter((event) => event.type === "registration-published").length,
+    1,
+  );
+});
+
+test("late registration reconciliation preserves edits and comments made after an unknown outcome", async (t) => {
+  class FailOnceSourceHistorySession extends SourceHistorySession {
+    attempts = 0;
+
+    activate(...args) {
+      this.attempts += 1;
+      if (this.attempts === 1) throw new Error("injected source history publication failure");
+      return super.activate(...args);
+    }
+  }
+
+  const managedHtml = "<main>managed history baseline</main>";
+  const editedHtml = "<main>managed history edited</main>";
+  const target = {
+    projectId: "project_registration_history_continuation",
+    documentId: "document_registration_history_continuation",
+    projectRootPath: "/tmp/PageRoot/项目/registration-history-continuation",
+    targetKind: "working-copy",
+    workingCopyId: "work_registration_history_continuation",
+    versionId: "ver_registration_history_continuation",
+    exactSourcePath: NEXT_SOURCE_PATH,
+    sourceSha256: sha256(managedHtml),
+  };
+  const sourceHistorySession = new FailOnceSourceHistorySession();
+  const runSession = new RunSession({ sourcePath: SOURCE_PATH });
+  let ensureCalls = 0;
+  let activationCalls = 0;
+  const harness = createHarness({
+    html: managedHtml,
+    sourceHistorySession,
+    bridgeClient: {
+      async ensureProject() {
+        ensureCalls += 1;
+        return registrationPayload({
+          sourcePath: NEXT_SOURCE_PATH,
+          projectId: target.projectId,
+          documentId: target.documentId,
+          html: managedHtml,
+          openTarget: target,
+        });
+      },
+      async workspace() {
+        throw new Error("continuation must not restore only Draft authority");
+      },
+      async saveDraft() {
+        return {};
+      },
+      async projectFile() {
+        return { content: "" };
+      },
+      async updateProjectFile() {
+        return {};
+      },
+    },
+    projectRulesWorkflow: { runSession },
+    projectSource: {
+      async activateManagedWorkingCopy(input) {
+        activationCalls += 1;
+        return {
+          operationId: input.operationId,
+          sourcePath: NEXT_SOURCE_PATH,
+          sha256: sha256(managedHtml),
+          html: managedHtml,
+        };
+      },
+    },
+  });
+  t.after(() => harness.controller.dispose());
+  const beforeGeneration = harness.documentSession.canvasGeneration;
+
+  const first = await harness.controller.ensureRegistered();
+  assert.equal(first.status, "unknown");
+  assert.equal(harness.controller.getSnapshot().projectSession.sourcePath, NEXT_SOURCE_PATH);
+
+  const context = harness.projectSession.context;
+  const editRevision = harness.documentSession.beginEdit(editedHtml, {
+    origin: "local-edit",
+    operationId: "edit_after_registration_unknown",
+    sourceSha256: sha256(editedHtml),
+    context,
+  });
+  const pendingWrite = {
+    ...context,
+    expectedSourceSha256: sha256(managedHtml),
+    html: editedHtml,
+    revision: editRevision,
+    events: [],
+    historyOperations: [],
+    recoveryIdentity: null,
+  };
+  harness.documentSession.update({
+    pendingWrite,
+    persistState: "queued",
+  });
+  sourceHistorySession.activate(context, sha256(editedHtml), null);
+  harness.commentSession.setComments([{
+    commentId: "comment_after_registration_unknown",
+    sourceAnchor: { id: "anchor_after_unknown", selector: "main" },
+  }]);
+  const editedReceipt = harness.documentSession.sourceReceipt;
+
+  const retry = await harness.controller.ensureRegistered();
+
+  assert.equal(retry.status, "succeeded");
+  assert.equal(ensureCalls, 1);
+  assert.equal(activationCalls, 1);
+  assert.equal(sourceHistorySession.attempts, 2);
+  assert.equal(harness.documentSession.html, editedHtml);
+  assert.equal(harness.documentSession.editRevision, editRevision);
+  assert.equal(harness.documentSession.sourceReceipt, editedReceipt);
+  assert.equal(harness.documentSession.pendingWrite, pendingWrite);
+  assert.equal(harness.documentSession.canvasGeneration, beforeGeneration + 1);
+  assert.equal(
+    harness.commentSession.comments[0].commentId,
+    "comment_after_registration_unknown",
+  );
+  assert.equal(harness.events.filter((event) => event.type === "registration-published").length, 1);
+});
+
+test("ordinary registration continuation cannot degrade into Draft-only false success", async (t) => {
+  class FailOnceVersionSession extends VersionSession {
+    attempts = 0;
+
+    hydrate(input) {
+      this.attempts += 1;
+      if (this.attempts === 1) throw new Error("injected ordinary version failure");
+      return super.hydrate(input);
+    }
+  }
+
+  const versionSession = new FailOnceVersionSession();
+  let ensureCalls = 0;
+  let workspaceCalls = 0;
+  const harness = createHarness({
+    versionSession,
+    bridgeClient: {
+      async ensureProject() {
+        ensureCalls += 1;
+        return registrationPayload({ html: "<main>local source</main>" });
+      },
+      async workspace() {
+        workspaceCalls += 1;
+        return registrationPayload({ html: "<main>local source</main>" });
+      },
+      async saveDraft() {
+        return {};
+      },
+    },
+  });
+  t.after(() => harness.controller.dispose());
+
+  const first = await harness.controller.ensureRegistered();
+  const retry = await harness.controller.ensureRegistered();
+
+  assert.equal(first.status, "unknown");
+  assert.equal(retry.status, "succeeded");
+  assert.equal(ensureCalls, 1);
+  assert.equal(workspaceCalls, 0);
+  assert.equal(versionSession.attempts, 2);
+  assert.equal(harness.versionSession.snapshot.versions[0].id, "V1");
+  assert.equal(harness.events.filter((event) => event.type === "registration-published").length, 1);
+});
+
+test("registration treats recovery and Canvas adapters as rebuildable projections", async (t) => {
+  const harness = createHarness({
+    html: "<main>canonical source</main>",
+    recoveryPort: {
+      replace() {
+        throw new Error("injected recovery projection failure");
+      },
+    },
+    canvasPort: {
+      invalidateRenderAcks() {
+        throw new Error("injected Canvas projection failure");
+      },
+    },
+  });
+  t.after(() => harness.controller.dispose());
+
+  const outcome = await harness.controller.ensureRegistered();
+
+  assert.equal(outcome.status, "succeeded");
+  assert.equal(harness.projectSession.context?.projectId, "project_registration");
+  assert.equal(
+    harness.documentSession.sourceReceipt.context.projectId,
+    "project_registration",
+  );
+});
+
+test("managed registration rejects an incomplete OpenTarget before Desktop or Session mutation", async (t) => {
+  const managedHtml = "<main>managed incomplete target</main>";
+  const baseTarget = {
+    projectId: "project_incomplete_target",
+    documentId: "document_incomplete_target",
+    projectRootPath: "/tmp/PageRoot/项目/incomplete-target",
+    targetKind: "working-copy",
+    workingCopyId: "work_ver_0001",
+    versionId: "ver_0001",
+    exactSourcePath: NEXT_SOURCE_PATH,
+    sourceSha256: sha256(managedHtml),
+  };
+
+  for (const [label, mutateTarget] of [
+    ["missing exactSourcePath", (target) => { delete target.exactSourcePath; }],
+    ["wrong exactSourcePath", (target) => { target.exactSourcePath = "/tmp/PageRoot/项目/incomplete-target/other-V1.html"; }],
+    ["wrong sourceSha256", (target) => { target.sourceSha256 = `sha256:${"0".repeat(64)}`; }],
+    ["missing OpenTarget", null],
+  ]) {
+    const runSession = new RunSession({ sourcePath: SOURCE_PATH });
+    const previousRun = {
+      projectId: "project_incomplete_target",
+      documentId: "document_incomplete_target",
+      sourcePath: SOURCE_PATH,
+      requestId: `request_incomplete_${label.replaceAll(" ", "_")}`,
+      attemptId: "attempt_incomplete_target",
+      status: "processing",
+    };
+    runSession.trackRun(previousRun, { activate: "never" });
+    let desktopCalls = 0;
+    const harness = createHarness({
+      html: managedHtml,
+      bridgeClient: {
+        async ensureProject() {
+          const target = mutateTarget ? structuredClone(baseTarget) : null;
+          mutateTarget?.(target);
+          return registrationPayload({
+            sourcePath: NEXT_SOURCE_PATH,
+            projectId: baseTarget.projectId,
+            documentId: baseTarget.documentId,
+            html: managedHtml,
+            ...(target ? { openTarget: target } : {}),
+          });
+        },
+        async workspace() {
+          return registrationPayload();
+        },
+        async saveDraft() {
+          return {};
+        },
+        async projectFile() {
+          return { content: "" };
+        },
+        async updateProjectFile() {
+          return {};
+        },
+      },
+      projectRulesWorkflow: { runSession },
+      projectSource: {
+        async activateManagedWorkingCopy() {
+          desktopCalls += 1;
+          return null;
+        },
+      },
+    });
+    t.after(() => harness.controller.dispose());
+    const beforeDocument = harness.documentSession.snapshot;
+    const beforeComments = harness.commentSession.snapshot;
+    const beforeVersions = harness.versionSession.snapshot;
+    const beforeRules = harness.controller.getSnapshot().projectRules;
+    const beforeRun = runSession.snapshot;
+    const beforeProjectSource = harness.projectSession.sourcePath;
+
+    const outcome = await harness.controller.ensureRegistered();
+
+    assert.equal(outcome.status, "rejected", label);
+    assert.equal(outcome.code, "PROJECT_REGISTRATION_OPEN_TARGET_INVALID", label);
+    assert.equal(desktopCalls, 0, label);
+    assert.equal(harness.projectSession.context, null, label);
+    assert.equal(harness.projectSession.sourcePath, beforeProjectSource, label);
+    assert.deepEqual(harness.documentSession.snapshot, beforeDocument, label);
+    assert.deepEqual(harness.commentSession.snapshot, beforeComments, label);
+    assert.deepEqual(harness.versionSession.snapshot, beforeVersions, label);
+    assert.deepEqual(harness.controller.getSnapshot().projectRules, beforeRules, label);
+    assert.deepEqual(runSession.snapshot, beforeRun, label);
+  }
+});
+
+test("managed registration fails closed when its destination locator already owns a Request", async (t) => {
+  const managedHtml = "<main>managed destination source</main>";
+  const target = {
+    projectId: "project_registration",
+    documentId: "document_registration",
+    projectRootPath: "/tmp/PageRoot/项目/occupied",
+    targetKind: "working-copy",
+    workingCopyId: "work_ver_0001",
+    versionId: "ver_0001",
+    exactSourcePath: NEXT_SOURCE_PATH,
+    sourceSha256: sha256(managedHtml),
+  };
+  const runSession = new RunSession({ sourcePath: SOURCE_PATH });
+  const harness = createHarness({
+    html: managedHtml,
+    bridgeClient: {
+      async ensureProject() {
+        return registrationPayload({
+          sourcePath: NEXT_SOURCE_PATH,
+          projectId: target.projectId,
+          documentId: target.documentId,
+          html: managedHtml,
+          openTarget: target,
+        });
+      },
+      async workspace() {
+        return registrationPayload();
+      },
+      async saveDraft() {
+        return {};
+      },
+      async projectFile() {
+        return { content: "" };
+      },
+      async updateProjectFile() {
+        return {};
+      },
+    },
+    projectRulesWorkflow: { runSession },
+    projectSource: {
+      async activateManagedWorkingCopy(input) {
+        return {
+          operationId: input.operationId,
+          sourcePath: NEXT_SOURCE_PATH,
+          sha256: sha256(managedHtml),
+          html: managedHtml,
+        };
+      },
+    },
+  });
+  t.after(() => harness.controller.dispose());
+  const previousRun = {
+    projectId: target.projectId,
+    documentId: target.documentId,
+    sourcePath: SOURCE_PATH,
+    requestId: "request_previous_registration",
+    attemptId: "attempt_previous_registration",
+    status: "complete",
+  };
+  const destinationRun = {
+    projectId: target.projectId,
+    documentId: target.documentId,
+    sourcePath: NEXT_SOURCE_PATH,
+    requestId: "request_destination_registration",
+    attemptId: "attempt_destination_registration",
+    status: "processing",
+  };
+  runSession.trackRun(previousRun, { activate: "never" });
+  runSession.trackRun(destinationRun, { activate: "never" });
+
+  const outcome = await harness.controller.ensureRegistered();
+
+  assert.equal(outcome.status, "rejected");
+  assert.equal(outcome.code, "PROJECT_RUN_LOCATOR_REBASE_REJECTED");
+  assert.equal(harness.projectSession.context, null);
+  assert.equal(harness.projectSession.sourcePath, SOURCE_PATH);
+  assert.equal(runSession.runForSource(SOURCE_PATH), previousRun);
+  assert.equal(runSession.runForSource(NEXT_SOURCE_PATH), destinationRun);
+});
+
+test("managed activation reports unknown when a destination collision appears after host activation", async (t) => {
+  const managedHtml = "<main>managed destination race</main>";
+  const target = {
+    projectId: "project_registration_race",
+    documentId: "document_registration_race",
+    projectRootPath: "/tmp/PageRoot/项目/race",
+    targetKind: "working-copy",
+    workingCopyId: "work_ver_race",
+    versionId: "ver_race",
+    exactSourcePath: NEXT_SOURCE_PATH,
+    sourceSha256: sha256(managedHtml),
+  };
+  let releaseActivation;
+  const activationStarted = new Promise((resolve) => {
+    releaseActivation = resolve;
+  });
+  const calls = [];
+  const receipts = new Map();
+  let hostMutations = 0;
+  let hostActivePath = SOURCE_PATH;
+  const runSession = new RunSession({ sourcePath: SOURCE_PATH });
+  const harness = createHarness({
+    html: managedHtml,
+    bridgeClient: {
+      async ensureProject() {
+        return registrationPayload({
+          sourcePath: NEXT_SOURCE_PATH,
+          projectId: target.projectId,
+          documentId: target.documentId,
+          html: managedHtml,
+          openTarget: target,
+        });
+      },
+      async workspace() {
+        return registrationPayload();
+      },
+      async saveDraft() {
+        return {};
+      },
+      async projectFile() {
+        return { content: "" };
+      },
+      async updateProjectFile() {
+        return {};
+      },
+    },
+    projectRulesWorkflow: { runSession },
+    projectSource: {
+      async activateManagedWorkingCopy(input) {
+        calls.push(input);
+        if (!receipts.has(input.operationId)) {
+          hostMutations += 1;
+          hostActivePath = NEXT_SOURCE_PATH;
+          receipts.set(input.operationId, Object.freeze({
+            operationId: input.operationId,
+            activePath: hostActivePath,
+          }));
+        }
+        await activationStarted;
+        return {
+          operationId: input.operationId,
+          sourcePath: NEXT_SOURCE_PATH,
+          sha256: sha256(managedHtml),
+          html: managedHtml,
+        };
+      },
+    },
+  });
+  t.after(() => harness.controller.dispose());
+
+  const previousRun = {
+    projectId: target.projectId,
+    documentId: target.documentId,
+    sourcePath: SOURCE_PATH,
+    requestId: "request_race_previous",
+    attemptId: "attempt_race_previous",
+    status: "complete",
+  };
+  const destinationRun = {
+    projectId: target.projectId,
+    documentId: target.documentId,
+    sourcePath: NEXT_SOURCE_PATH,
+    requestId: "request_race_destination",
+    attemptId: "attempt_race_destination",
+    status: "processing",
+  };
+  runSession.trackRun(previousRun, { activate: "never" });
+  const registration = harness.controller.ensureRegistered();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls.length, 1);
+  runSession.trackRun(destinationRun, { activate: "never" });
+  releaseActivation();
+
+  const outcome = await registration;
+
+  assert.equal(outcome.status, "unknown");
+  assert.equal(hostActivePath, NEXT_SOURCE_PATH);
+  assert.equal(receipts.get(calls[0].operationId)?.activePath, NEXT_SOURCE_PATH);
+  assert.equal(
+    harness.controller.getSnapshot().registration.outcome.operationId,
+    calls[0].operationId,
+  );
+  assert.equal(harness.projectSession.context, null);
+  assert.equal(harness.projectSession.sourcePath, SOURCE_PATH);
+  assert.equal(runSession.runForSource(SOURCE_PATH), previousRun);
+  assert.equal(runSession.runForSource(NEXT_SOURCE_PATH), destinationRun);
+
+  runSession.removeRun(destinationRun);
+  const retry = await harness.controller.ensureRegistered();
+
+  assert.equal(retry.status, "succeeded");
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].operationId, calls[0].operationId);
+  assert.equal(hostMutations, 1);
+  assert.equal(hostActivePath, NEXT_SOURCE_PATH);
+  assert.equal(harness.projectSession.context?.sourcePath, NEXT_SOURCE_PATH);
+  assert.equal(runSession.runForSource(SOURCE_PATH), null);
+  assert.equal(runSession.runForSource(NEXT_SOURCE_PATH)?.requestId, previousRun.requestId);
+});
+
+test("managed registration fences edits during host activation and rebinds the latest queued write on retry", async (t) => {
+  const managedHtml = "<main>managed registration baseline</main>";
+  const editedHtml = "<main>latest renderer edit</main>";
+  const target = {
+    projectId: "project_registration_edit_race",
+    documentId: "document_registration_edit_race",
+    projectRootPath: "/tmp/PageRoot/项目/edit-race",
+    targetKind: "working-copy",
+    workingCopyId: "work_ver_edit_race",
+    versionId: "ver_edit_race",
+    exactSourcePath: NEXT_SOURCE_PATH,
+    sourceSha256: sha256(managedHtml),
+  };
+  let markActivationStarted;
+  const activationStarted = new Promise((resolve) => {
+    markActivationStarted = resolve;
+  });
+  let releaseActivation;
+  const activationBarrier = new Promise((resolve) => {
+    releaseActivation = resolve;
+  });
+  const calls = [];
+  const hostReceipts = new Map();
+  let hostMutations = 0;
+  const runSession = new RunSession({ sourcePath: SOURCE_PATH });
+  const harness = createHarness({
+    html: managedHtml,
+    bridgeClient: {
+      async ensureProject() {
+        return registrationPayload({
+          sourcePath: NEXT_SOURCE_PATH,
+          projectId: target.projectId,
+          documentId: target.documentId,
+          html: managedHtml,
+          openTarget: target,
+        });
+      },
+      async workspace() {
+        return registrationPayload();
+      },
+      async saveDraft() {
+        return {};
+      },
+      async projectFile() {
+        return { content: "" };
+      },
+      async updateProjectFile() {
+        return {};
+      },
+    },
+    projectRulesWorkflow: { runSession },
+    projectSource: {
+      async activateManagedWorkingCopy(input) {
+        calls.push(input);
+        if (!hostReceipts.has(input.operationId)) {
+          hostMutations += 1;
+          hostReceipts.set(input.operationId, Object.freeze({
+            operationId: input.operationId,
+            activePath: NEXT_SOURCE_PATH,
+          }));
+          markActivationStarted();
+        }
+        await activationBarrier;
+        return {
+          operationId: input.operationId,
+          sourcePath: NEXT_SOURCE_PATH,
+          sha256: sha256(managedHtml),
+          html: managedHtml,
+        };
+      },
+    },
+  });
+  t.after(() => harness.controller.dispose());
+
+  const previousRun = {
+    projectId: target.projectId,
+    documentId: target.documentId,
+    sourcePath: SOURCE_PATH,
+    requestId: "request_registration_edit_race",
+    attemptId: "attempt_registration_edit_race",
+    status: "processing",
+  };
+  runSession.trackRun(previousRun, { activate: "never" });
+  const aggregateSnapshots = [];
+  const unsubscribe = harness.controller.subscribe((snapshot) => {
+    aggregateSnapshots.push(snapshot);
+  });
+  t.after(unsubscribe);
+
+  const beforeGeneration = harness.documentSession.canvasGeneration;
+  const registration = harness.controller.ensureRegistered();
+  await activationStarted;
+  assert.equal(calls.length, 1);
+
+  const editRevision = harness.documentSession.beginEdit(editedHtml, {
+    origin: "local-edit",
+    operationId: "edit_during_registration",
+    sourceSha256: sha256(editedHtml),
+  });
+  const queuedWrite = {
+    epoch: harness.projectSession.epoch,
+    projectId: null,
+    documentId: null,
+    sourcePath: SOURCE_PATH,
+    expectedSourceSha256: sha256(managedHtml),
+    html: editedHtml,
+    revision: editRevision,
+    events: [],
+    historyOperations: [],
+    recoveryIdentity: null,
+  };
+  harness.documentSession.update({
+    pendingWrite: queuedWrite,
+    persistState: "queued",
+  });
+  const editedSnapshot = harness.documentSession.snapshot;
+  const editedReceipt = harness.documentSession.sourceReceipt;
+  const editedCanvasAuthority = harness.documentSession.canvasAuthority;
+  const editedFlushPromise = harness.documentSession.flushPromise;
+  releaseActivation();
+
+  const first = await registration;
+
+  assert.equal(first.status, "unknown");
+  assert.equal(first.operationId, calls[0].operationId);
+  assert.equal(hostReceipts.get(first.operationId)?.activePath, NEXT_SOURCE_PATH);
+  assert.equal(hostMutations, 1);
+  assert.equal(harness.projectSession.context, null);
+  assert.equal(harness.projectSession.sourcePath, SOURCE_PATH);
+  assert.equal(runSession.runForSource(SOURCE_PATH), previousRun);
+  assert.equal(runSession.runForSource(NEXT_SOURCE_PATH), null);
+  assert.equal(harness.documentSession.snapshot, editedSnapshot);
+  assert.equal(harness.documentSession.html, editedHtml);
+  assert.equal(harness.documentSession.editRevision, editRevision);
+  assert.equal(harness.documentSession.sourceReceipt, editedReceipt);
+  assert.equal(harness.documentSession.canvasAuthority, editedCanvasAuthority);
+  assert.equal(harness.documentSession.pendingWrite, queuedWrite);
+  assert.equal(harness.documentSession.flushPromise, editedFlushPromise);
+  assert.equal(harness.documentSession.pendingWrite.sourcePath, SOURCE_PATH);
+  assert.equal(harness.documentSession.canvasGeneration, beforeGeneration);
+  assert.equal(harness.canvasInvalidations, 0);
+  for (const snapshot of aggregateSnapshots) {
+    const paths = [
+      snapshot.projectSession?.sourcePath,
+      snapshot.runSession?.activeSourcePath,
+      snapshot.document?.sourceReceipt?.context?.sourcePath,
+    ];
+    assert.equal(paths.includes(NEXT_SOURCE_PATH), false);
+  }
+
+  const retrySnapshotStart = aggregateSnapshots.length;
+  const retry = await harness.controller.ensureRegistered();
+
+  assert.equal(retry.status, "succeeded");
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].operationId, calls[0].operationId);
+  assert.equal(hostMutations, 1);
+  assert.equal(harness.projectSession.context?.sourcePath, NEXT_SOURCE_PATH);
+  assert.equal(runSession.runForSource(SOURCE_PATH), null);
+  assert.equal(runSession.runForSource(NEXT_SOURCE_PATH)?.requestId, previousRun.requestId);
+  assert.equal(harness.documentSession.html, editedHtml);
+  assert.equal(harness.documentSession.editRevision, editRevision);
+  assert.equal(harness.documentSession.canvasGeneration, beforeGeneration + 1);
+  assert.equal(harness.canvasInvalidations, 1);
+  assert.equal(
+    harness.documentSession.sourceReceipt.operationId,
+    "workspace-register-authority",
+  );
+  assert.equal(
+    harness.documentSession.sourceReceipt.context.sourcePath,
+    NEXT_SOURCE_PATH,
+  );
+  assert.equal(harness.documentSession.pendingWrite.html, editedHtml);
+  assert.equal(harness.documentSession.pendingWrite.revision, editRevision);
+  assert.equal(harness.documentSession.pendingWrite.sourcePath, NEXT_SOURCE_PATH);
+  assert.equal(harness.documentSession.pendingWrite.projectId, target.projectId);
+  assert.equal(harness.documentSession.pendingWrite.documentId, target.documentId);
+  assert.equal(harness.documentSession.pendingWrite.workingCopyId, target.workingCopyId);
+  assert.equal(harness.documentSession.pendingWrite.versionId, target.versionId);
+  assert.equal(harness.documentSession.pendingWrite.exactSourcePath, NEXT_SOURCE_PATH);
+  assert.equal(
+    harness.documentSession.pendingWrite.expectedSourceSha256,
+    sha256(managedHtml),
+  );
+  assert.equal(harness.documentSession.confirmCanvas({
+    generation: editedReceipt.canvasGeneration,
+    renderedSha256: sha256(editedHtml),
+    workingHtmlSha256: sha256(editedHtml),
+    renderedHtml: editedHtml,
+    receipt: editedReceipt,
+  }), false);
+  const retrySnapshots = aggregateSnapshots.slice(retrySnapshotStart);
+  assert.ok(retrySnapshots.length >= 1);
+  assert.equal(
+    retrySnapshots.some((snapshot) => snapshot.projectSession?.sourcePath === NEXT_SOURCE_PATH),
+    true,
+  );
+  for (const snapshot of retrySnapshots) {
+    const paths = [
+      snapshot.projectSession?.sourcePath,
+      snapshot.runSession?.activeSourcePath,
+      snapshot.document?.sourceReceipt?.context?.sourcePath,
+    ];
+    if (!paths.includes(NEXT_SOURCE_PATH)) continue;
+    assert.deepEqual(paths, [NEXT_SOURCE_PATH, NEXT_SOURCE_PATH, NEXT_SOURCE_PATH]);
+    assert.equal(snapshot.document.html, editedHtml);
+    assert.equal(snapshot.document.hasPendingWrite, true);
+    assert.equal(snapshot.document.canvasGeneration, beforeGeneration + 1);
+    assert.equal(
+      snapshot.document.sourceReceipt.operationId,
+      "workspace-register-authority",
+    );
+  }
 });
 
 test("managed registration fails closed when its desktop Working Copy activation is unavailable", async () => {

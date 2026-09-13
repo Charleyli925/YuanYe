@@ -164,6 +164,7 @@ function identityMatches(left, right, sameSourcePath) {
 export class DocumentWorkflow {
   #bridgeClient;
   #ensureRegistered;
+  #registrationPending;
   #projectSession;
   #documentSession;
   #commentSession;
@@ -193,6 +194,7 @@ export class DocumentWorkflow {
   constructor({
     bridgeClient,
     ensureRegistered,
+    registrationPending = () => false,
     projectSession,
     documentSession,
     commentSession,
@@ -214,6 +216,9 @@ export class DocumentWorkflow {
     }
     if (typeof ensureRegistered !== "function") {
       throw new TypeError("DocumentWorkflow requires project registration authority.");
+    }
+    if (typeof registrationPending !== "function") {
+      throw new TypeError("DocumentWorkflow registration reconciliation must be a function.");
     }
     if (!projectSession || typeof projectSession.matches !== "function") {
       throw new TypeError("DocumentWorkflow requires ProjectSession injection.");
@@ -259,6 +264,7 @@ export class DocumentWorkflow {
 
     this.#bridgeClient = bridgeClient;
     this.#ensureRegistered = ensureRegistered;
+    this.#registrationPending = registrationPending;
     this.#projectSession = projectSession;
     this.#documentSession = documentSession;
     this.#commentSession = commentSession;
@@ -2010,7 +2016,11 @@ export class DocumentWorkflow {
         if (this.#isCurrent(writeContext)) {
           this.#documentSession.setPersistence({ state: "writing", error: "" });
         }
-        if (!write.projectId || !write.documentId) {
+        if (
+          !write.projectId
+          || !write.documentId
+          || this.#registrationPending()
+        ) {
           const registration = await this.#ensureRegistered({
             sourcePath: write.sourcePath,
             expectedSourceSha256: write.expectedSourceSha256,
@@ -2023,13 +2033,14 @@ export class DocumentWorkflow {
               writeContext,
             });
           }
+          const previousWriteSourcePath = write.sourcePath;
           write = {
             ...write,
             ...registration.value,
             expectedSourceSha256: this.#documentSession.persistedSourceSha256,
           };
           writeContext = registration.value;
-          this.#updateQueuedWriteAfterRegistration(write);
+          this.#updateQueuedWriteAfterRegistration(write, previousWriteSourcePath);
           // Registration changes recovery identity before the durable write.
           // Persist that transition now so a crash in the subsequent POST has
           // a record the next registered workspace can safely resume.
@@ -2410,13 +2421,21 @@ export class DocumentWorkflow {
     };
   }
 
-  #updateQueuedWriteAfterRegistration(write) {
+  #updateQueuedWriteAfterRegistration(write, previousSourcePath = write.sourcePath) {
     const queued = this.#documentSession.pendingWrite;
-    if (!queued || !this.#codecs.sameSourcePath(queued.sourcePath, write.sourcePath)) return;
+    if (
+      !queued
+      || (
+        !this.#codecs.sameSourcePath(queued.sourcePath, previousSourcePath)
+        && !this.#codecs.sameSourcePath(queued.sourcePath, write.sourcePath)
+      )
+    ) return;
     this.#documentSession.setPendingWrite({
       ...queued,
+      epoch: write.epoch,
       projectId: write.projectId,
       documentId: write.documentId,
+      sourcePath: write.sourcePath,
       projectRootPath: write.projectRootPath,
       targetKind: write.targetKind,
       workingCopyId: write.workingCopyId,
@@ -2428,21 +2447,92 @@ export class DocumentWorkflow {
     });
   }
 
-  #restoreWriteAfterFailure(write, context) {
+  #restoreWriteAfterFailure(write, context, { replacePending = false } = {}) {
     const pending = this.#documentSession.pendingWrite;
-    const recoveryWrite = pending
+    const recoveryWrite = !replacePending && pending
       && sameContext(pending, write, this.#codecs.sameSourcePath)
       && pending.revision > write.revision
       ? pending
       : write;
     if (
       this.#isCurrent(context)
-      && (!pending || pending.revision < recoveryWrite.revision)
+      && (
+        replacePending
+        || !pending
+        || pending.revision < recoveryWrite.revision
+      )
     ) {
       this.#documentSession.setPendingWrite(recoveryWrite);
     }
     this.#persistRecovery(recoveryWrite, context);
     return recoveryWrite;
+  }
+
+  #rebindRegistrationFailureWrite(write, writeContext, outcome) {
+    if (outcome?.status !== "unknown" || !this.#registrationPending()) {
+      return { write, context: writeContext, replacePending: false };
+    }
+    const context = copyContext(this.#projectSession.context);
+    const receiptContext = copyContext(
+      this.#documentSession.sourceReceipt?.context,
+    );
+    if (
+      !context
+      || !receiptContext
+      || !this.#isCurrent(context)
+      || !sameOpenRoute(
+        context,
+        receiptContext,
+        this.#codecs.sameSourcePath,
+      )
+    ) {
+      return { write, context: writeContext, replacePending: false };
+    }
+
+    const pending = this.#documentSession.pendingWrite;
+    const latestWrite = pending
+      && pending.revision > write.revision
+      && (
+        sameContext(pending, write, this.#codecs.sameSourcePath)
+        || sameOpenRoute(pending, context, this.#codecs.sameSourcePath)
+      )
+      ? pending
+      : write;
+    const sourceSha256 = String(
+      this.#documentSession.workingHtmlSha256
+      || latestWrite.historyOperations?.at(-1)?.afterSourceSha256
+      || this.#documentSession.persistedSourceSha256
+      || "",
+    );
+    if (SHA256.test(sourceSha256)) {
+      const history = this.#sourceHistorySession.snapshot;
+      this.#sourceHistorySession.activate(
+        context,
+        sourceSha256,
+        history
+          ? {
+            ...history,
+            projectId: context.projectId,
+            documentId: context.documentId,
+            sourcePath: context.sourcePath,
+          }
+          : null,
+      );
+      this.#sourceHistorySession.restorePendingEvidence(
+        context,
+        latestWrite.historyOperations || [],
+      );
+    }
+    return {
+      context,
+      replacePending: true,
+      write: {
+        ...latestWrite,
+        ...context,
+        expectedSourceSha256: this.#documentSession.persistedSourceSha256,
+        historyOperations: this.#sourceHistorySession.pendingOperations,
+      },
+    };
   }
 
   #settleRegistrationFailure({ registration, write, writeContext }) {
@@ -2456,12 +2546,21 @@ export class DocumentWorkflow {
     const code = outcome.status === "unknown"
       ? "PROJECT_REGISTRATION_UNKNOWN"
       : String(outcome.code || "PROJECT_REGISTRATION_UNAVAILABLE");
-    const recoveryWrite = this.#restoreWriteAfterFailure(write, writeContext);
-    if (outcome.status !== "stale" && this.#isCurrent(writeContext)) {
+    const rebound = this.#rebindRegistrationFailureWrite(
+      write,
+      writeContext,
+      outcome,
+    );
+    const recoveryWrite = this.#restoreWriteAfterFailure(
+      rebound.write,
+      rebound.context,
+      { replacePending: rebound.replacePending },
+    );
+    if (outcome.status !== "stale" && this.#isCurrent(rebound.context)) {
       this.#documentSession.setPersistence({ state: "failed", error: message });
       this.#emit({
         type: "document-persistence-failed",
-        context: writeContext,
+        context: rebound.context,
         code,
         message,
         conflict: false,

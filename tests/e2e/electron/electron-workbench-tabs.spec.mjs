@@ -483,6 +483,7 @@ test("Electron sidebar opens an imported historical version in the existing proj
       const promoted = await repository.promoteCandidate({
         target,
         candidateId: candidate.candidate.candidateId,
+        decisionOperationId: `promote_${candidate.candidate.candidateId}`,
       });
       expect(promoted.promoted).toBe(true);
       target = promoted.target;
@@ -711,6 +712,7 @@ test("Electron sidebar keeps multiple project lists expanded without switching i
           const promoted = await repository.promoteCandidate({
             target,
             candidateId: candidate.candidate.candidateId,
+            decisionOperationId: `promote_${candidate.candidate.candidateId}`,
           });
           expect(promoted.promoted).toBe(true);
           target = promoted.target;
@@ -814,7 +816,7 @@ for (const recoveryCase of ["pending", "rename", "superseded"]) {
         const candidate = await repository.createCandidate({ target, requestId: `req_restart_${ordinal}`,
           candidateId: `candidate_restart_${ordinal}_0001`, html: identityPreservingCandidateHtml(target, `Restart V${ordinal}`),
           expectedSourceSha256: target.sourceSha256 });
-        target = (await repository.promoteCandidate({ target, candidateId: candidate.candidate.candidateId })).target;
+        target = (await repository.promoteCandidate({ target, candidateId: candidate.candidate.candidateId, decisionOperationId: `promote_${candidate.candidate.candidateId}` })).target;
       }
       app = await launchPageRoot({ isolatedUserData: userData, activeSourcePath: target.exactSourcePath });
       await waitForProjectReady(app.page);
@@ -855,7 +857,7 @@ for (const recoveryCase of ["pending", "rename", "superseded"]) {
         const candidate = await repository.createCandidate({ target: current, requestId: "req_restart_next",
           candidateId: "candidate_restart_next_0001", html: identityPreservingCandidateHtml(current, "Restart V10"),
           expectedSourceSha256: current.sourceSha256 });
-        const next = await repository.promoteCandidate({ target: current, candidateId: candidate.candidate.candidateId });
+        const next = await repository.promoteCandidate({ target: current, candidateId: candidate.candidate.candidateId, decisionOperationId: `promote_${candidate.candidate.candidateId}` });
         expectedPath = next.target.exactSourcePath;
         expect((await repository.queryHistoryCreation({ target: next.target, operationId })).recoveryState).toBe("superseded");
       }

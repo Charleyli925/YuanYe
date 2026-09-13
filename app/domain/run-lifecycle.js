@@ -698,6 +698,10 @@ export function activeRunFromRecord(raw) {
   return {
     projectId: String(raw.projectId || ""),
     documentId: String(raw.documentId || ""),
+    // Legacy records have no origin Working Copy. The current screen, path
+    // and based-on Version cannot supply that missing Request identity.
+    sourceWorkingCopyId: typeof raw.sourceWorkingCopyId === "string"
+      && raw.sourceWorkingCopyId.length > 0 ? raw.sourceWorkingCopyId : null,
     requestId,
     attemptId: String(raw.attemptId || "attempt_001"),
     requestPath: String(raw.requestPath || ""),

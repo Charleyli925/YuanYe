@@ -196,19 +196,23 @@ test("candidate impact stays linear and bounded near the HTML size limit", () =>
   const baseHtml = `<!doctype html><html><head><title>Large</title></head><body data-pageroot-id="${bodyId}">${rows}</body></html>`;
   const outputHtml = baseHtml.replace("row-11999", "row-11999 changed");
   assert.ok(Buffer.byteLength(baseHtml, "utf8") > 8 * 1024 * 1024);
-  const startedAt = performance.now();
+  const startedCpu = process.cpuUsage();
   const assessment = assessHtmlCandidate({
     baseHtml,
     outputHtml,
     requestedTargetElementIds: [bodyId],
     requestedTargetCount: 1,
   });
-  const elapsedMs = performance.now() - startedAt;
+  const elapsedCpu = process.cpuUsage(startedCpu);
+  const elapsedCpuMs = (elapsedCpu.user + elapsedCpu.system) / 1_000;
   assert.equal(assessment.changedElementCount, 1);
   assert.equal(assessment.outsideTargetCount, 0);
   assert.equal(assessment.truncated, false);
   assert.ok(assessment.changedElementIdSample.length <= 100);
-  assert.ok(elapsedMs < 10_000, `candidate impact took ${elapsedMs.toFixed(0)}ms`);
+  assert.ok(
+    elapsedCpuMs < 10_000,
+    `candidate impact used ${elapsedCpuMs.toFixed(0)}ms of CPU`,
+  );
 });
 
 test("candidate impact scope crosses unlabelled source wrappers", () => {

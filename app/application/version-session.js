@@ -15,6 +15,18 @@ function initialSnapshot() {
   });
 }
 
+export function validateVersionSessionVersions(versions) {
+  const decoded = Array.isArray(versions) ? versions : [];
+  const ids = new Set();
+  for (const version of decoded) {
+    if (typeof version?.id !== "string" || !version.id.trim() || ids.has(version.id)) {
+      throw new TypeError("VersionSession requires unique decoded Version IDs.");
+    }
+    ids.add(version.id);
+  }
+  return decoded;
+}
+
 export class VersionSession {
   #observer = null;
 
@@ -25,16 +37,10 @@ export class VersionSession {
   }
 
   #emit(next) {
-    const ids = new Set();
-    for (const version of next.versions || []) {
-      if (typeof version?.id !== "string" || !version.id.trim() || ids.has(version.id)) {
-        throw new TypeError("VersionSession requires unique decoded Version IDs.");
-      }
-      ids.add(version.id);
-    }
+    const versions = validateVersionSessionVersions(next.versions);
     this.#snapshot = Object.freeze({
       ...next,
-      versions: Object.freeze([...(next.versions || [])]),
+      versions: Object.freeze([...versions]),
     });
     try {
       this.#observer?.(this.#snapshot);

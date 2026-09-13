@@ -1,8 +1,9 @@
 import { isBridgeRequestError } from "./bridge-client.js";
+import { RUN_SESSION_COORDINATION } from "./run-session.js";
 import { planRunSubmit, planRunSubmitEntry } from "./run/submit-plan.js";
 import { revalidateCommentTextLocators } from "./run/text-locator-validation.js";
 import { createRunWorkflowCodecs } from "./run-workflow-codecs.js";
-import { verifyProjectContext } from "./verified-project-context.js";
+import { verifyOpenTarget, verifyProjectContext } from "./verified-project-context.js";
 import { AgentCatalogState } from "./agent-provider-catalog.js";
 import { credentialErrorField } from "../../shared/agent-access-operation.mjs";
 import {
@@ -195,6 +196,85 @@ function isPollable(run) {
   );
 }
 
+function hydrationAuthorityContext(payload, sourcePath, sameSourcePath) {
+  if (!payload || typeof payload !== "object" || !sameSourcePath) return null;
+  const projectId = String(payload.projectId || "");
+  const documentId = String(payload.documentId || "");
+  const workspaceSourcePath = String(payload.sourcePath || "");
+  const target = verifyOpenTarget(payload.openTarget, {
+    projectId,
+    documentId,
+    sourcePath,
+    sourceSha256: payload.sourceSha256 || payload.currentHtmlSha256 || null,
+    sameSourcePath,
+  });
+  if (
+    !projectId
+    || !documentId
+    || !workspaceSourcePath
+    || !sameSourcePath(workspaceSourcePath, sourcePath)
+    || !target
+  ) return null;
+  return Object.freeze({
+    projectId,
+    documentId,
+    sourcePath,
+    openTarget: Object.freeze({ ...target }),
+  });
+}
+
+function hydrationRecord(record, context, sourcePath, conflict = null) {
+  if (!record || typeof record !== "object") return null;
+  return {
+    ...record,
+    sourcePath: record.sourcePath || sourcePath,
+    projectId: record.projectId || context.projectId,
+    documentId: record.documentId || context.documentId,
+    ...(conflict ? { conflict } : {}),
+  };
+}
+
+function hydrationAttempt(value) {
+  if (!value || typeof value !== "object") return null;
+  return Object.freeze({
+    requestId: String(value.requestId || ""),
+    attemptId: String(value.attemptId || ""),
+    projectId: String(value.projectId || ""),
+    documentId: String(value.documentId || ""),
+    sourceWorkingCopyId: String(value.sourceWorkingCopyId || value.workingCopyId || ""),
+    submissionToken: Number.isSafeInteger(Number(value.submissionToken))
+      ? Number(value.submissionToken)
+      : null,
+  });
+}
+
+function sameHydrationAttempt(left, right) {
+  if (!left || !right) return left === right;
+  return [
+    "requestId",
+    "attemptId",
+    "projectId",
+    "documentId",
+    "sourceWorkingCopyId",
+    "submissionToken",
+  ].every((field) => {
+    const leftValue = left[field];
+    const rightValue = right[field];
+    return (
+      (leftValue === null || leftValue === "")
+      && (rightValue === null || rightValue === "")
+    ) || leftValue === rightValue;
+  });
+}
+
+function hydrationContextMatches(value, context) {
+  if (!value || !context || !context.projectId || !context.documentId) return false;
+  return [
+    ["projectId", context.projectId],
+    ["documentId", context.documentId],
+  ].every(([field, expected]) => String(value[field] || "") === expected);
+}
+
 function agentHandoffState(run, session) {
   const state = String(session?.state || "");
   if (![
@@ -339,6 +419,8 @@ export class RunWorkflow {
   #pollLoopActive = false;
   #pollPromise = null;
   #pollGeneration = 0;
+  #hydrationSequence = 0;
+  #hydrationQueries = new Map();
   #lastNarrationAt = 0;
   #visibility = null;
   #visibilityListener = null;
@@ -968,6 +1050,7 @@ export class RunWorkflow {
       });
       pendingRun = this.#pendingRun({
         context: submissionContext,
+        submission,
         previousVersionId,
         basedOnVersionId,
         agentDelivery: frozenAgentDelivery,
@@ -1687,8 +1770,11 @@ export class RunWorkflow {
             : "cancelled-by-user"),
         });
         if (cancellation?.status === "result-ready") {
+          if (!this.#runSession.hasRun(run)) return stale(run);
           const payload = await this.#bridgeClient.status(run.sourcePath, run.requestId, run.attemptId);
+          if (!this.#runSession.hasRun(run)) return stale(run);
           if (!context || !this.#isCurrentContext(context)) return stale(run);
+          if (!this.#runSession.hasRun(run)) return stale(run);
           this.#processStatus(run, payload);
           return succeeded({ run, resultReady: true });
         }
@@ -1844,33 +1930,128 @@ export class RunWorkflow {
   }
 
   async hydrateRecentRuns({ projects = [], activeSourcePath = null } = {}) {
-    const sourcePaths = [...new Set(
-      projects
-        .map((project) => project?.sourcePath)
-        .filter((sourcePath) => sourcePath && !this.#codecs.sameSourcePath(
+    const effectiveActiveSourcePath = activeSourcePath
+      || this.#runSession.snapshot.activeSourcePath;
+    const runCoordination = this.#runSession[RUN_SESSION_COORDINATION] || null;
+    const hydrationTargets = [];
+    for (const project of Array.isArray(projects) ? projects : []) {
+      const sourcePath = project?.sourcePath;
+      if (
+        !sourcePath
+        || this.#codecs.sameSourcePath(sourcePath, effectiveActiveSourcePath)
+        || hydrationTargets.some((target) => this.#codecs.sameSourcePath(
+          target.sourcePath,
           sourcePath,
-          activeSourcePath,
-        )),
-    )];
-    const recovered = await Promise.allSettled(sourcePaths.map(async (sourcePath) => {
-      const payload = await this.#bridgeClient.workspace(sourcePath);
-      const runtime = this.#codecs.isRecord(payload.runtimeState) ? payload.runtimeState : {};
-      const conflict = this.#codecs.isRecord(runtime.conflict) ? runtime.conflict : null;
-      const record = this.#codecs.isRecord(runtime.activeRun)
-        ? runtime.activeRun
-        : this.#codecs.isRecord(payload.activeRun)
-          ? payload.activeRun
+        ))
+      ) continue;
+      const locatorKey = typeof runCoordination?.locatorKey === "function"
+        ? runCoordination.locatorKey(sourcePath)
+        : sourcePath;
+      const querySequence = ++this.#hydrationSequence;
+      this.#hydrationQueries.set(locatorKey, querySequence);
+      hydrationTargets.push(Object.freeze({
+        sourcePath,
+        locatorKey,
+        projectEpoch: Number.isSafeInteger(Number(this.#projectSession.epoch))
+          ? Number(this.#projectSession.epoch)
+          : null,
+        querySequence,
+        revision: typeof runCoordination?.locatorRevision === "function"
+          ? runCoordination.locatorRevision(sourcePath)
+          : null,
+        expected: Object.freeze({
+          run: hydrationAttempt(this.#runSession.runForSource(sourcePath)),
+          handoff: hydrationAttempt(this.#runSession.handoffForSource(sourcePath)),
+          outcome: hydrationAttempt(this.#runSession.outcomeForSource(sourcePath)),
+          result: this.#runSession.resultForSource(sourcePath),
+        }),
+      }));
+    }
+    const sourcePaths = hydrationTargets.map((target) => target.sourcePath);
+    const isCurrentTarget = (target) => {
+      const { sourcePath, expected } = target;
+      if (
+        target.revision === null
+        || typeof runCoordination?.locatorRevision !== "function"
+        || this.#hydrationQueries.get(target.locatorKey) !== target.querySequence
+        || runCoordination.locatorRevision(sourcePath) !== target.revision
+        || (
+          target.projectEpoch !== null
+          && this.#projectSession.epoch !== target.projectEpoch
+        )
+      ) return false;
+      const snapshot = this.#runSession.snapshot;
+      if (
+        this.#codecs.sameSourcePath(snapshot.activeSourcePath, sourcePath)
+        || this.#codecs.sameSourcePath(this.#projectSession.context?.sourcePath, sourcePath)
+      ) return false;
+      return sameHydrationAttempt(
+        hydrationAttempt(this.#runSession.runForSource(sourcePath)),
+        expected.run,
+      )
+        && sameHydrationAttempt(
+          hydrationAttempt(this.#runSession.handoffForSource(sourcePath)),
+          expected.handoff,
+        )
+        && sameHydrationAttempt(
+          hydrationAttempt(this.#runSession.outcomeForSource(sourcePath)),
+          expected.outcome,
+        )
+        && this.#runSession.resultForSource(sourcePath) === expected.result;
+    };
+    const recovered = await Promise.allSettled(hydrationTargets.map(async (target) => {
+      const { sourcePath } = target;
+      try {
+        const payload = await this.#bridgeClient.workspace(sourcePath);
+        if (!isCurrentTarget(target)) return null;
+        const runtime = this.#codecs.isRecord(payload.runtimeState)
+          ? payload.runtimeState
+          : {};
+        const conflict = this.#codecs.isRecord(runtime.conflict)
+          ? runtime.conflict
           : null;
-      const run = this.#codecs.activeRunFromRecord(
-        record ? { ...record, ...(conflict ? { conflict } : {}) } : null,
-      );
-      const outcome = this.#codecs.activeRunFromRecord(payload.recentRunOutcome);
-      if (outcome) this.#runSession.rememberOutcome(outcome);
-      if (run && isPollable(run)) {
-        this.#runSession.trackRun(run, { activate: "never", recovered: true });
-        return run;
+        const rawRun = this.#codecs.isRecord(runtime.activeRun)
+          ? runtime.activeRun
+          : this.#codecs.isRecord(payload.activeRun)
+            ? payload.activeRun
+            : null;
+        const rawOutcome = this.#codecs.isRecord(payload.recentRunOutcome)
+          ? payload.recentRunOutcome
+          : null;
+        const authority = hydrationAuthorityContext(
+          payload,
+          sourcePath,
+          this.#codecs.sameSourcePath,
+        );
+        if (!authority) return null;
+        const run = this.#codecs.activeRunFromRecord(
+          hydrationRecord(rawRun, authority, sourcePath, conflict),
+        );
+        const outcome = this.#codecs.activeRunFromRecord(
+          hydrationRecord(rawOutcome, authority, sourcePath),
+        );
+        if (
+          (run && (
+            !this.#codecs.sameSourcePath(run.sourcePath, sourcePath)
+            || !hydrationContextMatches(run, authority)
+          ))
+          || (outcome && (
+            !this.#codecs.sameSourcePath(outcome.sourcePath, sourcePath)
+            || !hydrationContextMatches(outcome, authority)
+          ))
+          || !isCurrentTarget(target)
+        ) return null;
+        if (outcome && !this.#runSession.rememberOutcome(outcome)) return null;
+        if (run && isPollable(run)) {
+          this.#runSession.trackRun(run, { activate: "never", recovered: true });
+          return run;
+        }
+        return null;
+      } finally {
+        if (this.#hydrationQueries.get(target.locatorKey) === target.querySequence) {
+          this.#hydrationQueries.delete(target.locatorKey);
+        }
       }
-      return null;
     }));
     this.syncPolling();
     return succeeded({
@@ -2100,10 +2281,13 @@ export class RunWorkflow {
     )).join("；").slice(0, 5_000);
   }
 
-  #pendingRun({ context, previousVersionId, basedOnVersionId, agentDelivery }) {
+  #pendingRun({ context, submission, previousVersionId, basedOnVersionId, agentDelivery }) {
     return {
       projectId: context.projectId,
       documentId: context.documentId,
+      sourceWorkingCopyId: context.targetKind === "working-copy"
+        ? context.workingCopyId : null,
+      submissionToken: submission.token,
       requestId: "pending",
       attemptId: "attempt_001",
       requestPath: "",
@@ -2143,7 +2327,9 @@ export class RunWorkflow {
       && context
       && this.#codecs.sameSourcePath(run.sourcePath, context.sourcePath)
       && run.projectId === context.projectId
-      && run.documentId === context.documentId,
+      && run.documentId === context.documentId
+      && (!run.sourceWorkingCopyId || context.targetKind !== "working-copy"
+        || run.sourceWorkingCopyId === context.workingCopyId),
     );
   }
 

@@ -1173,6 +1173,7 @@ export default function Workbench() {
               return rollback(requestId);
             },
             activateGeneratedVersion: async (input: {
+              operationId?: string;
               previousSourcePath: string;
               nextSourcePath: string;
               expectedSha256: string;
@@ -5053,7 +5054,7 @@ export default function Workbench() {
     } catch (cause) {
       return {
         status: "rejected",
-        reason: cause instanceof Error ? cause.message : "无法打开获取 API Key 页面。",
+        reason: productErrorMessage(cause, "无法打开获取 API Key 页面。"),
       };
     }
   }, []);

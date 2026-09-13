@@ -35,3 +35,40 @@ export function verifyProjectContext(candidate, live, {
   if (!sameSourcePath(live.sourcePath, context.sourcePath)) return null;
   return context;
 }
+
+const OPEN_TARGET_SHA256 = /^sha256:[a-f0-9]{64}$/u;
+
+/**
+ * Validate a complete managed OpenTarget without borrowing identity fields
+ * from a surrounding workspace/request payload. Callers may provide a
+ * verified source hash; when present it is an exact fence, never a fallback.
+ */
+export function verifyOpenTarget(target, {
+  projectId = null,
+  documentId = null,
+  sourcePath = null,
+  sourceSha256 = null,
+  sameSourcePath = (left, right) => left === right,
+  targetKind = null,
+} = {}) {
+  if (
+    !target
+    || typeof target !== "object"
+    || Array.isArray(target)
+    || !String(target.projectId || "")
+    || !String(target.documentId || "")
+    || !String(target.projectRootPath || "")
+    || !["working-copy", "version"].includes(String(target.targetKind || ""))
+    || (targetKind && String(target.targetKind) !== String(targetKind))
+    || !String(target.exactSourcePath || "")
+    || !OPEN_TARGET_SHA256.test(String(target.sourceSha256 || ""))
+    || (projectId && String(target.projectId) !== String(projectId))
+    || (documentId && String(target.documentId) !== String(documentId))
+    || (sourcePath && !sameSourcePath(String(target.exactSourcePath), String(sourcePath)))
+    || (sourceSha256 && String(target.sourceSha256) !== String(sourceSha256))
+    || (String(target.targetKind) === "working-copy"
+      && (!String(target.workingCopyId || "") || !String(target.versionId || "")))
+    || (String(target.targetKind) === "version" && !String(target.versionId || ""))
+  ) return null;
+  return Object.freeze({ ...target });
+}

@@ -47,15 +47,15 @@ headroom through the same policy; unknown capability is not a verified fit.
 | Registered mutation context resolution and atomic-replacement source observation | `ProjectFileRepository` (`bridge/project-file-repository.mjs` façade; internals under `bridge/project-file-repository/` do not become a second owner) | v4 `.pageroot-registry.json` plus the owning Project File working copy and `.pageroot` metadata | Bridge mutation routes and `/project/ensure` |
 | Canonical external-source path → unique `projectId` lookup, first-import Hash relation, and read-only A/B/C open classification | `ProjectFileRepository` | Registry `importSourceKey` / `importSourceSha256` pair plus the bound project's current active Working Copy | `/project/open-classification`, `/project/ensure` and Desktop Prepared Intent |
 | Registry project-catalog membership, availability and validated registered-project OpenTarget resolution | `ProjectFileRepository` Registry reader | Registry `projectId → registeredProjectRootPath` records plus validated per-project metadata; Desktop Recent may rank but never add/remove/authorize a member | read-only catalog route, `ProjectWorkflow` projectId open command and Workbench project list |
-| Runtime Bridge/Session/workflow composition, aggregate-observer lifecycle, registration operation identity, single-flight, stale-result fence and cross-Session publication sequence | `createRuntimeWorkspaceController()` and `WorkspaceController` | none; the factory creates the one fact-owner set and the Controller publishes only frozen aggregate projections through existing Project, Document, Comment, Draft, Version and SourceHistory owners | Workbench shell projection subscription, local capability readers, live operation-time aggregate reads, Controller commands and presentation-event adapter |
+| Runtime Bridge/Session/workflow composition, aggregate-observer lifecycle, registration operation identity, single-flight, Document receipt/pending-write/flush fence and cross-Session publication sequence | `createRuntimeWorkspaceController()` and `WorkspaceController` | none; the factory creates the one fact-owner set and the Controller publishes only frozen aggregate projections through existing Project, Document, Comment, Draft, Version and SourceHistory owners. Managed registration publishes Project/Run/Document locator authority in one aggregate batch; a post-host failure stays on the same durable operation, and first-autosave recovery rekeys the latest write/history before the next drain resumes registration | Workbench shell projection subscription, local capability readers, live operation-time aggregate reads, Controller commands and presentation-event adapter |
 | Desktop workbench navigation admission, receipt and tab order/active/pending/mounted/runtime-owner identity | Renderer `WorkbenchNavigationSession` owns the transaction phase/receipt and `WorkbenchTabsSession` owns the tab projection; the Controller-owned `WorkbenchNavigationWorkflow` is the only coordinator | validated `workbench-tabs.json` stores only `tabId + projectId + documentId` and the active document tab; it is restart-convenience metadata written best-effort, with no close veto and no path, title, HTML, Hash, Request, Candidate, Version or Conversation authority | Startup/restore, local/recent, registered/sidebar/tab, OS-external and confirmation all enter one ordered admission stream; ProjectWorkflow applies the tab mutation synchronously through the correlated application receipt before its presentation event |
 | Workbench cross-capability rendering | Existing `WorkspaceController.shell` reader projection; no new store or Session | none; one current immutable presentation object, containing source/identity/lifecycle/error and structural fields only. Local Conversation, comment draft, rules text and Agent narration/clock/byte fields are absent, rather than stale copies hidden by a comparator | Workbench `useSyncExternalStore`; conversation and rules editors subscribe their owner facets and retain existing load/drain/IME boundaries |
 | Read-only tab display projections, hot/warm LRU order and per-tab Canvas mode/PageViewContext/scroll restoration | Controller-owned `DocumentSurfaceCacheSession` owns source projections; Workbench owns at most five mounted inert static iframe presentations and exactly one active `HtmlCanvasEditor`; `WorkbenchNavigationWorkflow` only touches/removes projection entries | none; bounded process memory only, maximum five static display iframes, one active Edit Canvas and its bounded editor-internal A/B handoff slot, 20 HTML entries and 32 MiB of source projections; inactive tabs retain no editor or Runtime DOM | pending tab presentation may show a script-disabled cached frame while canonical registered-project open validates the sole editable authority; the cache never covers the same document's live editor during text input or Runtime refresh; Runtime DOM never enters this cache contract |
-| Project hydration generation and load outcome, switch/open operation, accepted-result execution, close request identity, project-switch publication, Prepared Intent automatic import/continue and explicit delete-original confirmation, and the unified managed-source prepare/commit handoff for Candidate promotion, historical Working Copy continuation and Registry opens | Renderer `ProjectWorkflow`, composed by `WorkspaceController` | none; it publishes through existing Session owners and trusted ProjectOpen/Canvas ports | Workbench commands and presentation-event adapter |
+| Project hydration generation and load outcome, switch/open operation, accepted-result execution, close request identity, project-switch publication, Prepared Intent automatic import/continue and explicit delete-original confirmation, and the unified managed-source prepare/commit handoff for Candidate promotion, validated opening of a manually created historical Version and Registry opens | Renderer `ProjectWorkflow`, composed by `WorkspaceController` | none; it publishes through existing Session owners and trusted ProjectOpen/Canvas ports | Workbench commands and presentation-event adapter |
 | Durable source filename transaction, pending operation and active/recent path rebase | Desktop source-rename transaction | active-file `pendingRename` / `lastRename`, then filesystem path | trusted desktop rename port and Bridge relink |
 | Current active managed Working Copy restart cache | Main `activeManagedLocator` in the private active-file record | none; non-authoritative, fail-closed cache of the last verified identity tuple and path. Registry plus project metadata remain the only write authority. Missing cache never guesses by name or Hash | startup `getActiveProject`, Finder locator reconcile and trusted `reconcileActiveManagedSource` IPC |
-| Renderer source-rename and Finder locator rebase, expected Hash/context fence, lost-response reconciliation and synchronous Project/Document/Run publication | `ProjectWorkflow`, composed by `WorkspaceController` | none; it publishes through the existing Session owners after desktop/Bridge validate the same identity tuple. Present-file directory hints only hash-observe; missing-path hints, startup and title-bar rename drain switch and rebind | Workbench filename intent, directory-change hints and presentation-event adapter |
-| Current source bytes, disk-confirmed Hash, working-HTML Hash, edit revision, persistence projection, pending write, single-flight source flush, Canvas-rendered Hash, monotonic context-bound source receipts with session incarnation, exact-byte boundary reconciliation and protection evidence | Renderer `DocumentSession` owns current bytes/state and receipt sequence/incarnation; `DocumentWorkflow` owns receipt confirmation, revision/context-bound verified recovery/export receipts and operation-local leave-boundary decisions | source HTML and runtime autosave record; Main owns the atomic per-document recovery journal; journal path is a CAS-rebased location, and the Canvas generation itself is disposable | Canvas returns immutable observations for presentation/cache reuse only. `DocumentWorkflow` alone confirms them. Save/export/AI/leave consume complete Working HTML and exact persistence or recovery evidence; a stale rendered projection remains a distinct honest fact |
+| Renderer source-rename and Finder locator rebase, expected Hash/context fence, lost-response reconciliation and synchronous Project/Document/Run publication | `ProjectWorkflow`, composed by `WorkspaceController` | none; after desktop/Bridge validates the same identity tuple, every accepted locator authority transition publishes a fresh context-bound Document authority receipt, advances Canvas generation, invalidates old ACKs and exposes the Project/Run/Document tuple in one aggregate batch. Present-file directory hints only hash-observe; missing-path hints, startup and title-bar rename drain switch and rebind | Workbench filename intent, directory-change hints and presentation-event adapter |
+| Current source bytes, disk-confirmed Hash, working-HTML Hash, edit revision, persistence projection, pending write, single-flight source flush, Canvas-rendered Hash, monotonic context-bound source receipts with session incarnation, exact-byte boundary reconciliation and protection evidence | Renderer `DocumentSession` owns current bytes/state and receipt sequence/incarnation; `DocumentWorkflow` owns receipt confirmation, revision/context-bound verified recovery/export receipts and operation-local leave-boundary decisions | source HTML and runtime autosave record; Main owns the atomic per-document recovery journal; journal path is a CAS-rebased location, and the Canvas generation itself is disposable | Canvas returns immutable observations for presentation/cache reuse only. `DocumentWorkflow` alone confirms them. Every authority receipt, including a same-byte registration or locator transition, advances Canvas generation and requires a fresh physical frame. Save/export/AI/leave consume complete Working HTML and exact persistence or recovery evidence; a stale rendered projection remains a distinct honest fact |
 | Force-unlock of a Working Copy conflict (adopt disk Hash as `saved`, no HTML write; clear `runtime.activeRequest` if present; keep `lastPersistedRevision`) | `ProjectFileRepository.forceUnlockWorkingCopy` via `POST /conflict/resolve` `force-unlock` | Working Copy state record and runtime request pointer | `DocumentWorkflow.forceUnlockConflict` / `reloadAuthority({ acceptExternalConflict: true })` and the conflict banner |
 | Allowlisted GlobalInterruption | Renderer Workbench via `globalInterruptionPresentation()` | none; closed kind union only | existing `NoticeBar` with `className="toast"` |
 | WorkspaceSafetyState | Renderer Workbench derived from `workspaceIssue` / persist / pending-exit | none; at most one kind | existing workspace-unavailable / persist banners and chrome status |
@@ -83,7 +83,7 @@ headroom through the same policy; unknown capability is not a verified fit.
 | `AI任务/` derived prompt/Candidate publication, collision allocation and recovery stage | `ProjectFileRepository` plus narrow `ai-task-projection` materializer | immutable Request/Attempt/Candidate records remain authoritative; `.pageroot/recovery/ai-task-projections/` receipt is only a rebuildable display-progress record; runtime `lastAiTask` is a sealed no-change/error Finder anchor, never an active run or Candidate authority | `/ai-task`, trusted Desktop Finder port and handoff presentation |
 | AI Candidate complete-HTML source identity, normalization and report | `ProjectFileRepository` through the pure `candidate-identity` validator | frozen base binding Hash, submitted-output Hash, normalized Candidate Hash and sealed identity report; current Working Copy remains unchanged until Promotion | Candidate Review, Promotion and historical Candidate readers; Runtime DOM is never an input |
 | Immutable Version list, verified read-only history preview and based-on/exact/restored/current-history projection facts | Renderer `VersionSession` | immutable Version records and current runtime pointers | `VersionWorkflow`, Workbench history and Canvas projection |
-| Version activation, review-candidate preparation, current/history navigation and historical Working Copy continuation operation identity, Bridge I/O, full OpenTarget/Hash/time validation, receipt-forward recovery and synchronous cross-Session publication | Renderer `VersionWorkflow`, composed by `WorkspaceController` | Repository owns the durable history activation receipt; the workflow publishes only through Project, Document, Version, Draft and Comment owners | Workbench review/history commands, presentation-event adapter and Bridge version lifecycle |
+| Version activation, review-candidate preparation, current/history navigation and manual history creation/open operation identity, Bridge I/O, full OpenTarget/Hash/time validation, receipt-forward recovery and synchronous cross-Session publication | Renderer `VersionWorkflow`, composed by `WorkspaceController` | Repository owns the durable manual creation receipt and disk-only legacy activation receipts; the workflow publishes only through Project, Document, Version, Draft and Comment owners | Workbench review/history commands, presentation-event adapter and Bridge version lifecycle |
 | `PROJECT.md` content, editor generation, composition fence and save projection | Renderer `ProjectRulesSession` | managed `PROJECT.md` | `ProjectRulesWorkflow` and Request freeze |
 | `PROJECT.md` Bridge reads/writes, 700ms autosave timer, unknown-write authority reconciliation and close/switch drain | Renderer `ProjectRulesWorkflow`, composed by `WorkspaceController` | none; it publishes only through `ProjectRulesSession` and the managed `PROJECT.md` remains authoritative | `ProjectWorkflow` drain and Request freeze |
 | Close/switch/submit/history readiness and desktop close lifecycle | The unique `DrainCoordinator` owned by `WorkspaceController`; `ProjectWorkflow` owns the request-scoped close operation | composed owner snapshots, request identity and bounded presentation class; no copied dirty booleans | Electron close handshake, browser fallback and navigation |
@@ -98,7 +98,7 @@ headroom through the same policy; unknown capability is not a verified fit.
 | Renderer edit, project-picker, attachment-persistence, close-coordination and interactive-preview capabilities | Runtime capability resolver | immutable preload manifest; fail-closed browser default | Workbench presentation host adapters |
 | Volatile interactive-preview document, bootstrap, allowed source-relative asset root, completed-frame identity set and one-way pre-load scriptless navigation-fallback flag | Main-process preview protocol controller plus the owning window's navigation fence | none; bounded in-memory session/window state only; the fallback cannot be reversed inside a session | isolated preview iframe and the script-disabled edit iframe's resource base |
 | Current preview/edit display context, safe reveal transition and per-surface render acknowledgement | Workbench page-view context state | none; source-bound in-memory projection tagged by `DocumentSession` Canvas generation and rendered source Hash | `HtmlCanvasEditor`, `HtmlInteractionPreview` and toolbar |
-| Disposable Edit author-runtime program identity, scoped exact prepare grant, public phase/load outcome and latest persisted retry identity | `EditAuthorRuntimeSession`, composed by `WorkspaceController`; `DocumentSession` remains the sole source owner and Main owns exact-source admission plus immutable exact resource sessions | none; bounded process memory only. Attempt admission remains keyed by `(sourcePath, canvasGeneration)` so source checkpoints never auto-prepare. A same-directory Finder rename that keeps HTML, SHA and canvas generation relocates that live key instead of consuming another prepare. Within that key the Session separately tracks the latest persisted `{HTML, source SHA}` only for explicit retry; failure-time HTML cannot be reused after Working advances. It does not own or cache physical last-known-good availability | Workbench loading acknowledgement, Controller-provided current Document identity and the frame coordinator's identity-bound settlement result. Explicit retry first joins the existing Document save flight; after awaiting it, Controller rechecks source path and canvas generation and passes only the latest authoritative identity to Session. The notice displays pending/failure feedback; no new persistence queue is introduced. Runtime DOM never enters persistence |
+| Disposable Edit author-runtime program identity, scoped exact prepare grant, public phase/load outcome and latest persisted retry identity | `EditAuthorRuntimeSession`, composed by `WorkspaceController`; `DocumentSession` remains the sole source owner and Main owns exact-source admission plus immutable exact resource sessions | none; bounded process memory only. Attempt admission remains keyed by `(sourcePath, canvasGeneration)` so source checkpoints never auto-prepare. The Session can relocate an explicitly equivalent same-generation key, but accepted Finder/source authority changes never use that capability: their new receipt advances generation and rebuilds the physical Canvas. Within one unchanged key the Session separately tracks the latest persisted `{HTML, source SHA}` only for explicit retry; failure-time HTML cannot be reused after Working advances. It does not own or cache physical last-known-good availability | Workbench loading acknowledgement, Controller-provided current Document identity and the frame coordinator's identity-bound settlement result. Explicit retry first joins the existing Document save flight; after awaiting it, Controller rechecks source path and canvas generation and passes only the latest authoritative identity to Session. The notice displays pending/failure feedback; no new persistence queue is introduced. Runtime DOM never enters persistence |
 | Two fixed Edit Runtime slots, slot leases, active/latest-candidate phase, last-known-good identity, ignored stale callbacks and Native Edit/IME promotion gate | Pure `RuntimeFrameCoordinator`; `HtmlCanvasEditor` owns only the corresponding two iframe DOM effects, minimal presentation anchor and Selection effects | none; bounded renderer memory only. Stable state is exactly one loaded active slot plus one inert empty slot. `superseded` is coordination, never authored-program failure; a former active slot is cleared on the next frame after promotion | candidate load/activation/deadline/rAF/microtask/position callbacks and `EditAuthorRuntimeSession`; only the latest identity and current slot lease can publish a terminal result |
 | Current Edit Runtime degradation presentation (`none`, `runtime-partial`, `static-preparing`, `static-visible`, `last-known-good-readonly`) | `HtmlCanvasEditor`; Workbench only derives `direct-static-visible` when `EditAuthorRuntimeSession` reports a direct static fallback before any Editor failure transition | none; disposable renderer presentation. `runtime-partial` requires a usable critical surface despite a noncritical author error; Session records that truthful outcome and owns its explicit fresh-Session retry. `static-visible` is the verified latest Working HTML, remains editable and quiet, with optional dynamic retry in the More menu. Runtime-generated surface loss cannot turn it read-only. `last-known-good-readonly` is reserved for failure to verify the static document itself and its recovery joins Document save before invoking the ordinary source reload | Workbench notice and read-only projection; it cannot change Working HTML, Runtime outcome or slot identity |
 | Exact-version external ECharts script bytes, URL metadata and LRU | Main `desktop/edit-runtime-library-store.mjs` | `Application Support/PageRoot/edit-runtime-library-cache/v1`; content-addressed blobs plus atomically replaced bounded index; reviewed 5.4.3/5.6.0 URLs use their same-version packaged Hash pin, while other immutable versions use only exact cache/network bytes; bytes are verified on every read and are never source or runtime-session authority | `desktop/edit-runtime-protocol.mjs` resource preparation only; no cross-version substitution or recovery session exists |
@@ -155,7 +155,7 @@ Rules:
   refreshes run only after the authoritative transition has settled
   (hydration, Working Copy confirmation or synchronous cross-Session
   publication), are fenced by the current Project context, and never
-  participate in or block a rename, history continuation, Candidate adoption
+  participate in or block a rename, created-history opening, Candidate adoption
   or hydration. A catalog failure can only surface a projection event; it
   cannot downgrade a completed transition to unknown.
 - `AI任务/` is a display projection, not a second Candidate store. The
@@ -282,6 +282,51 @@ Rules:
   read-only fence while reconciliation determines whether a durable run exists.
   Workbench must derive its active lock and submission presentation from that
   snapshot rather than maintain a second boolean or ref.
+- Run projections carry the immutable Request's `sourceWorkingCopyId` alongside
+  project, document, Request and Attempt identity. Bridge projects the Repository
+  fact; `activeRunFromRecord` represents a missing legacy field as `null`, never
+  deriving it from a path, based-on Version or the currently displayed OpenTarget.
+  Pending runs carry the existing submission token in memory; the shared
+  `pending`/`attempt_001` placeholders cannot identify one submission. Removing a
+  run checks its registered scope and known origin; removing a pending run also
+  checks its token (old tokenless projections remain scoped to their locator).
+- Run locator rebinding selects only the exact previous source, optionally checked
+  against project/document identity. Rename, first managed registration and a
+  confirmed Promotion/source transition reuse this boundary without selecting
+  every Working Copy in a project. A Promotion can change the displayed Working
+  Copy and path, but never rewrites the original Request's `sourceWorkingCopyId`.
+  Existing project epoch, submission reconciliation, lifecycle locks and durable
+  authority checks still apply. Run, background result, handoff,
+  copied/recovered and outcome facts share one locator-keyed in-memory entry;
+  active presentation retains only locator keys and projects from that entry.
+  A new Request/Attempt at the same locator atomically replaces the old attempt
+  facts, so late poll/cancel/completion publication cannot overwrite it. This
+  consolidation preserves the public Session contract and introduces neither a
+  second store nor a disk format.
+- Every canonical locator also retains a monotonic in-memory revision/tombstone
+  after absence, activation, removal, result/outcome publication, handoff
+  change, or source rebase. Recent-run hydration captures that revision together
+  with its per-query sequence and the current Project epoch; an awaited Bridge
+  response must match all three before it can publish. A path-only recent row is
+  only a lookup hint: authoritative workspace project/document/OpenTarget
+  identity must fill the hydration context, and a missing identity fails closed.
+- Cross-owner source moves use read-only ProjectSession/RunSession reservations
+  followed by synchronous CAS commits. Both commits publish only after they
+  succeed; a failed transition rolls the Run reservation back before any
+  Document/Comment/Rules reset. If a managed desktop activation has already
+  committed but local CAS cannot prove the same identity, the outcome is
+  `unknown`/recovery-required rather than a plain rejection that could hide a
+  host/local split.
+- Desktop activation owns one durable operation-specific `activeEffect` beside
+  `activePath` and the Recent catalog. The effect stores the full activation
+  tuple and is persisted atomically with the destination path; Recent
+  membership alone never proves a completed operation. A pending operation
+  stores the predecessor `activeEffect` (including the monotonic
+  `activeEffectGeneration`) and may continue only while both the exact
+  predecessor path and that pair remain active. This generation/effect fence
+  rejects ABA navigation that returns to the same path; replay can complete
+  only when the destination path and the same effect tuple match the receipt.
+  Any other post-crash or post-navigation mismatch remains unknown.
 - `RunWorkflow` owns the I/O sequence around that Session fact: it soft-checkpoints
   native input, performs one `leave-canvas` freeze, drains the authoritative source, submits only one Request,
   reconciles an unknown POST with read-only workspace authority, and fences
@@ -302,9 +347,18 @@ Rules:
   validated context. This type-only change does not normalize legacy inputs.
   Raw registration input remains separately typed and runtime-validated. Static
   string types do not replace nonempty-ID, path, Hash or epoch validation.
-- The first durable action atomically registers the project identity and binds
-  the Draft session to the returned authoritative draft before local aggregate
-  state can be acknowledged.
+- The first durable action registers the project identity, then a
+  Controller-owned publication continuation binds Document, Version, Comment,
+  Draft, recovery identity and source history under the same operation before
+  local aggregate state can be acknowledged. A failure after Project/Run commit
+  stays `unknown`; retry resumes the first incomplete stage before either the
+  existing-context or Draft-only fast path and never repeats Bridge registration
+  or managed Desktop activation. A same-document OpenTarget Hash refresh is not
+  navigation: it is accepted only when current Document persistence proves the
+  new Hash. Late comments are rebound from their live working copy, and a first
+  autosave rekeys its pending write and SourceHistory evidence before retrying
+  registration. A different epoch, path, project, document or managed member
+  retires the continuation rather than replaying it.
 - A registered mutation captures one complete `projectId + documentId +
   sourcePath` context. The Bridge resolves both IDs before validating the path;
   only `/project/ensure` may create a new registration. A `pendingWrite` target
@@ -351,15 +405,20 @@ Rules:
   project identity, full OpenTarget identity, source path, Version authority,
   HTML bytes and verified Hash. Only after every field is valid may the
   coordinator synchronously publish Project, Document, Version, Draft and
-  Comment state and advance the Canvas authority generation. A Hash-only or
-  path-only publication is invalid.
-- Historical continue-edit owns no mutable Version snapshot. `VersionWorkflow`
-  may call the narrow Bridge activation route only from the exact read-only
-  history view; Repository atomically owns the `desktop-pending`/`desktop-confirmed`
-  receipt, and `ProjectWorkflow` passes its operation ID to the same managed-source
-  primitive as Candidate promotion. A lost Bridge, Desktop or confirmation response
-  may be retried only against that complete receipt identity; it must not borrow
-  another project's OpenTarget or roll durable V2 back to V6.
+  Comment state and advance the Canvas authority generation. Registration keeps
+  a monotonic publication cursor so a retry cannot advance Document or Draft
+  generation twice, replace comments twice, reset source history, or emit a
+  duplicate event. Recovery-store and Canvas adapter failures are rebuildable
+  projection failures and cannot invalidate a completed authority tuple. A
+  Hash-only or path-only publication is invalid.
+- Manual history creation/open owns no mutable shadow Version snapshot.
+  `VersionWorkflow` re-queries the exact durable creation receipt from the
+  read-only history view and passes that operation ID to the same managed-source
+  primitive as Candidate promotion. A lost Bridge, Desktop or confirmation
+  response may be retried only against that complete receipt identity; it must
+  not borrow another project's OpenTarget or roll a newer Working Copy back.
+  The legacy continuation route is disk-only receipt replay and cannot create a
+  new activation.
 - Edit and preview acknowledge rendering with the exact Document Canvas
   generation and source Hash. A late acknowledgement from an older generation
   is discarded and cannot make persistence appear safe.

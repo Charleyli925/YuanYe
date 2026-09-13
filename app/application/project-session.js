@@ -38,7 +38,22 @@ function samePath(left, right) {
   );
 }
 
+function sameOpenTarget(left, right) {
+  if (!left || !right) return !left && !right;
+  return left.projectId === right.projectId
+    && left.documentId === right.documentId
+    && left.projectRootPath === right.projectRootPath
+    && left.targetKind === right.targetKind
+    && left.workingCopyId === right.workingCopyId
+    && left.versionId === right.versionId
+    && samePath(left.exactSourcePath, right.exactSourcePath)
+    && left.sourceSha256 === right.sourceSha256
+    && left.sessionEpoch === right.sessionEpoch;
+}
+
 const TARGET_KINDS = new Set(["working-copy", "version"]);
+
+export const PROJECT_SESSION_COORDINATION = Symbol("ProjectSession coordination");
 
 function normalizedOpenTarget(value, {
   epoch,
@@ -112,6 +127,20 @@ export class ProjectSession {
   #observer = null;
 
   #queries = new ProjectQueryFence();
+
+  constructor() {
+    Object.defineProperty(this, PROJECT_SESSION_COORDINATION, {
+      enumerable: false,
+      configurable: false,
+      writable: false,
+      value: Object.freeze({
+        prepareTransitionSource: (value) => this.#prepareTransitionSource(value),
+        transitionReservationCurrent: (value) => this.#transitionReservationCurrent(value),
+        commitTransitionSource: (value, options) => this.#commitTransitionSource(value, options),
+        publish: () => this.#publish(),
+      }),
+    });
+  }
 
   setObserver(observer) {
     this.#observer = typeof observer === "function" ? observer : null;
@@ -199,12 +228,13 @@ export class ProjectSession {
     return this.context;
   }
 
-  transitionSource({
+  #transitionSource({
     previousSourcePath,
     sourcePath,
     projectId = this.#projectId,
     documentId = this.#documentId,
     openTarget = null,
+    publish = true,
   }) {
     const nextSourcePath = normalizedPath(sourcePath);
     if (planSourceLocatorTransition({
@@ -224,8 +254,71 @@ export class ProjectSession {
       documentId: this.#documentId,
       sourcePath: this.#sourcePath,
     });
-    this.#emit();
+    if (publish) this.#emit();
     return this.#projectId && this.#documentId ? this.context : this.locator;
+  }
+
+  transitionSource(input) {
+    return this.#transitionSource(input);
+  }
+
+  #prepareTransitionSource({
+    previousSourcePath,
+    sourcePath,
+    projectId = this.#projectId,
+    documentId = this.#documentId,
+    openTarget = null,
+  } = {}) {
+    const nextSourcePath = normalizedPath(sourcePath);
+    if (
+      !nextSourcePath
+      || planSourceLocatorTransition({
+        nextSourcePath,
+        previousSourcePath,
+        liveSourcePath: this.#sourcePath,
+        samePath,
+      }).kind === "reject"
+    ) return null;
+    return Object.freeze({
+      epoch: this.#epoch,
+      sourcePath: this.#sourcePath,
+      projectId: this.#projectId,
+      documentId: this.#documentId,
+      previousSourcePath: normalizedPath(previousSourcePath),
+      nextSourcePath,
+      nextProjectId: String(projectId || ""),
+      nextDocumentId: String(documentId || ""),
+      openTarget,
+      openTargetSnapshot: this.#openTarget,
+    });
+  }
+
+  #transitionReservationCurrent(reservation) {
+    return Boolean(
+      reservation
+      && this.#epoch === reservation.epoch
+      && samePath(this.#sourcePath, reservation.sourcePath)
+      && this.#projectId === reservation.projectId
+      && this.#documentId === reservation.documentId
+      && sameOpenTarget(this.#openTarget, reservation.openTargetSnapshot)
+    );
+  }
+
+  #commitTransitionSource(reservation, { publish = true } = {}) {
+    if (!this.#transitionReservationCurrent(reservation)) return null;
+    return this.#transitionSource({
+      previousSourcePath: reservation.previousSourcePath,
+      sourcePath: reservation.nextSourcePath,
+      projectId: reservation.nextProjectId,
+      documentId: reservation.nextDocumentId,
+      openTarget: reservation.openTarget,
+      publish,
+    });
+  }
+
+  #publish() {
+    this.#emit();
+    return this.snapshot;
   }
 
   adoptOpenTarget({ previousSourcePath, target } = {}) {

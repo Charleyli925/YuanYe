@@ -1130,7 +1130,8 @@ for (const recovery of ["none", "missing-save-source", "promotion"]) {
       const interrupted = new ProjectFileRepository({ projectsRoot: value.projects,
         failpoint: (name) => name === "promotion-working-copy-created" });
       await assert.rejects(interrupted.promoteCandidate({ target: imported.target,
-        candidateId: candidate.candidate.candidateId }), { code: "INJECTED_FAILPOINT" });
+        candidateId: candidate.candidate.candidateId,
+        decisionOperationId: `promote_${candidate.candidate.candidateId}` }), { code: "INJECTED_FAILPOINT" });
     }
     const observed = await observeWorkspaceRecovery(() => value.repository.workspace({ sourcePath: imported.target.exactSourcePath }));
     assert.deepEqual(observed.recoveredProjects, [imported.target.projectId]);

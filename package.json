@@ -545,6 +545,10 @@
         "to": "shared/agent-auth-source.mjs"
       },
       {
+        "from": "shared/agent-input-policy.mjs",
+        "to": "shared/agent-input-policy.mjs"
+      },
+      {
         "from": "shared/openai-compatible-vendors.mjs",
         "to": "shared/openai-compatible-vendors.mjs"
       },

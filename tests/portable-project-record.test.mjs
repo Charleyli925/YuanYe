@@ -137,6 +137,7 @@ test("a written manifest carries no absolute path from this machine", async (t) 
   await value.repository.promoteCandidate({
     target: imported.target,
     candidateId: candidate.candidate.candidateId,
+    decisionOperationId: `promote_${candidate.candidate.candidateId}`,
   });
 
   const manifest = JSON.parse(await readFile(

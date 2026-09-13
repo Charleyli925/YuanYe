@@ -39,13 +39,19 @@ function projectState(sourcePath) {
     }],
     pendingRename: null,
     lastRename: null,
+    activeEffect: null,
+    activeEffectGeneration: 0,
     activeManagedLocator: null,
   };
 }
 
-function renamePayload(sourcePath, stem = "新的文件名") {
+function renamePayload(
+  sourcePath,
+  stem = "新的文件名",
+  operationId = "rename_test_operation_0001",
+) {
   return {
-    operationId: "rename_test_operation_0001",
+    operationId,
     sourcePath,
     stem,
     expectedSha256: SOURCE_SHA256,
@@ -111,11 +117,57 @@ test("source rename preserves exact bytes and atomically moves active and recent
   assert.equal(state.recent[0].name, "新的文件名.html");
   assert.equal(state.pendingRename, null);
   assert.equal(state.lastRename.operationId, "rename_test_operation_0001");
+  assert.equal(state.activeEffect, null);
+  assert.equal(state.activeEffectGeneration, 1);
   assert.equal(writes.length, 2);
   assert.deepEqual(rebinds, [{
     sourcePath: targetPath,
     expectedSha256: SOURCE_SHA256,
   }]);
+});
+
+test("source rename invalidates managed and generated activation predecessors across A-to-C-to-A", async (t) => {
+  for (const kind of ["managed-working-copy", "generated-version"]) {
+    const fixture = await createFixture(t);
+    const state = projectState(fixture.sourcePath);
+    const originalPath = fixture.sourcePath;
+    state.activeEffectGeneration = 7;
+    state.activeEffect = {
+      operationId: `pending_${kind}_activation_0001`,
+      kind,
+      effectKind: "active-path",
+      projectId: "project_rename_aba",
+      documentId: kind === "managed-working-copy" ? "doc_rename_aba_0001" : null,
+      workingCopyId: kind === "managed-working-copy" ? "work_ver_0001" : null,
+      versionId: "ver_0001",
+      expectedSha256: SOURCE_SHA256,
+      previousSourcePath: originalPath,
+      nextSourcePath: path.join(fixture.directory, "待提交.html"),
+      projectRootPath: fixture.directory,
+      committedAt: 700,
+    };
+    const writes = [];
+
+    const first = await renameHtmlSource(serviceOptions(
+      renamePayload(originalPath, "中间路径", `rename_${kind}_to_c_0001`),
+      state,
+      writes,
+      [],
+    ));
+    const second = await renameHtmlSource(serviceOptions(
+      renamePayload(first.sourcePath, "原文件", `rename_${kind}_back_to_a_0001`),
+      state,
+      writes,
+      [],
+    ));
+
+    assert.equal(second.sourcePath, originalPath);
+    assert.equal(state.activePath, originalPath);
+    assert.equal(state.activeEffect, null);
+    assert.equal(state.activeEffectGeneration, 9);
+    assert.equal(state.lastRename.operationId, `rename_${kind}_back_to_a_0001`);
+    assert.equal(writes.length, 4);
+  }
 });
 
 test("source rename refuses a live destination and does not overwrite either file", async (t) => {
@@ -300,6 +352,8 @@ test("source rename recovers a no-replace move interrupted after linking the des
   await assert.rejects(access(fixture.sourcePath), { code: "ENOENT" });
   assert.equal(state.pendingRename, null);
   assert.equal(state.lastRename.completedAt, 1_001);
+  assert.equal(state.activeEffect, null);
+  assert.equal(state.activeEffectGeneration, 1);
   assert.equal(writes.length, 2);
 });
 
@@ -389,6 +443,8 @@ test("prepared rename recovers after a crash between filesystem move and state c
   assert.equal(state.recent[0].path, canonicalTargetPath);
   assert.equal(state.pendingRename, null);
   assert.equal(state.lastRename.operationId, "rename_recovery_after_move");
+  assert.equal(state.activeEffect, null);
+  assert.equal(state.activeEffectGeneration, 1);
   assert.equal(writes.length, 1);
 });
 
@@ -465,4 +521,3 @@ test("source rename rebases activeManagedLocator with active and recent in one w
   assert.equal(writes.at(-1).activeManagedLocator.sourcePath, result.sourcePath);
   assert.equal(writes.at(-1).recent[0].path, result.sourcePath);
 });
-

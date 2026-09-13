@@ -1,3 +1,5 @@
+import { validateVersionSessionVersions } from "./version-session.js";
+
 function requiredFunction(value, name) {
   if (typeof value !== "function") {
     throw new TypeError(`WorkspaceController codec ${name} must be a function.`);
@@ -8,7 +10,9 @@ function requiredFunction(value, name) {
 // Decode the complete response before any Session publishes it. DraftSession
 // retains persisted records; CommentSession receives their display models.
 export function decodeWorkspaceResponse(payload, codecs) {
-  const versions = codecs.versionsFromWorkspace(payload);
+  const versions = validateVersionSessionVersions(
+    codecs.versionsFromWorkspace(payload),
+  );
   const source = codecs.draftAuthorityFromWorkspace(payload);
   const revision = Number(source.draftRevision ?? 0);
   if (!Number.isSafeInteger(revision) || revision < 0) {

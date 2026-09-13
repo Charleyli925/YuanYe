@@ -169,6 +169,7 @@ export type CanvasAuthorityPort = Readonly<{
 
 export type ProjectSourceActivationPort = Readonly<{
   activateManagedWorkingCopy(input: Readonly<{
+    operationId?: string | null;
     previousSourcePath: string;
     nextSourcePath: string;
     expectedSha256: string;

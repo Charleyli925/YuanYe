@@ -93,7 +93,7 @@ records must not be silently filtered into a partial success.
 | Raw response / entry | Decoder | Published owners |
 | --- | --- | --- |
 | Ordinary open, reload, restart recovery: workspace Core + Supplemental | `decodeWorkspaceResponse` → `versionsFromWorkspace`, `draftAuthorityFromWorkspace`, comment/event codecs | Project, Document, Version, Draft, Comment Sessions |
-| Registration / canonical refresh: `ensureProject` | same decoder before registration publication | Project, Document, Version, Draft; CommentWorkflow reconciles its projection |
+| Registration / canonical refresh: `ensureProject` | same decoder before registration publication; Controller resumes an operation-bound staged publication receipt before fast paths | Project, Run, Document, Version, Draft, Comment and source-history owners |
 | Draft authority rebound: `workspace` | same decoder before replacing draft authority | Draft; CommentWorkflow reconciles Comment |
 | Open a created historical Version | VersionWorkflow uses the same decoder before managed-source publication | Project, Document, Version, Draft, Comment Sessions |
 | AI adoption refresh | ProjectWorkflow workspace path above | same existing Session owners |
@@ -271,6 +271,24 @@ iframe. The repository may continue to persist the rules in its internal
 `PROJECT.md` file without exposing that filename in the UI.
 
 ## Run and navigation render boundaries
+
+RunSession keeps locator-scoped run, result, handoff, copied/recovered and
+outcome facts in one aggregate entry. Active presentation retains locator keys
+only and projects from that same entry; it is not a second fact store. A new
+Request/Attempt on one locator replaces its attempt facts atomically, while late
+writers must still match the current attempt. Repository `sourceWorkingCopyId`
+reaches both Bridge active-Run projections and the domain decoder; missing legacy
+origin stays unknown. Pending submissions use the existing token, and
+rename/managed-source transition rebind only the exact old locator. See
+`STATE_OWNERSHIP.md` for the distinction between Request origin and the
+post-Promotion display target.
+
+Locator revisions/tombstones are coordination metadata, not a second public
+fact store. Hydration carries a locator revision, per-query sequence and
+ProjectSession epoch across its Bridge await. Source rebinds reserve both
+ProjectSession and RunSession, then publish observers only after both CAS
+commits succeed; host activation that cannot be locally proven is surfaced as
+unknown/recovery-required.
 
 ```text
 RunSession + RunWorkflow

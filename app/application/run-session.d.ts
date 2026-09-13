@@ -119,9 +119,11 @@ export class RunSession {
     sourcePath: string | null | undefined,
   ): RunBackgroundResult | null;
   rebaseSource(value: {
+    /** Exact old locator. Never selects all runs of a project. Request origin stays unchanged. */
     previousSourcePath: string;
     sourcePath: string;
     projectId?: string;
+    documentId?: string;
   }): boolean;
   beginOperation(kind: RunOperationKind, key: string): boolean;
   endOperation(kind: RunOperationKind, key: string): boolean;

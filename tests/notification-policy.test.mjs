@@ -18,6 +18,17 @@ test("technical Electron IPC prefixes never reach the visible error copy", () =>
   assert.doesNotMatch(message, /Error invoking|html-projects|ProjectFileError/);
 });
 
+test("structured-clone project errors keep their safe message and code", () => {
+  assert.equal(
+    productErrorMessage({
+      code: "PERMISSION_DENIED",
+      message: "没有访问该位置的权限，请选择其他位置。",
+      details: { operationId: "operation_0001" },
+    }, "项目操作没有完成。"),
+    "没有访问该位置的权限，请选择其他位置。",
+  );
+});
+
 test("internal state vocabulary is translated before display", () => {
   assert.equal(
     productErrorMessage(

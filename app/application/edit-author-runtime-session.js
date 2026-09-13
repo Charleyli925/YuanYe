@@ -176,8 +176,9 @@ function normalizedGrant(value, request) {
  * The sole application owner for Edit author-runtime state. Its key is exactly
  * (sourcePath, canvasGeneration): ordinary source revisions, autosaves, and
  * comments intentionally cannot start another preparation in the same canvas.
- * A same-directory Finder rename that keeps HTML, SHA and canvas generation
- * only relocates that live key; it does not consume another prepare attempt.
+ * The Session can relocate an explicitly equivalent same-generation key, but
+ * accepted Finder/source authority changes publish a new receipt and generation
+ * and therefore rebuild the physical Canvas instead of using this capability.
  */
 export class EditAuthorRuntimeSession {
   #port;

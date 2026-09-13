@@ -8,6 +8,7 @@ import {
   readdirSync,
   renameSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -60,6 +61,7 @@ export {
   readdirSync,
   renameSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 };
 export { tmpdir, path, expect, sha256, ProjectFileRepository };

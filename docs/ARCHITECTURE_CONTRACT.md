@@ -86,7 +86,17 @@ The renderer's main workspace facts are partitioned as follows:
 - `RunSession`: current/background run projections, per-Request Agent delivery
   status, background outcomes, the one preparing/frozen/uncertain submission
   lock, and operation locks. ACP events remain bounded presentation facts and
-  never become completion authority;
+  never become completion authority. Request origin includes project/document
+  and the known source Working Copy; pending projection identity includes the
+  existing submission token. Locator-scoped run, result, handoff,
+  copied/recovered and outcome facts share one internal aggregate entry; active
+  presentation retains locator keys only and projects from that entry. A newer
+  Request/Attempt replaces the locator's attempt facts atomically and rejects
+  late old-attempt writers. Locator rebind never selects a whole project's runs,
+  changes the Request origin when Promotion creates a new Working Copy, or
+  adds fact fields to the frozen public snapshot. The narrow locator revision
+  and prepare/commit seams are coordination-only; they publish no additional
+  Session facts and preserve the ordinary method semantics;
 - `RunWorkflow`: ticketless Agent diagnosis for Settings, pre-Request Agent use-time check, Request freeze/persisted-boundary
   verification, final-saved-HTML text-locator preflight, safely fenced same-Request
   Agent start/retry, unknown-POST authority reconciliation, tracked-run polling,
@@ -159,14 +169,15 @@ The renderer's main workspace facts are partitioned as follows:
 - `VersionSession`: immutable Version records, verified immutable history preview bytes, plus the current/history
   projection facts;
 - `VersionWorkflow`: Version operation identity/generation, Bridge version
-  reads and activation mutation, review-candidate preparation, historical
-  Working Copy continuation, manual historical creation/result reconciliation, complete project/document/version/OpenTarget
+  reads and activation mutation, review-candidate preparation, validated opening
+  of manually created historical Versions, manual historical creation/result reconciliation, complete project/document/version/OpenTarget
   identity and Hash validation, synchronous cross-Session publication, and
   read-only history verification and projection publication. History reads never
   publish through DocumentSession; return-current removes that projection and
-  delegates external-file observation to DocumentWorkflow without reloading bytes. A committed historical
-  activation recovers forward through its receipt; it never restores V6 over
-  durable V2 state. It publishes through `ProjectSession`,
+  delegates external-file observation to DocumentWorkflow without reloading bytes. A validated
+  manually created-history open recovers forward through its creation receipt;
+  disk-only legacy activation replay never restores V6 over durable V2 state.
+  It publishes through `ProjectSession`,
   `DocumentSession`, `VersionSession`, `DraftSession` and `CommentSession`; it
   never owns a second mutable Version store. Manual creation journals and their
   manifest commit remain in ProjectFileRepository; creation receipts do not
@@ -180,8 +191,8 @@ The renderer's main workspace facts are partitioned as follows:
 - `ProjectWorkflow`: hydration generation/load outcome, picker/external/switch
   operation identity, accepted-result execution, close request lifecycle,
   project-switch publication, typed source-rename transition and the unified
-  managed-source prepare/commit handoff used by Candidate promotion, historical
-  Working Copy continuation and future Registry opens. The command fences/drains
+  managed-source prepare/commit handoff used by Candidate promotion, validated
+  opening of manually created historical Versions and future Registry opens. The command fences/drains
   existing owners, validates the expected source Hash and trusted desktop result
   (including lost-response reconciliation), then synchronously publishes through
   existing Session owners. It is an operation owner, not a second owner of any
@@ -378,16 +389,37 @@ Version authority, HTML bytes and Hash. The publication phase contains no
 `CommentSession`, then invalidates prior Canvas acknowledgements. Publishing
 only the path, only the Hash or any other partial combination is forbidden.
 
-The history “continue editing” command is not a Version restore or snapshot
-write. It accepts only the current project identity, one `versionId` and an
-operation ID; Repository chooses the one matching existing Working Copy after
-validating its state and immutable snapshot, atomically records V2 as active
-with a `desktop-pending` receipt, and confirms that receipt only after Desktop
-activation. If a Bridge, Desktop or confirmation response is lost, the same
-receipt operation is safe to replay and must resolve to the same `workingCopyId`;
-it must not roll durable V2 back to V6. A background Candidate carries its own
-complete OpenTarget and may never use whichever target happens to be mounted in
-the foreground.
+Initial registration additionally records a Controller-owned, operation-bound
+publication continuation as soon as local Project/Run authority commits. Its
+monotonic cursor makes Document receipt, Version, Comment, Draft, recovery
+identity, source history and event publication idempotent. `ensureRegistered`
+must resume this receipt before any existing-context or Draft-only shortcut;
+managed Desktop activation and `/project/ensure` are not repeated. Before the
+core Project/Run/Document/Version/Draft/Comment tuple is complete, aggregate
+observers retain the last complete tuple and expose only registration status.
+True navigation retires the receipt, but a same-document Working Copy Hash
+refresh may advance it only from `DocumentWorkflow`'s current persisted
+authority. A first autosave that receives an unknown post-commit result rekeys
+its latest pending write and SourceHistory evidence to the registered context;
+its next drain resumes registration before writing bytes. Late comments are
+rebound from the live working copy, while an edit from a still-presented frame
+whose HTML differs from the registered authority is rejected until the new
+Canvas receipt is presented. Canvas ACK cleanup, recovery-store projection and
+version-summary refresh are rebuildable effects: their failure is diagnostic
+and cannot turn completed source authority back into an unknown write.
+
+The current UI has no history “continue editing” command. Manual history work
+first creates an immutable Version under one durable creation operation, then
+`openCreatedHistoryVersion` re-queries that same receipt and validates its full
+project/document/version/Working Copy/OpenTarget/HTML/Hash tuple before using
+the ordinary managed-source transition. A lost creation or opened acknowledgement
+is reconciled under the same operation and never recreates the Version or rolls a
+newer Working Copy back. The old `/history-version/continue` route is disk-only
+compatibility: it may only read and replay an already-existing `historyActivation`
+receipt after complete identity and immutable-snapshot validation. It cannot
+create a receipt or change the active Working Copy. A background Candidate
+carries its own complete OpenTarget and may never use whichever target happens
+to be mounted in the foreground.
 
 ## Canvas target contract
 
@@ -439,7 +471,7 @@ deferrable projections: the renderer publishes Project/Document/Version/Draft/
 Comment authority and confirms Working Copy activation first, then schedules
 the list refresh behind the current context fence. A slow or failed catalog
 scan therefore cannot reorder the Repository mutation queue ahead of a
-confirmation or downgrade a completed rename/continuation to unknown.
+confirmation or downgrade a completed rename/created-history open to unknown.
 
 `AI任务/` is intentionally outside every authority chain. Once a durable
 Request or verified Candidate already exists, the Repository validates the
@@ -507,9 +539,11 @@ renders source-static content, but desktop may choose one bounded direct author
 runtime before the initial editable frame becomes interactive. The sole
 `EditAuthorRuntimeSession`, composed by `WorkspaceController`, keys the attempt
 to `(sourcePath, canvasGeneration)` rather than an autosave revision, source
-echo or comment state. A same-directory path-only rename that keeps the same
-HTML, source SHA and canvas generation relocates that live key and does not
-consume another prepare. It accepts one exact persisted-source prepare result
+echo or comment state. The Session can relocate an explicitly equivalent
+same-generation key without consuming another prepare, but an accepted Finder
+or source-authority locator transition never uses that capability: it publishes
+a fresh authority receipt, advances generation and rebuilds the physical Canvas.
+It accepts one exact persisted-source prepare result
 only for the same source SHA and generation; a late old result is revoked and a
 settled session cannot prepare again. The stable attempt key is distinct from
 the latest retry identity: every valid refresh observes current Working HTML,

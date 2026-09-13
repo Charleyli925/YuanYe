@@ -99,22 +99,103 @@ const PROJECT_IPC_PROTOCOL = "html-ai-project-result";
 const PROJECT_IPC_VERSION = 1;
 let bridgeConnectionWait = null;
 
+const PUBLIC_CONFIRMATION_STRING_FIELDS = [
+  "sourceFileName",
+  "projectName",
+  "currentBasedOnVersionId",
+  "latestOfficialVersionId",
+];
+const PUBLIC_CONFIRMATION_NULLABLE_STRING_FIELDS = new Set([
+  "currentBasedOnVersionId",
+  "latestOfficialVersionId",
+]);
+
+function boundedPublicString(value) {
+  return typeof value === "string" && value.length > 0 && value.length <= 512
+    ? value
+    : null;
+}
+
+function projectOperationConfirmation(value, code) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  if (code !== "OPEN_INTENT_RECLASSIFIED" || value.classification !== "known-external") {
+    return undefined;
+  }
+  if (value.openKind !== "confirmation") return undefined;
+  const requestId = boundedPublicString(value.requestId);
+  const classification = "known-external";
+  if (!requestId) {
+    return undefined;
+  }
+  const confirmation = { requestId, classification };
+  confirmation.openKind = "confirmation";
+  for (const key of PUBLIC_CONFIRMATION_STRING_FIELDS) {
+    if (value[key] === null && PUBLIC_CONFIRMATION_NULLABLE_STRING_FIELDS.has(key)) {
+      confirmation[key] = null;
+      continue;
+    }
+    const safeValue = boundedPublicString(value[key]);
+    if (safeValue === null) return undefined;
+    confirmation[key] = safeValue;
+  }
+  for (const key of ["currentBasedOnOrdinal", "latestOfficialOrdinal"]) {
+    if (!Number.isSafeInteger(value[key])) return undefined;
+    confirmation[key] = value[key];
+  }
+  if (typeof value.currentDiffersFromBase !== "boolean") return undefined;
+  confirmation.currentDiffersFromBase = value.currentDiffersFromBase;
+  if (value.sourceRelation !== "changed" && value.sourceRelation !== "unchanged") {
+    return undefined;
+  }
+  confirmation.sourceRelation = value.sourceRelation;
+  for (const key of ["deleteOriginal", "busy"]) {
+    if (value[key] !== undefined && typeof value[key] !== "boolean") return undefined;
+    if (value[key] !== undefined) confirmation[key] = value[key];
+  }
+  return confirmation;
+}
+
+function projectOperationDetails(value, code) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const details = {};
+  for (const [key, detail] of Object.entries(value)) {
+    if (key === "confirmation") {
+      const confirmation = projectOperationConfirmation(detail, code);
+      if (confirmation) details.confirmation = confirmation;
+      continue;
+    }
+    if (
+      detail === null
+      || typeof detail === "string"
+      || typeof detail === "number"
+      || typeof detail === "boolean"
+    ) {
+      details[key] = detail;
+    }
+  }
+  return Object.keys(details).length > 0 ? details : null;
+}
+
 function projectOperationError(payload) {
   const message = typeof payload?.message === "string" && payload.message.trim()
     ? payload.message.trim()
     : "本地文件操作没有完成，请重试。";
-  const error = new Error(message);
-  Object.defineProperty(error, "code", {
-    value: typeof payload?.code === "string" ? payload.code : "PROJECT_SERVICE_ERROR",
-    enumerable: true,
+  const code = typeof payload?.code === "string" && payload.code.trim()
+    ? payload.code.trim()
+    : "PROJECT_SERVICE_ERROR";
+  const details = projectOperationDetails(payload?.details, code);
+
+  // Promise rejections from a contextBridge function do not preserve custom
+  // Error fields in the renderer world. Keep the public rejection as a small
+  // structured-clone DTO instead; it deliberately has no stack, channel,
+  // class name, or other Main-process implementation detail.
+  return Object.freeze({
+    code,
+    message,
+    ...(details && Object.keys(details).length > 0
+      ? { details: Object.freeze(details) }
+      : {}),
   });
-  if (payload?.details && typeof payload.details === "object") {
-    Object.defineProperty(error, "details", {
-      value: Object.freeze({ ...payload.details }),
-      enumerable: true,
-    });
-  }
-  return error;
 }
 
 async function invokeProject(channel, ...args) {

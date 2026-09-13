@@ -12,6 +12,7 @@ import { VersionSession } from "../app/application/version-session.js";
 import { auditEventKey, removeAcknowledgedAuditEvents } from "../app/lib/audit-events.js";
 import { appendDirectEditEvent } from "../app/lib/direct-edit-events.js";
 const SOURCE_PATH = "/tmp/document-workflow.html";
+const NEXT_SOURCE_PATH = "/tmp/document-workflow-managed.html";
 const PROJECT_ID = "project_document_workflow";
 const DOCUMENT_ID = "document_document_workflow";
 
@@ -1066,6 +1067,84 @@ test("DocumentWorkflow registers an unbound source write before its first autosa
   assert.equal(harness.workflow.verifyLeaveBoundary(boundary, {
     needsSourceProtection: true, committedSourceSha256: sha256(after),
   }).kind, "ready");
+});
+
+test("DocumentWorkflow rebinds a newer queued write when registration moves to a managed source path", async () => {
+  const before = "<!doctype html><html><body><p>one</p></body></html>";
+  const after = before.replace("one", "two");
+  const latest = before.replace("one", "latest");
+  let markRegistrationStarted;
+  const registrationStarted = new Promise((resolve) => {
+    markRegistrationStarted = resolve;
+  });
+  let releaseRegistration;
+  const registrationBarrier = new Promise((resolve) => {
+    releaseRegistration = resolve;
+  });
+  const autosaves = [];
+  let registrations = 0;
+  const harness = createHarness({
+    html: before,
+    registered: false,
+    ensureRegistered: async () => {
+      registrations += 1;
+      markRegistrationStarted();
+      await registrationBarrier;
+      harness.projectSession.openLocator(NEXT_SOURCE_PATH);
+      const context = harness.projectSession.register({
+        epoch: harness.projectSession.epoch,
+        projectId: PROJECT_ID,
+        documentId: DOCUMENT_ID,
+        sourcePath: NEXT_SOURCE_PATH,
+      });
+      return { status: "succeeded", value: context };
+    },
+    bridge: {
+      async autosave(body) {
+        autosaves.push(body);
+        return {
+          ok: true,
+          content: body.html,
+          sha256: sha256(body.html),
+          persistedRevision: body.editRevision,
+          lastModifiedAt: "2026-09-13T00:00:00.000Z",
+        };
+      },
+    },
+  });
+
+  assert.equal(harness.workflow.enqueueEdit({ html: after }).status, "succeeded");
+  const flushing = harness.workflow.flush();
+  await registrationStarted;
+  assert.equal(harness.workflow.enqueueEdit({ html: latest }).status, "succeeded");
+  assert.equal(harness.documentSession.pendingWrite.sourcePath, SOURCE_PATH);
+  assert.equal(harness.documentSession.pendingWrite.html, latest);
+  assert.equal(harness.documentSession.pendingWrite.revision, 2);
+  releaseRegistration();
+
+  const outcome = await flushing;
+
+  assert.equal(
+    outcome.status,
+    "succeeded",
+    JSON.stringify({ outcome, autosaves, snapshot: harness.projectSession.snapshot }),
+  );
+  assert.equal(registrations, 1);
+  assert.equal(autosaves.length, 2);
+  assert.deepEqual(autosaves.map((write) => write.sourcePath), [
+    NEXT_SOURCE_PATH,
+    NEXT_SOURCE_PATH,
+  ]);
+  assert.deepEqual(autosaves.map((write) => write.html), [after, latest]);
+  assert.deepEqual(autosaves.map((write) => write.editRevision), [1, 2]);
+  assert.deepEqual(autosaves.map((write) => write.projectId), [PROJECT_ID, PROJECT_ID]);
+  assert.deepEqual(autosaves.map((write) => write.documentId), [DOCUMENT_ID, DOCUMENT_ID]);
+  assert.equal(autosaves[0].expectedSourceSha256, sha256(before));
+  assert.equal(autosaves[1].expectedSourceSha256, sha256(after));
+  assert.equal(harness.documentSession.html, latest);
+  assert.equal(harness.documentSession.pendingWrite, null);
+  assert.equal(harness.documentSession.persistedSourceSha256, sha256(latest));
+  harness.workflow.dispose();
 });
 
 test("DocumentWorkflow settles a failed first registration as a retryable persistence failure", async () => {

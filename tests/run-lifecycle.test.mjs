@@ -514,6 +514,7 @@ test("active run records require the current status field", () => {
   }), {
     projectId: "project_1",
     documentId: "document_1",
+    sourceWorkingCopyId: null,
     requestId: "req_0001",
     attemptId: "attempt_001",
     requestPath: "",
@@ -537,6 +538,19 @@ test("active run records require the current status field", () => {
       softViolationCodes: [],
     },
   });
+});
+
+test("run decoding preserves Request origin and never guesses a legacy Working Copy", () => {
+  const record = {
+    projectId: "project_1", documentId: "document_1", requestId: "req_0001",
+    sourceWorkingCopyId: "work_ver_0001", sourcePath: "/synthetic/page-V2.html",
+    basedOnVersionId: "ver_0002",
+    readyPayload: { openTarget: { workingCopyId: "work_ver_0002" } },
+  };
+  assert.equal(activeRunFromRecord(record).sourceWorkingCopyId, "work_ver_0001");
+  for (const unknown of [undefined, null, "", 123]) {
+    assert.equal(activeRunFromRecord({ ...record, sourceWorkingCopyId: unknown }).sourceWorkingCopyId, null);
+  }
 });
 
 test("active run errors are localized without exposing internal messages or codes", () => {

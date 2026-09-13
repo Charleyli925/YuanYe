@@ -11,20 +11,86 @@ const GENERIC_PROJECT_ERROR = Object.freeze({
   message: "本地文件操作没有完成，请重试或选择其他位置。",
 });
 
-function serializableDetails(value) {
+const PUBLIC_CONFIRMATION_STRING_FIELDS = [
+  "sourceFileName",
+  "projectName",
+  "currentBasedOnVersionId",
+  "latestOfficialVersionId",
+];
+const PUBLIC_CONFIRMATION_NULLABLE_STRING_FIELDS = new Set([
+  "currentBasedOnVersionId",
+  "latestOfficialVersionId",
+]);
+
+function boundedPublicString(value) {
+  return typeof value === "string" && value.length > 0 && value.length <= 512
+    ? value
+    : null;
+}
+
+function serializableConfirmation(value, code) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-  const entries = Object.entries(value).filter(([, detail]) => (
-    detail === null
-    || typeof detail === "string"
-    || typeof detail === "number"
-    || typeof detail === "boolean"
-  ));
-  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+  if (code !== "OPEN_INTENT_RECLASSIFIED" || value.classification !== "known-external") {
+    return undefined;
+  }
+  if (value.openKind !== "confirmation") return undefined;
+  const requestId = boundedPublicString(value.requestId);
+  const classification = "known-external";
+  if (!requestId) {
+    return undefined;
+  }
+  const confirmation = { requestId, classification };
+  confirmation.openKind = "confirmation";
+  for (const key of PUBLIC_CONFIRMATION_STRING_FIELDS) {
+    if (value[key] === null && PUBLIC_CONFIRMATION_NULLABLE_STRING_FIELDS.has(key)) {
+      confirmation[key] = null;
+      continue;
+    }
+    const safeValue = boundedPublicString(value[key]);
+    if (safeValue === null) return undefined;
+    confirmation[key] = safeValue;
+  }
+  for (const key of ["currentBasedOnOrdinal", "latestOfficialOrdinal"]) {
+    if (!Number.isSafeInteger(value[key])) return undefined;
+    confirmation[key] = value[key];
+  }
+  if (typeof value.currentDiffersFromBase !== "boolean") return undefined;
+  confirmation.currentDiffersFromBase = value.currentDiffersFromBase;
+  if (value.sourceRelation !== "changed" && value.sourceRelation !== "unchanged") {
+    return undefined;
+  }
+  confirmation.sourceRelation = value.sourceRelation;
+  for (const key of ["deleteOriginal", "busy"]) {
+    if (value[key] !== undefined && typeof value[key] !== "boolean") return undefined;
+    if (value[key] !== undefined) confirmation[key] = value[key];
+  }
+  return confirmation;
+}
+
+function serializableDetails(value, code) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const details = {};
+  for (const [key, detail] of Object.entries(value)) {
+    if (key === "confirmation") {
+      const confirmation = serializableConfirmation(detail, code);
+      if (confirmation) details.confirmation = confirmation;
+      continue;
+    }
+    if (
+      detail === null
+      || typeof detail === "string"
+      || typeof detail === "number"
+      || typeof detail === "boolean"
+    ) {
+      details[key] = detail;
+    }
+  }
+  return Object.keys(details).length > 0 ? details : undefined;
 }
 
 export function normalizeProjectIpcError(error) {
   if (error instanceof ProjectFileError) {
-    const details = serializableDetails(error.details);
+    const details = serializableDetails(error.details, error.code);
     return {
       code: error.code,
       message: error.message,
