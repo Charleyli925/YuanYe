@@ -480,6 +480,9 @@ export async function addCommentAndSubmit(
       comment.targetSelector,
     );
   }
+  const isolatedUserData = await electronApp.evaluate(({ app }) => app.getPath("userData"));
+  const workspace = path.join(isolatedUserData, "workspace");
+  const existingPromptPaths = new Set(requestPromptPaths(workspace));
   await page.getByRole("button", { name: /AI 助手/u }).click();
   await chooseClipboardDelivery(page);
   await expect(page.getByTestId("ai-conversation-action-bar")
@@ -489,9 +492,19 @@ export async function addCommentAndSubmit(
     .toContainText("等待你的 AI 完成修改");
   let promptPath = "";
   await expect.poll(async () => {
+    const newPromptPaths = requestPromptPaths(workspace)
+      .filter((candidate) => !existingPromptPaths.has(candidate));
+    if (newPromptPaths.length === 1) {
+      [promptPath] = newPromptPaths;
+      return true;
+    }
+    if (newPromptPaths.length > 1) return false;
     const copied = await electronApp.evaluate(({ clipboard }) => clipboard.readText());
     const match = copied.match(/请执行\s+(.+?\/PROMPT\.md)\s+中的单轮任务/u);
-    promptPath = match?.[1] || "";
+    const copiedPromptPath = match?.[1] || "";
+    promptPath = copiedPromptPath.startsWith(`${isolatedUserData}${path.sep}`)
+      ? copiedPromptPath
+      : "";
     return Boolean(promptPath && existsSync(promptPath));
   }, { timeout: 20_000 }).toBe(true);
   // The round is carried by the conversation now, not by a header button opening a panel.
@@ -670,6 +683,34 @@ export function requestDirectoryCount(workspace) {
         : 0
     );
   }, 0);
+}
+
+function requestPromptPaths(workspace) {
+  const promptPaths = [];
+  const projectsRoot = path.join(workspace, "projects");
+  if (existsSync(projectsRoot)) {
+    for (const projectDirectoryName of readdirSync(projectsRoot)) {
+      const requestsRoot = path.join(
+        projectsRoot,
+        projectDirectoryName,
+        "requests",
+      );
+      if (!existsSync(requestsRoot)) continue;
+      for (const requestId of readdirSync(requestsRoot)) {
+        const promptPath = path.join(requestsRoot, requestId, "PROMPT.md");
+        if (existsSync(promptPath)) promptPaths.push(promptPath);
+      }
+    }
+  }
+  for (const projectRoot of managedProjectRoots(workspace)) {
+    const requestsRoot = path.join(projectRoot, ".pageroot", "requests");
+    if (!existsSync(requestsRoot)) continue;
+    for (const requestId of readdirSync(requestsRoot)) {
+      const promptPath = path.join(requestsRoot, requestId, "PROMPT.md");
+      if (existsSync(promptPath)) promptPaths.push(promptPath);
+    }
+  }
+  return promptPaths.sort();
 }
 
 export function workspaceContainsDraftComment(workspace, text) {
