@@ -124,6 +124,7 @@ import {
 } from "./source-rename.mjs";
 import {
   activeManagedLocatorForActivatedPath,
+  createActiveManagedReconcileOperationId,
   normalizeActiveManagedLocator,
   rebaseActiveManagedLocator,
   sameManagedPath,
@@ -462,6 +463,7 @@ async function recoverWatchedManagedSource(info) {
       let sourceMissing = true;
       try {
         const reconciled = await reconcileActiveManagedSourceOperation({
+          operationId: createActiveManagedReconcileOperationId(),
           previousSourcePath: activePath,
           expectedSourceSha256: locator.sourceSha256,
           projectId: locator.projectId,
@@ -1890,6 +1892,7 @@ async function getActiveProjectOperation() {
     if (missing && state.activeManagedLocator) {
       try {
         const reconciled = await reconcileActiveManagedSourceOperation({
+          operationId: createActiveManagedReconcileOperationId(),
           previousSourcePath: activePath,
           expectedSourceSha256: state.activeManagedLocator.sourceSha256,
           projectId: state.activeManagedLocator.projectId,
@@ -1906,6 +1909,7 @@ async function getActiveProjectOperation() {
   } else if (state.activeManagedLocator) {
     try {
       const reconciled = await reconcileActiveManagedSourceOperation({
+        operationId: createActiveManagedReconcileOperationId(),
         previousSourcePath: state.activeManagedLocator.sourcePath,
         expectedSourceSha256: state.activeManagedLocator.sourceSha256,
         projectId: state.activeManagedLocator.projectId,

@@ -249,6 +249,125 @@ async function settleAsyncRuntime() {
   await new Promise((resolve) => setImmediate(resolve));
 }
 
+test("shell publishes queued document history as busy until the terminal action settles", async (t) => {
+  const before = "<!doctype html><html><body><p>one</p></body></html>";
+  const after = before.replace("one", "two");
+  const writes = [];
+  let releaseUndo;
+  let releaseRedo;
+  const harness = createHarness({
+    html: before,
+    bridgeClient: {
+      async ensureProject() {
+        return registrationPayload({ html: before });
+      },
+      async workspace() {
+        return registrationPayload({ html: before });
+      },
+      async autosave(input) {
+        writes.push(input);
+        if (writes.length === 2) {
+          await new Promise((resolve) => { releaseUndo = resolve; });
+        } else if (writes.length === 3) {
+          await new Promise((resolve) => { releaseRedo = resolve; });
+        }
+        return {
+          ok: true,
+          content: input.html,
+          sha256: sha256(input.html),
+          persistedRevision: input.editRevision,
+          lastModifiedAt: "2026-09-13T00:00:00.000Z",
+        };
+      },
+      async source() {
+        return {
+          content: after,
+          sha256: sha256(after),
+          lastModifiedAt: "2026-09-13T00:00:00.000Z",
+        };
+      },
+      async resolveConflict() {
+        return {};
+      },
+      async saveDraft() {
+        return {};
+      },
+    },
+    documentWorkflow: {
+      codecs: documentWorkflowCodecs,
+      scheduler: {
+        setTimeout: () => 1,
+        clearTimeout() {},
+      },
+    },
+  });
+  t.after(() => harness.controller.dispose());
+  const context = harness.projectSession.register({
+    epoch: harness.projectSession.epoch,
+    sourcePath: SOURCE_PATH,
+    projectId: "project_history_shell",
+    documentId: "document_history_shell",
+  });
+  harness.documentSession.publishAuthority({
+    html: before,
+    persistedSourceSha256: sha256(before),
+    workingHtmlSha256: sha256(before),
+    context,
+    operationId: "history-shell-initial-authority",
+  });
+  harness.sourceHistorySession.activate(context, sha256(before), null);
+  const startOffset = before.indexOf("one");
+  assert.equal(harness.controller.enqueueDocumentEdit({
+    html: after,
+    context,
+    sourceTransaction: {
+      operationId: "sourceop_history_shell_001",
+      kind: "text",
+      editRevision: 1,
+      createdAt: "2026-09-13T00:00:00.000Z",
+      beforeSourceSha256: sha256(before),
+      afterSourceSha256: sha256(after),
+      forwardPatches: [{
+        startOffset,
+        endOffset: startOffset + 3,
+        before: "one",
+        after: "two",
+        kind: "text",
+      }],
+      reversePatches: [{
+        startOffset,
+        endOffset: startOffset + 3,
+        before: "two",
+        after: "one",
+        kind: "inverse:text",
+      }],
+      beforeTarget: { id: "target-history-shell", text: "one", resolution: "exact" },
+      afterTarget: { id: "target-history-shell", text: "two", resolution: "exact" },
+    },
+  }).status, "succeeded");
+  assert.equal((await harness.controller.flushDocument()).status, "succeeded");
+
+  const observed = [harness.controller.shell.getSnapshot().hasDocumentHistoryAction];
+  const unsubscribe = harness.controller.shell.subscribe(() => {
+    observed.push(harness.controller.shell.getSnapshot().hasDocumentHistoryAction);
+  });
+  t.after(unsubscribe);
+  const undo = harness.controller.performDocumentHistoryAction({ direction: "undo", context });
+  assert.equal(harness.controller.shell.getSnapshot().hasDocumentHistoryAction, true);
+  while (!releaseUndo) await new Promise((resolve) => setImmediate(resolve));
+  const redo = harness.controller.performDocumentHistoryAction({ direction: "redo", context });
+  releaseUndo();
+  assert.equal((await undo).status, "succeeded");
+  while (!releaseRedo) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.controller.shell.getSnapshot().hasDocumentHistoryAction, true);
+  assert.equal(observed.slice(observed.indexOf(true)).includes(false), false);
+  releaseRedo();
+  assert.equal((await redo).status, "succeeded");
+  await settleAsyncRuntime();
+  assert.equal(harness.controller.shell.getSnapshot().hasDocumentHistoryAction, false);
+  assert.equal(observed.at(-1), false);
+});
+
 function createProjectRulesHarness() {
   const projectSession = new ProjectSession();
   projectSession.openLocator(SOURCE_PATH);

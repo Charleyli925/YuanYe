@@ -5735,7 +5735,7 @@ export default function Workbench() {
     && typeof window !== "undefined"
     && window.htmlAIProjects?.openInDefaultBrowser,
   );
-  const hasDocumentHistoryAction = Boolean(workspaceController?.hasDocumentHistoryAction);
+  const hasDocumentHistoryAction = Boolean(shellSnapshot?.hasDocumentHistoryAction);
   const presentation = useMemo(() => deriveWorkbenchPresentation({
     project: { projectId, documentId, sourcePath }, version: versionSnapshot,
     activeTab: activeWorkbenchTab || null, runtimeOwnerTabId: workbenchTabsSnapshot.runtimeOwnerTabId, canvasMode: displayedCanvasMode,

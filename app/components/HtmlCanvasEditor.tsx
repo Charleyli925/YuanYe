@@ -2499,6 +2499,7 @@ const HtmlCanvasEditor = forwardRef<HtmlCanvasEditorHandle, HtmlCanvasEditorProp
     completeRuntimeAttempt,
     documentBaseHref,
     editRuntimeGrant,
+    frameRender.elementGeneration,
     publishRuntimeDegradation,
     scheduleLatestStaticFallbackAfterFailure,
     staticAssetBaseHref,

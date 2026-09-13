@@ -43,6 +43,7 @@ export function workspaceShellSnapshot(source, previous = null) {
   return stableFields(previous, {
     projectSession: source.projectSession,
     document: source.document,
+    hasDocumentHistoryAction: Boolean(source.hasDocumentHistoryAction),
     commentSession,
     comment: source.comment ? stableFields(previous?.comment, {
       attachmentUploadCount: source.comment.attachmentUploadCount,

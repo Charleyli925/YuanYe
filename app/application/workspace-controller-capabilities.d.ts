@@ -63,6 +63,7 @@ export type WorkspaceControllerSnapshot = Readonly<{
   }>;
   projectSession: ProjectSessionSnapshot | null;
   document: DocumentSessionSnapshot | null;
+  hasDocumentHistoryAction: boolean;
   commentSession: CommentSessionSnapshot | null;
   runSession: RunSessionSnapshot | null;
   versionSession: VersionSessionSnapshot | null;
@@ -92,7 +93,7 @@ export type WorkspaceShellCommentSnapshot<TComment = unknown, TEvent = unknown, 
   editSession: Readonly<{ commentId: string; baselineText: string; baselineAttachments: TAttachment[]; draftAttachments: TAttachment[] }> | null;
 }>;
 export type WorkspaceShellSnapshot = Readonly<Pick<WorkspaceControllerSnapshot,
-  "projectSession" | "document" | "run" | "versionSession" | "version" | "project" |
+  "projectSession" | "document" | "hasDocumentHistoryAction" | "run" | "versionSession" | "version" | "project" |
   "editRuntime" | "workbenchTabs" | "documentSurfaceCache"
 > & {
   commentSession: WorkspaceShellCommentSnapshot | null;

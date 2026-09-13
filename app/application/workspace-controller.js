@@ -406,6 +406,7 @@ export class WorkspaceController {
     registration: this.#registration,
     projectSession: null,
     document: null,
+    hasDocumentHistoryAction: false,
     commentSession: null,
     runSession: null,
     versionSession: null,
@@ -2053,7 +2054,14 @@ export class WorkspaceController {
   }
 
   performDocumentHistoryAction(input) {
-    return this.#requireDocumentWorkflow().performHistoryAction(input);
+    const operation = this.#requireDocumentWorkflow().performHistoryAction(input);
+    this.#publishAggregateSnapshot();
+    void operation.finally(() => {
+      if (!this.#disposed) this.#publishAggregateSnapshot();
+    }).catch(() => {
+      // DocumentWorkflow converts authority failures to typed outcomes.
+    });
+    return operation;
   }
 
   reloadDocumentAuthority(input) {
@@ -2620,6 +2628,7 @@ export class WorkspaceController {
       registration: this.#registration,
       projectSession: this.#projectSessionSnapshot,
       document: this.#documentSessionSnapshot,
+      hasDocumentHistoryAction: this.hasDocumentHistoryAction,
       commentSession: this.#commentSessionSnapshot,
       runSession: this.#runSessionSnapshot,
       versionSession: this.#versionSessionSnapshot,
