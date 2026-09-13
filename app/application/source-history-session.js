@@ -362,6 +362,8 @@ export class SourceHistorySession {
     return {
       html,
       sourceSha256: expectedAfterSha256,
+      kind: entry.kind,
+      ...(entry.property ? { property: entry.property } : {}),
       target: structuredClone(undo ? entry.beforeTarget : entry.afterTarget),
       targetTransition: {
         fromTarget: structuredClone(undo ? entry.afterTarget : entry.beforeTarget),

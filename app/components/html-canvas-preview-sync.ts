@@ -267,7 +267,15 @@ export function adoptCanonicalHistoryIslandInPlace(options: {
 
   rootElement.replaceChildren(...canonicalChildren);
   options.onSourceChildrenRestored?.(Array.from(rootElement.querySelectorAll("*")));
-  const mountedElements = sourceBackedPreviewElements(documentNode);
+  // The source bytes outside this editable island were proven unchanged
+  // above. Author scripts may legitimately mutate unrelated mounted source
+  // elements, so their disposable DOM shape must not veto a safe island-local
+  // history adoption. Validate only the authority root and the canonical
+  // children installed by this operation.
+  const mountedElements = [
+    rootElement,
+    ...Array.from(rootElement.querySelectorAll(`[${SOURCE_ELEMENT_ATTRIBUTE}]`)),
+  ];
   const mountedIds = new Set<string>();
   const invalidMountedElement = mountedElements.some((element) => {
     const pagerootId = element.getAttribute(SOURCE_ELEMENT_ATTRIBUTE);

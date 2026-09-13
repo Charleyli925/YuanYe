@@ -81,6 +81,8 @@ export class SourceHistorySession {
   ): {
     html: string;
     sourceSha256: string;
+    kind: SourceHistoryEntry["kind"];
+    property?: string;
     target: SourceHistoryEntry["beforeTarget"];
     targetTransition: {
       fromTarget: SourceHistoryEntry["beforeTarget"];

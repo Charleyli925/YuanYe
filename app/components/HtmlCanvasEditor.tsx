@@ -6468,6 +6468,112 @@ const HtmlCanvasEditor = forwardRef<HtmlCanvasEditorHandle, HtmlCanvasEditorProp
     freezeWorkingSource({ resumeEditing: false })
   ), [freezeWorkingSource]);
 
+  const adoptElementStyleHistoryInPlace = useCallback((
+    source: string,
+    target: HtmlCanvasSelection | null,
+  ): boolean => {
+    const iframe = iframeRef.current;
+    const documentNode = iframe?.contentDocument;
+    const rootElement = selectedElementRef.current;
+    const previousIndex = sourceIndexRef.current;
+    const previousSource = frameSourceHtmlRef.current;
+    const previousSelection = selectedSourceSelectionRef.current;
+    const runtimeSourceProof = runtimeFrameRef.current
+      ? currentRuntimeSourceProof()
+      : null;
+    if (
+      !target
+      || !previousSelection
+      || activeNativeEditRef.current
+      || !iframe
+      || !documentNode?.documentElement
+      || !rootElement?.isConnected
+      || rootElement.ownerDocument !== documentNode
+      || (runtimeFrameRef.current && !runtimeSourceProof?.(rootElement))
+      || !previousIndex
+      || previousIndex.source !== previousSource
+      || renderedSourceHtmlRef.current !== previousSource
+      || containerRef.current?.getAttribute("data-render-verified") !== "true"
+    ) return false;
+
+    try {
+      const previousTarget = resolveTargetRef(
+        previousIndex,
+        sourceTargetRefForSelection(previousSelection),
+      ).target as SourceElementValue | null;
+      const nextIndex = buildSourceIndex(source);
+      const nextTarget = resolveTargetRef(
+        nextIndex,
+        sourceTargetRefForSelection(target),
+      ).target as SourceElementValue | null;
+      if (
+        previousTarget?.type !== "element"
+        || nextTarget?.type !== "element"
+        || previousTarget.pagerootId !== nextTarget.pagerootId
+        || previousTarget.tagName !== nextTarget.tagName
+        || sourceElementId(rootElement) !== previousTarget.pagerootId
+      ) return false;
+      const attributesWithoutStyle = (element: SourceElementValue) => JSON.stringify(
+        element.attributes
+          .filter((attribute) => attribute.name !== "style")
+          .map((attribute) => [attribute.name, attribute.rawValue ?? null, attribute.value ?? null]),
+      );
+      if (
+        attributesWithoutStyle(previousTarget) !== attributesWithoutStyle(nextTarget)
+        || previousIndex.source.slice(0, previousTarget.startTagRange.startOffset)
+          !== nextIndex.source.slice(0, nextTarget.startTagRange.startOffset)
+        || previousIndex.source.slice(previousTarget.startTagRange.endOffset)
+          !== nextIndex.source.slice(nextTarget.startTagRange.endOffset)
+      ) return false;
+      const canonicalTarget = canonicalNativeHostPreview(
+        rootElement,
+        String(nextTarget.pagerootId || nextTarget.nodeId || ""),
+        nextIndex,
+      );
+      if (!canonicalTarget) return false;
+      const restoredElements = reconcileRangeStyleInPlace(
+        rootElement,
+        canonicalTarget,
+        previousIndex,
+        nextIndex,
+      );
+      if (!restoredElements) return false;
+      registerRestoredRuntimeElements(rootElement, restoredElements, nextIndex);
+
+      sourceIndexRef.current = nextIndex;
+      frameSourceHtmlRef.current = source;
+      latestSourceProjectionRef.current = { source, sourceIndex: nextIndex };
+      selectedSourceSelectionRef.current = target;
+      setSelection(target);
+      onSelectRef.current?.(target);
+      pendingFrameRestoreEpochRef.current += 1;
+      pendingSelectionRef.current = null;
+      pendingToolbarVisibleRef.current = toolbarVisibleRef.current;
+      nativeDomGenerationRef.current += 1;
+      nativeEditNeedsReloadRef.current = false;
+      containerRef.current?.setAttribute(
+        "data-history-adopt-path",
+        "editable-island-in-place",
+      );
+      publishRenderedProjectionIdentity(source, nextIndex.sourceSha256);
+      supersedeRuntimeRefreshPending();
+      requestAnimationFrame(() => updateOverlayPosition());
+      return true;
+    } catch {
+      containerRef.current?.setAttribute(
+        "data-history-adopt-path",
+        "frame-reload-fallback",
+      );
+      return false;
+    }
+  }, [
+    currentRuntimeSourceProof,
+    publishRenderedProjectionIdentity,
+    registerRestoredRuntimeElements,
+    supersedeRuntimeRefreshPending,
+    updateOverlayPosition,
+  ]);
+
   const adoptEditableIslandHistoryInPlace = useCallback((
     source: string,
     bookmark: NativeEditFenceBookmark | null,
@@ -6581,6 +6687,10 @@ const HtmlCanvasEditor = forwardRef<HtmlCanvasEditorHandle, HtmlCanvasEditorProp
     source: string,
     target: HtmlCanvasSelection | null,
     selection?: NativeEditSelection | null,
+    operation?: Readonly<{
+      kind: HtmlCanvasMutation["kind"];
+      property?: string;
+    }>,
   ): boolean => {
     if (activeNativeEditRef.current) detachNativeEditForFence();
     const abortInFlightCommit = abortInFlightRuntimeCommitRef.current;
@@ -6606,6 +6716,10 @@ const HtmlCanvasEditor = forwardRef<HtmlCanvasEditorHandle, HtmlCanvasEditorProp
     const resumeTarget = bookmark
       ? target ?? bookmark.target
       : target;
+    if (
+      operation?.kind === "style"
+      && adoptElementStyleHistoryInPlace(source, resumeTarget)
+    ) return true;
     if (adoptEditableIslandHistoryInPlace(
       source,
       bookmark,
@@ -6648,6 +6762,7 @@ const HtmlCanvasEditor = forwardRef<HtmlCanvasEditorHandle, HtmlCanvasEditorProp
   }, [
     advanceLastKnownGoodRuntimeProjection,
     adoptEditableIslandHistoryInPlace,
+    adoptElementStyleHistoryInPlace,
     detachNativeEditForFence,
     loadFrameSource,
     queueNativeFenceReload,

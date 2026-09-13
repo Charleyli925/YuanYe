@@ -128,8 +128,8 @@ function createHarness({
     invalidateRenderAcks() {
       this.invalidations += 1;
     },
-    adoptHistorySource(htmlValue, target, selection) {
-      this.history.push({ html: htmlValue, target, selection });
+    adoptHistorySource(htmlValue, target, selection, operation) {
+      this.history.push({ html: htmlValue, target, selection, operation });
     },
     ...canvasOverrides,
   };
@@ -1782,6 +1782,9 @@ test("DocumentWorkflow applies current-open undo locally and saves the resulting
   assert.equal(harness.documentSession.html, before);
   assert.equal(harness.documentSession.persistedSourceSha256, sha256(before));
   assert.equal(harness.canvas.history.length, 1);
+  assert.deepEqual(harness.canvas.history[0].operation, {
+    kind: "text",
+  });
   assert.equal(harness.sourceHistorySession.capabilities.canRedo, true);
 });
 

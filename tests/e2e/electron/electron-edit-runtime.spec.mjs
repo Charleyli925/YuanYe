@@ -1959,6 +1959,9 @@ test("Runtime text and style edits stay in one document across selection and sav
 
     const styleRevision = await expectCheckpointPersisted(page, 0);
     await frame.locator('[data-native-case="runtime-style-first"]').click();
+    const historyDocument = await documentToken(page);
+    const historyGeneration = await editor.locator('iframe:not([data-frame-role])')
+      .getAttribute("data-frame-generation");
     await clickEditHistoryMenu(electronApp, page, "undo");
     const undoRevision = await expectCheckpointPersisted(page, styleRevision);
     await expect.poll(() => readPublishedWorkingCopy(workingCopyPath, "utf8"))
@@ -1966,6 +1969,13 @@ test("Runtime text and style edits stay in one document across selection and sav
     frame = await currentEditorFrame(page);
     await expect(frame.locator('[data-native-case="runtime-style-first"]'))
       .toHaveCSS("padding-top", "20px");
+    await expect.poll(() => documentToken(page)).toBe(historyDocument);
+    await expect(editor.locator('iframe:not([data-frame-role])')).toHaveAttribute(
+      "data-frame-generation",
+      historyGeneration,
+    );
+    await expect(editor).toHaveAttribute("data-history-adopt-path", "editable-island-in-place");
+    await expect(editor.locator('iframe[data-frame-role="runtime-candidate"]')).toHaveCount(0);
 
     await clickEditHistoryMenu(electronApp, page, "redo");
     await expectCheckpointPersisted(page, undoRevision);
@@ -1974,6 +1984,13 @@ test("Runtime text and style edits stay in one document across selection and sav
     frame = await currentEditorFrame(page);
     await expect(frame.locator('[data-native-case="runtime-style-first"]'))
       .toHaveCSS("padding-top", "22px");
+    await expect.poll(() => documentToken(page)).toBe(historyDocument);
+    await expect(editor.locator('iframe:not([data-frame-role])')).toHaveAttribute(
+      "data-frame-generation",
+      historyGeneration,
+    );
+    await expect(editor).toHaveAttribute("data-history-adopt-path", "editable-island-in-place");
+    await expect(editor.locator('iframe[data-frame-role="runtime-candidate"]')).toHaveCount(0);
   });
 });
 
@@ -2026,6 +2043,70 @@ test("Runtime range styling never grants a forged clone source authority", {
     await expect(forged.locator('span[style*="font-weight"]')).toHaveCount(0);
     await expect.poll(() => documentToken(page)).toBe(beforeDocument);
     await expect(editor.locator('iframe[data-frame-role="runtime-candidate"]')).toHaveCount(0);
+  });
+});
+
+test("Runtime text history ignores unrelated disposable clone drift", {
+  tag: ["@gate-smoke", "@smoke-editing"],
+}, async () => {
+  const html = `<!doctype html>
+<html><head><title>Runtime text history</title></head><body>
+  <p data-native-case="runtime-history-text">甲乙</p>
+  <aside data-native-case="runtime-history-unrelated">运行时旁路</aside>
+  <script>
+    const unrelated = document.querySelector('[data-native-case="runtime-history-unrelated"]');
+    const clone = unrelated.cloneNode(true);
+    clone.removeAttribute('data-native-case');
+    clone.setAttribute('data-runtime-unrelated-clone', 'true');
+    unrelated.after(clone);
+    parent.__PAGEROOT_TEXT_HISTORY_RUNTIME_COUNT__ =
+      (parent.__PAGEROOT_TEXT_HISTORY_RUNTIME_COUNT__ || 0) + 1;
+  </script>
+</body></html>`;
+
+  await withRuntimeProject("pageroot-runtime-text-history-e2e-", {
+    "runtime-report.html": html,
+  }, async ({ electronApp, page, sourcePath }) => {
+    const editor = page.getByTestId("html-canvas-editor");
+    const workingCopyPath = await managedWorkingCopyPath(page, sourcePath);
+    const frame = (await loadedDiskFrame(page, sourcePath, "runtime-history-text")).frame;
+    await expect(frame.locator('[data-runtime-unrelated-clone="true"]')).toHaveCount(1);
+    const historyDocument = await documentToken(page);
+    const historyGeneration = await editor.locator('iframe:not([data-frame-role])')
+      .getAttribute("data-frame-generation");
+
+    await activateNativeEdit(frame, "runtime-history-text");
+    await setTextSelection(frame, "runtime-history-text", 2);
+    await page.keyboard.insertText("丙");
+    await page.keyboard.press(keyShortcut("s"));
+    await expect.poll(() => readPublishedWorkingCopy(workingCopyPath, "utf8"))
+      .toContain("甲乙丙");
+    const textRevision = await expectCheckpointPersisted(page, 0);
+
+    await clickEditHistoryMenu(electronApp, page, "undo");
+    const undoRevision = await expectCheckpointPersisted(page, textRevision);
+    await expect.poll(() => readPublishedWorkingCopy(workingCopyPath, "utf8"))
+      .toContain("甲乙</p>");
+    await expect.poll(() => documentToken(page)).toBe(historyDocument);
+    await expect(editor.locator('iframe:not([data-frame-role])')).toHaveAttribute(
+      "data-frame-generation",
+      historyGeneration,
+    );
+    await expect(editor).toHaveAttribute("data-history-adopt-path", "editable-island-in-place");
+    await expect(editor.locator('iframe[data-frame-role="runtime-candidate"]')).toHaveCount(0);
+
+    await clickEditHistoryMenu(electronApp, page, "redo");
+    await expectCheckpointPersisted(page, undoRevision);
+    await expect.poll(() => readPublishedWorkingCopy(workingCopyPath, "utf8"))
+      .toContain("甲乙丙");
+    await expect.poll(() => documentToken(page)).toBe(historyDocument);
+    await expect(editor.locator('iframe:not([data-frame-role])')).toHaveAttribute(
+      "data-frame-generation",
+      historyGeneration,
+    );
+    await expect(editor).toHaveAttribute("data-history-adopt-path", "editable-island-in-place");
+    await expect(editor.locator('iframe[data-frame-role="runtime-candidate"]')).toHaveCount(0);
+    expect(await page.evaluate(() => window.__PAGEROOT_TEXT_HISTORY_RUNTIME_COUNT__)).toBe(1);
   });
 });
 

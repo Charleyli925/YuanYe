@@ -327,6 +327,10 @@ export type HtmlCanvasEditorHandle = {
     source: string,
     target: HtmlCanvasSelection | null,
     selection?: NativeEditSelection | null,
+    operation?: Readonly<{
+      kind: HtmlCanvasMutation["kind"];
+      property?: string;
+    }>,
   ) => boolean;
   /** Restores the pre-action target/caret when a history request fails or becomes ineligible. */
   cancelHistoryAction: (options?: { restore?: boolean }) => boolean;
