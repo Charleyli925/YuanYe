@@ -3,6 +3,9 @@ import test from "node:test";
 
 import {
   assessHtmlCandidate,
+  disableCandidateImpactCounters,
+  enableCandidateImpactCounters,
+  readCandidateImpactCounters,
 } from "../bridge/candidate-assessment.mjs";
 import {
   normalizeCandidateAssessmentPolicy,
@@ -196,23 +199,34 @@ test("candidate impact stays linear and bounded near the HTML size limit", () =>
   const baseHtml = `<!doctype html><html><head><title>Large</title></head><body data-pageroot-id="${bodyId}">${rows}</body></html>`;
   const outputHtml = baseHtml.replace("row-11999", "row-11999 changed");
   assert.ok(Buffer.byteLength(baseHtml, "utf8") > 8 * 1024 * 1024);
-  const startedCpu = process.cpuUsage();
-  const assessment = assessHtmlCandidate({
-    baseHtml,
-    outputHtml,
-    requestedTargetElementIds: [bodyId],
-    requestedTargetCount: 1,
-  });
-  const elapsedCpu = process.cpuUsage(startedCpu);
-  const elapsedCpuMs = (elapsedCpu.user + elapsedCpu.system) / 1_000;
+  enableCandidateImpactCounters();
+  let assessment;
+  let counters;
+  try {
+    assessment = assessHtmlCandidate({
+      baseHtml,
+      outputHtml,
+      requestedTargetElementIds: [bodyId],
+      requestedTargetCount: 1,
+    });
+    counters = readCandidateImpactCounters();
+  } finally {
+    disableCandidateImpactCounters();
+  }
   assert.equal(assessment.changedElementCount, 1);
   assert.equal(assessment.outsideTargetCount, 0);
   assert.equal(assessment.truncated, false);
   assert.ok(assessment.changedElementIdSample.length <= 100);
-  assert.ok(
-    elapsedCpuMs < 10_000,
-    `candidate impact used ${elapsedCpuMs.toFixed(0)}ms of CPU`,
-  );
+  assert.deepEqual(counters, {
+    snapshotBuilds: 2,
+    snapshotElementVisits: 24_008,
+    retainedElementVisits: 12_001,
+    topologySiblingVisits: 48_004,
+    signatureBuilds: 24_002,
+    comparisonVisits: 24_002,
+    scopeVisits: 24_008,
+    outsideChecks: 1,
+  });
 });
 
 test("candidate impact scope crosses unlabelled source wrappers", () => {
