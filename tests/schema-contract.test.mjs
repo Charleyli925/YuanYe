@@ -1171,6 +1171,8 @@ test(
       documentId: completed.body.documentId,
       requestId: completed.body.requestId,
       attemptId: completed.body.attemptId,
+      candidateId: completed.body.candidateId,
+      decisionOperationId: `promote_${completed.body.candidateId}`,
       versionId: completed.body.versionId,
     });
     assert.equal(activated.response.status, 200, JSON.stringify(activated.body));
