@@ -87,6 +87,8 @@ async function adoptSecondVersion(bridge, ensured, summary) {
     sourcePath: ensured.body.sourcePath,
     requestId: request.body.requestId,
     attemptId: request.body.attemptId,
+    candidateId: ready.body.candidateId,
+    decisionOperationId: `promote_${ready.body.candidateId}`,
     versionId: "ver_0002",
   });
   assert.equal(adopted.response.status, 200, JSON.stringify(adopted.body));
