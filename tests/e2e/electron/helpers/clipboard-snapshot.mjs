@@ -81,6 +81,46 @@ export async function withRestoredElectronClipboard(electronApp, action) {
   }
 }
 
+/**
+ * The lane writes a controlled text/html + text/plain payload, while the
+ * pre-existing clipboard is restorable only when it is empty or plain text.
+ * Any richer prior pasteboard remains an explicit environment limitation.
+ */
+export function assertElectronRichClipboardSnapshotRestorable(snapshot) {
+  const formats = Array.isArray(snapshot?.formats) ? snapshot.formats : [];
+  const payloads = Array.isArray(snapshot?.payloads) ? snapshot.payloads : [];
+  const empty = formats.length === 0 && payloads.length === 0;
+  const solePlainText = formats.length === 1 && formats[0] === "text/plain"
+    && payloads.length === 1 && payloads[0]?.format === "text/plain"
+    && typeof payloads[0]?.base64 === "string";
+  if (!empty && !solePlainText) {
+    const error = new Error(
+      "Electron clipboard contains pre-existing rich formats that this lane cannot restore safely.",
+    );
+    error.code = "CLIPBOARD_RICH_PRIOR_UNSUPPORTED";
+    error.details = { formats, payloadFormats: payloads.map(row => row?.format ?? null) };
+    throw error;
+  }
+  return { empty, solePlainText };
+}
+
+export async function restoreElectronRichClipboard(electronApp, snapshot) {
+  const kind = assertElectronRichClipboardSnapshotRestorable(snapshot);
+  const restored = await restoreElectronClipboard(electronApp, snapshot);
+  return { ...kind, restored };
+}
+
+export async function withRichElectronClipboard(electronApp, richPayload, action) {
+  const snapshot = await snapshotElectronClipboard(electronApp);
+  assertElectronRichClipboardSnapshotRestorable(snapshot);
+  try {
+    await electronApp.evaluate(({ clipboard }, payload) => clipboard.write(payload), richPayload);
+    return await action();
+  } finally {
+    await restoreElectronRichClipboard(electronApp, snapshot);
+  }
+}
+
 export async function waitForElectronClipboardText(electronApp, expectedText, {
   timeoutMs = 1000,
   intervalMs = 20,
