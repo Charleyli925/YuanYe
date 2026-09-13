@@ -49,7 +49,7 @@ function handleSegmentedKeyDown(event: KeyboardEvent<HTMLButtonElement>) {
 }
 
 export type ReviewToolbarControlsProps = {
-  disabled?: boolean;
+  hasChanges: boolean;
   pageView?: ReviewPageView;
   changeFilter?: ReviewChangeFilter;
   scrollMode?: ReviewScrollMode;
@@ -61,7 +61,7 @@ export type ReviewToolbarControlsProps = {
 };
 
 export function ReviewToolbarControls({
-  disabled = false,
+  hasChanges,
   pageView = "split",
   changeFilter = "all",
   scrollMode = "linked",
@@ -71,27 +71,24 @@ export function ReviewToolbarControls({
   onScrollModeChange,
   onZoomModeChange,
 }: ReviewToolbarControlsProps) {
-  const unavailableReason = disabled ? "进入审阅模式后可用" : undefined;
   return (
     <div
       className="unified-review-tools"
-      data-disabled={disabled ? "true" : undefined}
-      data-tooltip={unavailableReason}
       aria-label="审阅工具"
     >
       <div className="toolbar-control-group" role="group" aria-label="页面预览">
-        <button type="button" aria-label="双页对比" data-tooltip="双页对比" aria-pressed={pageView === "split"} disabled={disabled} onClick={() => onPageViewChange?.("split")} onKeyDown={handleSegmentedKeyDown}>
+        <button type="button" aria-label="双页对比" data-tooltip="双页对比" aria-pressed={pageView === "split"} onClick={() => onPageViewChange?.("split")} onKeyDown={handleSegmentedKeyDown}>
           <BrowsersIcon aria-hidden="true" size={14} weight="duotone" />
         </button>
-        <button type="button" aria-label="只看修改前" data-tooltip="只看修改前" aria-pressed={pageView === "before"} disabled={disabled} onClick={() => onPageViewChange?.("before")} onKeyDown={handleSegmentedKeyDown}>
+        <button type="button" aria-label="只看修改前" data-tooltip="只看修改前" aria-pressed={pageView === "before"} onClick={() => onPageViewChange?.("before")} onKeyDown={handleSegmentedKeyDown}>
           <CaretLeftIcon aria-hidden="true" size={13} weight="bold" />
         </button>
-        <button type="button" aria-label="只看修改后" data-tooltip="只看修改后" aria-pressed={pageView === "after"} disabled={disabled} onClick={() => onPageViewChange?.("after")} onKeyDown={handleSegmentedKeyDown}>
+        <button type="button" aria-label="只看修改后" data-tooltip="只看修改后" aria-pressed={pageView === "after"} onClick={() => onPageViewChange?.("after")} onKeyDown={handleSegmentedKeyDown}>
           <CaretRightIcon aria-hidden="true" size={13} weight="bold" />
         </button>
       </div>
 
-      <div className="toolbar-control-group toolbar-filter-group" role="group" aria-label="变化审阅">
+      {hasChanges ? <div className="toolbar-control-group toolbar-filter-group" role="group" aria-label="变化审阅">
         {(["all", "text", "structure"] as ReviewChangeFilter[]).map((mode) => (
           <button
             key={mode}
@@ -99,7 +96,6 @@ export function ReviewToolbarControls({
             aria-label={`${FILTER_LABELS[mode]}变化`}
             data-tooltip={`${FILTER_LABELS[mode]}变化`}
             aria-pressed={changeFilter === mode}
-            disabled={disabled}
             onClick={() => onChangeFilter?.(mode)}
             onKeyDown={handleSegmentedKeyDown}
           >
@@ -108,22 +104,22 @@ export function ReviewToolbarControls({
             {mode === "structure" ? <TreeStructureIcon aria-hidden="true" size={14} weight="duotone" /> : null}
           </button>
         ))}
-      </div>
+      </div> : null}
 
       <div className="toolbar-control-group" role="group" aria-label="滚动方式">
-        <button type="button" aria-label="同步滚动" data-tooltip="同步滚动" aria-pressed={scrollMode === "linked"} disabled={disabled} onClick={() => onScrollModeChange?.("linked")}>
+        <button type="button" aria-label="同步滚动" data-tooltip="同步滚动" aria-pressed={scrollMode === "linked"} onClick={() => onScrollModeChange?.("linked")}>
           <LinkIcon aria-hidden="true" size={13} weight="bold" />
         </button>
-        <button type="button" aria-label="独立滚动" data-tooltip="独立滚动" aria-pressed={scrollMode === "independent"} disabled={disabled} onClick={() => onScrollModeChange?.("independent")}>
+        <button type="button" aria-label="独立滚动" data-tooltip="独立滚动" aria-pressed={scrollMode === "independent"} onClick={() => onScrollModeChange?.("independent")}>
           <LinkBreakIcon aria-hidden="true" size={13} weight="bold" />
         </button>
       </div>
 
       <div className="toolbar-control-group" role="group" aria-label="画布缩放">
-        <button type="button" aria-label="适应画布" data-tooltip="适应画布" aria-pressed={zoomMode === "fit"} disabled={disabled} onClick={() => onZoomModeChange?.("fit")}>
+        <button type="button" aria-label="适应画布" data-tooltip="适应画布" aria-pressed={zoomMode === "fit"} onClick={() => onZoomModeChange?.("fit")}>
           <CornersOutIcon aria-hidden="true" size={13} />
         </button>
-        <button className="toolbar-actual-size" type="button" aria-label="原始大小" data-tooltip="原始大小" aria-pressed={zoomMode === "actual"} disabled={disabled} onClick={() => onZoomModeChange?.("actual")}>100%</button>
+        <button className="toolbar-actual-size" type="button" aria-label="原始大小" data-tooltip="原始大小" aria-pressed={zoomMode === "actual"} onClick={() => onZoomModeChange?.("actual")}>100%</button>
       </div>
 
     </div>

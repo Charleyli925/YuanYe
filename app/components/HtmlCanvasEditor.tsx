@@ -32,7 +32,13 @@ import {
   recordRuntimeContinuityEvent,
 } from "./runtime-continuity-probe.js";
 import { installEditPipelineTestHooks } from "../lib/edit-pipeline-counters.js";
-import { createSourceOperationId } from "../domain/source-history.js";
+import {
+  editableIslandTextOperation,
+  inlineStyleOperation,
+  siblingReorderOperation,
+  textRangeStyleCreatesWrapper,
+  textRangeStyleOperation,
+} from "./html-canvas-source-commands.js";
 import {
   createPagePresentationAction,
   type PagePresentationAction,
@@ -46,7 +52,6 @@ import {
   applyPatchPlan,
   buildSourceIndex,
   createTargetRef,
-  planSourcePatch,
   resolveTargetRef,
 } from "../lib/source-patch-core.js";
 import {
@@ -60,7 +65,6 @@ import {
 import {
   applySemanticOperation,
   createSemanticDocumentState,
-  createSemanticElementPrecondition,
   type SemanticOperation,
 } from "../lib/semantic-operation-kernel.js";
 import {
@@ -215,6 +219,7 @@ import {
 } from "./html-canvas-selection-chrome-contract";
 import {
   RuntimeFrameCoordinator,
+  runtimeCandidateAlreadyActive,
   type RuntimeFrameIdentity,
   type RuntimeFrameSettlement,
   type RuntimeFrameSlotId,
@@ -270,6 +275,12 @@ import {
   prepareCanvasFrameDocument,
   prepareVerifiedFrameDocument,
 } from "./html-preview-sandbox.js";
+import {
+  isSourceReceipt,
+  sameSourceReceipt,
+  sameSourceReceiptContext,
+} from "../application/document-session.js";
+import type { DocumentSourceReceipt } from "../application/document-session.js";
 import styles from "./HtmlCanvasEditor.module.css";
 
 function sourceSubtreeElementIds(
@@ -790,13 +801,16 @@ type FinishNativeEditingOptions = {
 };
 
 
-type SourcePatchCommand = Parameters<typeof planSourcePatch>[0];
 type DirectSemanticCommand = {
   type: "direct-semantic-operation";
   operation: SemanticOperation;
 };
-type CanvasSourceCommand = SourcePatchCommand | DirectSemanticCommand;
-type SourcePatchPlan = NonNullable<ReturnType<typeof planSourcePatch>>;
+type CanvasSourceCommand = DirectSemanticCommand;
+type SourcePatchResult = ReturnType<typeof applyPatchPlan>;
+type ForwardProjectionPlan = {
+  type: string;
+  targetRefs: SourceTargetRef[];
+};
 type InlineStylePriority = "" | "important";
 type InlineStyleFacts = {
   inlineValue: string | null;
@@ -824,105 +838,6 @@ type PagePresentationActionCache = {
   currentContext: PageViewContext | null;
   action: PagePresentationAction | null;
 };
-
-function semanticOperationForSourceCommand(
-  command: SourcePatchCommand,
-  forwardPlan: SourcePatchPlan,
-  sourceIndex: SourceIndexValue,
-  mutation: HtmlCanvasMutation,
-  baseRevision: number,
-): SemanticOperation | null {
-  const targetRef = "targetRef" in command ? command.targetRef : null;
-  const resolution = targetRef ? resolveTargetRef(sourceIndex, targetRef) : null;
-  const sourceTarget = resolution?.target;
-  if (sourceTarget?.type !== "element" || !sourceTarget.pagerootId) {
-    return null;
-  }
-  const target = createSemanticElementPrecondition(sourceIndex, sourceTarget.pagerootId);
-  const envelope = {
-    schemaVersion: 1 as const,
-    operationId: createSourceOperationId(),
-    baseRevision,
-    expectedSourceSha256: sourceIndex.sourceSha256,
-  };
-  if (command.type === "replace-editable-island") {
-    const after = mutation.after as { text?: unknown } | null;
-    const metadata = forwardPlan.metadata as {
-      nextInnerHtml?: unknown;
-      createdPagerootIds?: unknown;
-    };
-    const createdPagerootIds = Array.isArray(metadata.createdPagerootIds)
-      ? metadata.createdPagerootIds.map(String)
-      : [];
-    return {
-      ...envelope,
-      type: "setText",
-      target,
-      text: String(after?.text ?? ""),
-      contentHtml: String(metadata.nextInnerHtml ?? ""),
-      ...(createdPagerootIds.length > 0 ? { createdPagerootIds } : {}),
-    };
-  }
-  if (command.type === "set-inline-style") {
-    return {
-      ...envelope,
-      type: "setStyle",
-      target,
-      property: command.property,
-      value: command.value,
-      important: command.important === true,
-    };
-  }
-  if (command.type === "set-text-range-style") {
-    const map = buildSourceTextMap(sourceIndex, sourceTarget.nodeId, { allowEmpty: true });
-    const range = sourceSegmentsToTextRange(map, command.segments);
-    const metadata = forwardPlan.metadata as { createdPagerootIds?: unknown };
-    const createdPagerootIds = Array.isArray(metadata.createdPagerootIds)
-      ? metadata.createdPagerootIds.map(String)
-      : [];
-    return {
-      ...envelope,
-      type: "setStyle",
-      target,
-      property: command.property,
-      value: command.value,
-      important: command.important === true,
-      range: {
-        ...range,
-        quote: map.text.slice(range.startOffset, range.endOffset),
-      },
-      ...(createdPagerootIds.length > 0 ? { createdPagerootIds } : {}),
-    };
-  }
-  if (command.type === "reorder-sibling") {
-    const parent = sourceTarget.parentId
-      ? sourceIndex.byNodeId.get(sourceTarget.parentId)
-      : null;
-    if (parent?.type !== "element" || !parent.pagerootId) {
-      throw new Error("语义排序需要稳定源码父元素。");
-    }
-    const withoutTarget = parent.childElementIds.filter(
-      (nodeId: string) => nodeId !== sourceTarget.nodeId,
-    );
-    const toIndex = Number(command.toIndex);
-    if (!Number.isSafeInteger(toIndex) || toIndex < 0 || toIndex > withoutTarget.length) {
-      throw new Error("语义排序目标位置无效。");
-    }
-    const beforeNode = withoutTarget[toIndex]
-      ? sourceIndex.byNodeId.get(withoutTarget[toIndex])
-      : null;
-    return {
-      ...envelope,
-      type: "moveElement",
-      target,
-      parent: createSemanticElementPrecondition(sourceIndex, parent.pagerootId),
-      before: beforeNode?.type === "element" && beforeNode.pagerootId
-        ? createSemanticElementPrecondition(sourceIndex, beforeNode.pagerootId)
-        : null,
-    };
-  }
-  throw new Error(`当前 SourcePatch 类型尚未接入语义操作：${command.type}`);
-}
 
 function computedCssValue(element: HTMLElement, cssProperty: string): string {
   return element.ownerDocument.defaultView
@@ -1043,6 +958,7 @@ function verifyInlineStyleOverrideForTargets(
 const HtmlCanvasEditor = forwardRef<HtmlCanvasEditorHandle, HtmlCanvasEditorProps>(function HtmlCanvasEditor(
   {
     html,
+    sourceReceipt,
     semanticRevision = 0,
     onChange,
     onSelect,
@@ -1183,8 +1099,7 @@ const HtmlCanvasEditor = forwardRef<HtmlCanvasEditorHandle, HtmlCanvasEditorProp
   } | null>(null);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const frameInitializedRef = useRef(false);
-  const lastEmittedHtmlRef = useRef<string | null>(null);
-  const pendingHtmlEchoesRef = useRef<string[]>([]);
+  const lastSourceReceiptRef = useRef<DocumentSourceReceipt | null>(sourceReceipt);
   const renderedSourceHtmlRef = useRef<string | null>(null);
   const renderedProjectionSha256Ref = useRef("");
   const frameSourceHtmlRef = useRef(html);
@@ -1264,7 +1179,10 @@ const HtmlCanvasEditor = forwardRef<HtmlCanvasEditorHandle, HtmlCanvasEditorProp
   ) => boolean>(() => false);
   const updateOverlayPositionRef = useRef<() => void>(() => undefined);
   const imperativeLockRef = useRef(false);
-  const lastPropRef = useRef({ html, baseHref: documentBaseHref });
+  const lastPropRef = useRef({
+    sessionIncarnation: sourceReceipt?.sessionIncarnation ?? null,
+    receiptSequence: sourceReceipt?.sequence ?? null,
+  });
   const semanticRevisionRef = useRef(semanticRevision);
   const lastSemanticRevisionPropRef = useRef(semanticRevision);
   const onChangeRef = useRef(onChange);
@@ -2581,6 +2499,7 @@ const HtmlCanvasEditor = forwardRef<HtmlCanvasEditorHandle, HtmlCanvasEditorProp
     completeRuntimeAttempt,
     documentBaseHref,
     editRuntimeGrant,
+    frameRender.elementGeneration,
     publishRuntimeDegradation,
     scheduleLatestStaticFallbackAfterFailure,
     staticAssetBaseHref,
@@ -2632,11 +2551,12 @@ const HtmlCanvasEditor = forwardRef<HtmlCanvasEditorHandle, HtmlCanvasEditorProp
       }
       return;
     }
-    const activeIdentity = runtimeFrameCoordinatorRef.current!.snapshot.lastKnownGood;
-    if (
-      activeIdentity?.sourceRevision === request.sourceRevision
-      && activeIdentity.kind === request.kind
-    ) {
+    if (runtimeCandidateAlreadyActive({
+      request,
+      runtimeFrame: runtimeFrameRef.current,
+      frameLoadGeneration: frameLoadGenerationRef.current,
+      snapshot: runtimeFrameCoordinatorRef.current!.snapshot,
+    })) {
       if (deferredRuntimeCandidateRef.current?.lease === request.lease) {
         deferredRuntimeCandidateRef.current = null;
       }
@@ -3382,8 +3302,8 @@ const HtmlCanvasEditor = forwardRef<HtmlCanvasEditorHandle, HtmlCanvasEditorProp
 
   const synchronizeStablePreview = useCallback((
     previousIndex: SourceIndexValue,
-    result: ReturnType<typeof applyPatchPlan>,
-    plan: SourcePatchPlan,
+    result: SourcePatchResult,
+    plan: ForwardProjectionPlan,
     originalMutation: HtmlCanvasMutation,
     appliedMutation: HtmlCanvasMutation,
     provedRuntimeMutationElement: HTMLElement | null,
@@ -3554,11 +3474,11 @@ const HtmlCanvasEditor = forwardRef<HtmlCanvasEditorHandle, HtmlCanvasEditorProp
           const imported = reconcileRangeStyleInPlace(liveTarget, detachedTarget, previousIndex, result.sourceIndex);
           if (!imported) return failPreviewSync("runtime-subtree-needs-candidate");
           if (targetedRuntimeSync) trustedImportedRuntimeElements = [...imported];
-          const openingPatches = plan.patches.filter(
+          const openingPatches = result.patches.filter(
             (patch: { kind?: string }) => patch.kind === "text-range-style-open",
           );
           const insertedSpanNodeIds = openingPatches.flatMap((openingPatch) => {
-            const shiftedStartOffset = openingPatch.startOffset + plan.patches.reduce(
+            const shiftedStartOffset = openingPatch.startOffset + result.patches.reduce(
               (total: number, patch: { startOffset: number; before: string; after: string }) => (
                 patch.startOffset < openingPatch.startOffset
                   ? total + patch.after.length - patch.before.length
@@ -3582,9 +3502,9 @@ const HtmlCanvasEditor = forwardRef<HtmlCanvasEditorHandle, HtmlCanvasEditorProp
           if (selectedRangeElements.length !== openingPatches.length) {
             return failPreviewSync("range-wrapper-count");
           }
-          const coalescedElementId = (
-            plan.metadata as { coalescedTextRangeElementId?: string }
-          ).coalescedTextRangeElementId;
+          const coalescedElementId = result.patches.find(
+            (patch: { nodeId?: string }) => typeof patch.nodeId === "string",
+          )?.nodeId;
           if (openingPatches.length === 0 && coalescedElementId) {
             const previousStyleElementIndex = previousElements.findIndex(
               (element) => element.pagerootId === coalescedElementId
@@ -3808,14 +3728,14 @@ const HtmlCanvasEditor = forwardRef<HtmlCanvasEditorHandle, HtmlCanvasEditorProp
     command: CanvasSourceCommand,
     mutation: HtmlCanvasMutation,
     options: {
-      validateResult?: (result: ReturnType<typeof applyPatchPlan>) => void;
+      validateResult?: (result: SourcePatchResult) => void;
       onUnchanged?: () => void;
       islandTextCommit?: {
         selection: NativeEditSelection;
         deferPreviewReconcile?: boolean;
       };
     } = {},
-  ): ReturnType<typeof applyPatchPlan> | null => {
+  ): SourcePatchResult | null => {
     const sourceIndex = sourceIndexRef.current;
     const currentSource = frameSourceHtmlRef.current;
     const blockedDetailAtCommandStart = containerRef.current?.getAttribute(
@@ -3858,25 +3778,8 @@ const HtmlCanvasEditor = forwardRef<HtmlCanvasEditorHandle, HtmlCanvasEditorProp
         revision: semanticRevisionRef.current,
         sourceIndex,
       });
-      const directSemanticOperation = command.type === "direct-semantic-operation"
-        ? command.operation
-        : null;
-      const plannedCommand = directSemanticOperation
-        ? null
-        : planSourcePatch(command, sourceIndex) as SourcePatchPlan;
-      const semanticOperation = directSemanticOperation
-        || semanticOperationForSourceCommand(
-          command as SourcePatchCommand,
-          plannedCommand as SourcePatchPlan,
-          sourceIndex,
-          mutation,
-          semanticRevisionRef.current,
-        );
-      if (!semanticOperation) {
-        throw new Error("当前画布命令无法降低为语义操作。");
-      }
-      const operationTargetRefs = plannedCommand?.targetRefs
-        ?? [sourceTargetRefForSelection(mutation.target)];
+      const semanticOperation = command.operation;
+      const operationTargetRefs = [sourceTargetRefForSelection(mutation.target)];
       const ambientTargets = uniqueSelections([
         ...commentedTargetsRef.current.map((entry) => entry.target),
         ...trackedTargetsRef.current,
@@ -3887,7 +3790,11 @@ const HtmlCanvasEditor = forwardRef<HtmlCanvasEditorHandle, HtmlCanvasEditorProp
       ]);
       const trackedTargetRefs = trackedSourceTargetRefs(
         originalTargets,
-        operationTargetRefs,
+        // A direct semantic operation materializes its own canonical
+        // subregion TargetRef. Keep the caller's presentation-level identity
+        // (for example a module selection) in the same apply as a tracked
+        // mapping so the Canvas can restore its original targetId and level.
+        [],
       );
       const semanticResult = applySemanticOperation(
         documentState,
@@ -3903,10 +3810,10 @@ const HtmlCanvasEditor = forwardRef<HtmlCanvasEditorHandle, HtmlCanvasEditorProp
         options.onUnchanged?.();
         return null;
       }
-      const forwardPlan = plannedCommand ?? {
-        type: String(result.inversePlan?.metadata?.originalType ?? ""),
+      const forwardPlan: ForwardProjectionPlan = {
+        type: semanticResult.materialization.planType || "source-patch",
         targetRefs: operationTargetRefs,
-      } as SourcePatchPlan;
+      };
       options.validateResult?.(result);
       const currentRuntime = runtimeFrameRef.current;
       const runtimeIsCurrent = Boolean(
@@ -3948,25 +3855,48 @@ const HtmlCanvasEditor = forwardRef<HtmlCanvasEditorHandle, HtmlCanvasEditorProp
           ]),
         ],
       };
-      const previousLastEmittedHtml = lastEmittedHtmlRef.current;
-      // Publish the echo token before calling the controlled parent. A host
-      // using flushSync may reflect the new `html` prop during this callback;
-      // the prop effect must recognize that value as our own accepted patch
-      // instead of replacing the live V2 editing document.
-      lastEmittedHtmlRef.current = result.html;
-      pendingHtmlEchoesRef.current.push(result.html);
-      if (pendingHtmlEchoesRef.current.length > 16) {
-        pendingHtmlEchoesRef.current.splice(
-          0,
-          pendingHtmlEchoesRef.current.length - 16,
-        );
-      }
       const beforeHistorySelection = historySelectionFromMutationValue(
         mutation.before,
       );
       const afterHistorySelection = historySelectionFromMutationValue(
         mutation.after,
       );
+      // Range wrappers are allocated by the same Kernel materialization. Seal
+      // those returned IDs into the accepted save evidence only after every
+      // caller validation has passed; Canvas never precomputes them.
+      const acceptedSemanticOperation = (() => {
+        if (
+          semanticOperation.type !== "setStyle"
+          && semanticOperation.type !== "setText"
+        ) return semanticOperation;
+        const nextTarget = result.sourceIndex.byPagerootId.get(
+          semanticOperation.target.elementId,
+        );
+        const canonicalContentHtml = semanticOperation.type === "setText"
+          && semanticOperation.contentHtml !== undefined
+          && nextTarget?.type === "element"
+          ? result.sourceIndex.source.slice(
+            nextTarget.contentRange.startOffset,
+            nextTarget.contentRange.endOffset,
+          )
+          : null;
+        return {
+          ...semanticOperation,
+          ...(canonicalContentHtml !== null ? { contentHtml: canonicalContentHtml } : {}),
+          ...(semanticOperation.type === "setStyle"
+            && semanticOperation.range
+            && !semanticOperation.createdPagerootIds
+            && semanticResult.allocatedElementIds?.length
+            ? { createdPagerootIds: [...semanticResult.allocatedElementIds] }
+            : {}),
+          ...(semanticOperation.type === "setText"
+            && semanticOperation.contentHtml !== undefined
+            && !semanticOperation.createdPagerootIds
+            && semanticResult.allocatedElementIds?.length
+            ? { createdPagerootIds: [...semanticResult.allocatedElementIds] }
+            : {}),
+        } as SemanticOperation;
+      })();
       const sourceTransaction: HtmlCanvasSourceTransaction = {
         kind: appliedMutation.kind,
         ...(appliedMutation.property
@@ -3986,21 +3916,21 @@ const HtmlCanvasEditor = forwardRef<HtmlCanvasEditorHandle, HtmlCanvasEditorProp
           : {}),
         ...(semanticOperation
           ? {
-              semanticOperation,
+              semanticOperation: acceptedSemanticOperation,
               identityDelta: semanticResult?.identityDelta,
             }
           : {}),
       };
-      if (!onChangeRef.current(
+      const acceptedReceipt = onChangeRef.current(
         result.html,
         appliedMutation,
         sourceTransaction,
-      )) {
-        lastEmittedHtmlRef.current = previousLastEmittedHtml;
-        pendingHtmlEchoesRef.current.pop();
+      );
+      if (!acceptedReceipt) {
         reportBlockedEdit(new Error("宿主状态已锁定，本次画布修改未被接受。"));
         return null;
       }
+      lastSourceReceiptRef.current = acceptedReceipt;
       recordRuntimeRefreshDecision(refreshDecision);
       latestSourceProjectionRef.current = {
         source: result.html,
@@ -4480,13 +4410,15 @@ const HtmlCanvasEditor = forwardRef<HtmlCanvasEditorHandle, HtmlCanvasEditorProp
       };
       let validatedSourceInnerHtml: string | null = null;
       let validationSucceeded = false;
-      const command = {
-        type: "replace-editable-island" as const,
-        targetRef: active.rootTargetRef,
-        elementId: active.liveElementId ?? undefined,
-        beforeInnerHtml: previousInnerHtml,
-        nextInnerHtml,
-        expectedSourceSha256: active.projection.sourceSha256,
+      const operation = editableIslandTextOperation(sourceIndex, {
+        elementId: active.liveElementId ?? active.rootTargetRef.elementId ?? "",
+        baseRevision: semanticRevisionRef.current,
+        text: nextText,
+        contentHtml: nextInnerHtml,
+      });
+      const command: CanvasSourceCommand = {
+        type: "direct-semantic-operation",
+        operation,
       };
       const result = applySourceCommand(command, mutation, {
         islandTextCommit: {
@@ -5598,13 +5530,19 @@ const HtmlCanvasEditor = forwardRef<HtmlCanvasEditorHandle, HtmlCanvasEditorProp
           elementTargetId: targetBeforeMove.id,
         },
       };
-      return Boolean(applySourceCommand({
-        type: "reorder-sibling",
-        targetRef: sourceTargetRefForSelection(targetBeforeMove),
-        toIndex: nextIndex,
-        beforeOrder: [...sourceParent.childElementIds],
-        expectedSourceSha256: sourceIndex?.sourceSha256 || "",
-      }, mutation));
+      try {
+        return Boolean(applySourceCommand({
+          type: "direct-semantic-operation",
+          operation: siblingReorderOperation(sourceIndex, {
+            elementId: sourceElement.pagerootId,
+            toIndex: nextIndex,
+            baseRevision: semanticRevisionRef.current,
+          }),
+        }, mutation));
+      } catch (cause) {
+        reportBlockedEdit(cause);
+        return false;
+      }
     },
     [
       applySourceCommand,
@@ -6444,8 +6382,6 @@ const HtmlCanvasEditor = forwardRef<HtmlCanvasEditorHandle, HtmlCanvasEditorProp
     pendingHistoryBookmarkRef.current = null;
     pendingHistoryCanonicalFenceRef.current = false;
     nativeSessionNeedsCanonicalFenceRef.current = false;
-    lastEmittedHtmlRef.current = source;
-    pendingHtmlEchoesRef.current = [];
     const resumeTarget = bookmark
       ? target ?? bookmark.target
       : target;
@@ -6523,7 +6459,6 @@ const HtmlCanvasEditor = forwardRef<HtmlCanvasEditorHandle, HtmlCanvasEditorProp
     });
     if (!committed.ok) return committed;
     const frozenHtml = committed.html;
-    lastEmittedHtmlRef.current = frozenHtml;
     imperativeLockRef.current = true;
     lockedRef.current = true;
     readOnlyRef.current = true;
@@ -6715,6 +6650,9 @@ const HtmlCanvasEditor = forwardRef<HtmlCanvasEditorHandle, HtmlCanvasEditorProp
       getRenderedFrameGeneration: () => containerRef.current?.getAttribute("data-render-verified") === "true"
         ? frameLoadGenerationRef.current
         : null,
+      getRenderedFrameDocument: () => containerRef.current?.getAttribute("data-render-verified") === "true"
+        ? iframeRef.current?.contentDocument || null
+        : null,
       isCurrentProjectionEditable: () => !readOnlyRef.current
         && !lockedRef.current
         && renderedSourceHtmlRef.current === frameSourceHtmlRef.current
@@ -6792,39 +6730,75 @@ const HtmlCanvasEditor = forwardRef<HtmlCanvasEditorHandle, HtmlCanvasEditorProp
     if (!frameInitializedRef.current) {
       frameInitializedRef.current = true;
       loadFrameSource(html);
-      lastPropRef.current = { html, baseHref: documentBaseHref };
+      lastSourceReceiptRef.current = sourceReceipt;
+      lastPropRef.current = {
+        sessionIncarnation: sourceReceipt?.sessionIncarnation ?? null,
+        receiptSequence: sourceReceipt?.sequence ?? null,
+      };
       return;
     }
 
     const previous = lastPropRef.current;
-    if (previous.html === html) {
-      // A Finder rename or /var vs /private/var spelling change can update
-      // the file URL without changing Working HTML. That is not a new Canvas
-      // authority, and forceStatic would wipe a settled Runtime iframe while
-      // the live grant stays in place and never re-handoffs.
-      lastPropRef.current = { html, baseHref: documentBaseHref };
+    if (!isSourceReceipt(sourceReceipt)) {
       return;
     }
-    lastPropRef.current = { html, baseHref: documentBaseHref };
-
-    const echoIndex = pendingHtmlEchoesRef.current.indexOf(html);
-    if (echoIndex >= 0 && previous.baseHref === documentBaseHref) {
-      pendingHtmlEchoesRef.current.splice(0, echoIndex + 1);
-      lastEmittedHtmlRef.current = html;
+    const receiptSequence = sourceReceipt.sequence;
+    const previousReceipt = lastSourceReceiptRef.current;
+    const sameSessionIncarnation = Boolean(
+      previousReceipt
+      && sourceReceipt.sessionIncarnation === previousReceipt.sessionIncarnation,
+    );
+    if (
+      previousReceipt
+      && sourceReceipt.sessionIncarnation < previousReceipt.sessionIncarnation
+    ) {
+      // A rebuilt DocumentSession owns a newer incarnation even when its
+      // per-session sequence starts lower. Never let a late prop from an old
+      // incarnation replace the current physical frame.
       return;
     }
-    if (html === lastEmittedHtmlRef.current && previous.baseHref === documentBaseHref) return;
+    if (
+      sameSessionIncarnation
+      && (
+        (previous.receiptSequence !== null && receiptSequence < previous.receiptSequence)
+        || (previousReceipt && receiptSequence < previousReceipt.sequence)
+      )
+    ) {
+      // React may deliver an older controlled snapshot after a newer source
+      // operation. Receipt order, not HTML bytes, is the source fence.
+      return;
+    }
+    if (sameSessionIncarnation && previousReceipt && receiptSequence === previousReceipt.sequence) {
+      if (!sameSourceReceipt(sourceReceipt, previousReceipt)) return;
+      lastPropRef.current = {
+        sessionIncarnation: sourceReceipt.sessionIncarnation,
+        receiptSequence,
+      };
+      return;
+    }
+    if (sourceReceipt.origin !== "authority") {
+      if (sameSessionIncarnation && previousReceipt && !sameSourceReceiptContext(sourceReceipt, previousReceipt)) return;
+      lastSourceReceiptRef.current = sourceReceipt;
+      lastPropRef.current = {
+        sessionIncarnation: sourceReceipt.sessionIncarnation,
+        receiptSequence,
+      };
+      return;
+    }
+    lastSourceReceiptRef.current = sourceReceipt;
+    lastPropRef.current = {
+      sessionIncarnation: sourceReceipt.sessionIncarnation,
+      receiptSequence,
+    };
     if (activeNativeEditRef.current) detachNativeEditForFence();
     pendingHistoryBookmarkRef.current = null;
     pendingHistoryCanonicalFenceRef.current = false;
     resetSelection(false);
     pendingSelectionRef.current = null;
     pendingToolbarVisibleRef.current = false;
-    lastEmittedHtmlRef.current = null;
-    pendingHtmlEchoesRef.current = [];
-    // Workbench-owned HTML is a new source authority (adopted Version, disk
-    // reload, history). Echoes already returned above. Write the new bytes
-    // into static Active first so Canvas verify and edit unlock can finish
+    // Workbench-owned authority receipts (adopted Version, disk reload or
+    // recovery) retire the current frame. Write the new bytes into static
+    // Active first so Canvas verify and edit unlock can finish
     // without waiting for author Script. Hidden Candidates only refresh
     // scripts after that static frame is proven. Same mounted editor keeps a
     // minimal viewport anchor; it must not restore Caret, Range or a native
@@ -6842,6 +6816,7 @@ const HtmlCanvasEditor = forwardRef<HtmlCanvasEditorHandle, HtmlCanvasEditorProp
     previewAssetsReady,
     resetSelection,
     supersedeRuntimeRefreshPending,
+    sourceReceipt,
   ]);
 
   useEffect(() => {
@@ -8105,10 +8080,10 @@ const HtmlCanvasEditor = forwardRef<HtmlCanvasEditorHandle, HtmlCanvasEditorProp
           return;
         }
         nativeSelectionAfterStyle = activeNativeEdit.session.getSelection();
-        // Text-range formatting is a source operation because it may allocate
-        // persistent wrapper identities. Retire only the transient native
-        // host, apply the guarded SourcePatch in this same iframe, then resume
-        // the exact logical range without running author Script.
+        // Text-range formatting is a semantic source operation because it may
+        // allocate persistent wrapper identities. Retire only the transient
+        // native host, validate the Kernel result before publication in this
+        // same iframe, then resume the exact range without running author Script.
         const committed = finishNativeEditing(true, "style", {
           deferRuntimeRefresh: true,
         });
@@ -8180,53 +8155,16 @@ const HtmlCanvasEditor = forwardRef<HtmlCanvasEditorHandle, HtmlCanvasEditorProp
           return;
         }
         const beforeFacts = inlineStyleFacts(styleTarget, config.cssProperty);
-        const command = {
-          type: "set-text-range-style" as const,
-          targetRef: sourceTargetRefForSelection(activeRange.target),
-          segments: activeRange.segments,
-          property: config.cssProperty,
-          value,
-          ...(verifiedOverride.priority === "important" ? { important: true } : {}),
-          expectedSourceSha256: sourceIndex.sourceSha256,
-        };
+        let operation: SemanticOperation;
         try {
-          const previewPlan = planSourcePatch(command, sourceIndex);
-          if (!previewPlan) throw new Error("无法为当前文字格式生成安全 Patch。");
-          const createsRangeWrapper = previewPlan.patches.some(
-            (patch: { kind?: string }) => patch.kind === "text-range-style-open",
-          );
-          const sourceTextParents = createsRangeWrapper
-            ? sourceTextParentsForSegments(element, activeRange.segments, sourceIndex)
-            : [];
-          if (createsRangeWrapper && !sourceTextParents) {
-            reportBlockedEdit(new Error(
-              "当前文字的布局节点与源码映射不完整，本次格式修改已阻止。",
-            ));
-            resumeRejectedNativeStyle();
-            return;
-          }
-          const hasFlexOrGridTextParent = sourceTextParents?.some((parent) => (
-            ["flex", "inline-flex", "grid", "inline-grid"].includes(
-              parent.ownerDocument.defaultView?.getComputedStyle(parent).display || "",
-            )
-          ));
-          if (
-            createsRangeWrapper
-            && hasFlexOrGridTextParent
-          ) {
-            reportBlockedEdit(new Error(
-              "选区的直接文字容器使用 flex/grid，新包装会改变间距；本次格式修改已阻止。请选择已有的完整样式片段。",
-            ));
-            resumeRejectedNativeStyle();
-            return;
-          }
-          if (createsRangeWrapper && property === "backgroundColor") {
-            reportBlockedEdit(new Error(
-              "局部填充色需要新增可见盒子，可能改变原页间距；本次修改已阻止。选中已有完整样式片段时仍可修改。",
-            ));
-            resumeRejectedNativeStyle();
-            return;
-          }
+          operation = textRangeStyleOperation(sourceIndex, {
+            elementId: activeRange.target.elementId || "",
+            baseRevision: semanticRevisionRef.current,
+            segments: activeRange.segments,
+            property: config.cssProperty,
+            value,
+            important: verifiedOverride.priority === "important",
+          });
         } catch (cause) {
           reportBlockedEdit(cause);
           resumeRejectedNativeStyle();
@@ -8244,12 +8182,42 @@ const HtmlCanvasEditor = forwardRef<HtmlCanvasEditorHandle, HtmlCanvasEditorProp
           },
         };
         let unchanged = false;
-        const styled = applySourceCommand(command, mutation, {
+        const styled = applySourceCommand({
+          type: "direct-semantic-operation",
+          operation,
+        }, mutation, {
           onUnchanged: () => { unchanged = true; },
           validateResult: (candidate) => {
+            const createsRangeWrapper = textRangeStyleCreatesWrapper(candidate);
+            const sourceTextParents = createsRangeWrapper
+              ? sourceTextParentsForSegments(element, activeRange.segments, sourceIndex)
+              : [];
+            if (createsRangeWrapper && !sourceTextParents) {
+              throw new Error(
+                "当前文字的布局节点与源码映射不完整，本次格式修改已阻止。",
+              );
+            }
+            const hasFlexOrGridTextParent = sourceTextParents?.some((parent) => (
+              ["flex", "inline-flex", "grid", "inline-grid"].includes(
+                parent.ownerDocument.defaultView?.getComputedStyle(parent).display || "",
+              )
+            ));
+            if (createsRangeWrapper && hasFlexOrGridTextParent) {
+              throw new Error(
+                "选区的直接文字容器使用 flex/grid，新包装会改变间距；本次格式修改已阻止。请选择已有的完整样式片段。",
+              );
+            }
+            if (createsRangeWrapper && property === "backgroundColor") {
+              throw new Error(
+                "局部填充色需要新增可见盒子，可能改变原页间距；本次修改已阻止。选中已有完整样式片段时仍可修改。",
+              );
+            }
             const expectedTargetId = activeNativeEdit?.rootTargetRef.targetId
               ?? activeRange.target.id;
-            const operationTargetRef = candidate.refreshedTargetRefs.find(
+            const operationTargetRef = [
+              ...candidate.refreshedTargetRefs,
+              ...candidate.refreshedTrackedTargetRefs,
+            ].find(
               (targetRef: SourceTargetRef) => targetRef.targetId === expectedTargetId,
             );
             if (!operationTargetRef || operationTargetRef.resolution !== "exact") {
@@ -8262,6 +8230,10 @@ const HtmlCanvasEditor = forwardRef<HtmlCanvasEditorHandle, HtmlCanvasEditorProp
             );
           },
         });
+        if (!styled && !unchanged) {
+          resumeRejectedNativeStyle();
+          return;
+        }
         const resumed = Boolean(
           (styled || unchanged)
           && resumeNativeEditAfterStyle
@@ -8307,13 +8279,23 @@ const HtmlCanvasEditor = forwardRef<HtmlCanvasEditorHandle, HtmlCanvasEditorProp
         },
       };
       let unchanged = false;
+      let operation: SemanticOperation;
+      try {
+        operation = inlineStyleOperation(sourceIndexRef.current, {
+          elementId: target.elementId || "",
+          baseRevision: semanticRevisionRef.current,
+          property: config.cssProperty,
+          value,
+          important: verifiedOverride.priority === "important",
+        });
+      } catch (cause) {
+        reportBlockedEdit(cause);
+        resumeRejectedNativeStyle();
+        return;
+      }
       const styled = applySourceCommand({
-        type: "set-inline-style",
-        targetRef: sourceTargetRefForSelection(target),
-        property: config.cssProperty,
-        value,
-        ...(verifiedOverride.priority === "important" ? { important: true } : {}),
-        expectedSourceSha256: sourceIndexRef.current?.sourceSha256 || "",
+        type: "direct-semantic-operation",
+        operation,
       }, mutation, { onUnchanged: () => { unchanged = true; } });
       const resumed = Boolean(
         (styled || unchanged)

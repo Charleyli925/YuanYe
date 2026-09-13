@@ -923,7 +923,7 @@ export async function finalizeProjectFileAttempt({
     inputManifestSha256: record.inputManifestSha256,
     outputRelativePath: record.outputRelativePath,
     outputSha256,
-    status: outputSha256 === record.expectedSourceSha256 ? "no-change" : "completed",
+    status: "completed",
     completedAt: new Date().toISOString(),
   };
   const completionPath = path.join(requestRoot, "attempts", attempt, "completion.json");

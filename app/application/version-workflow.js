@@ -1,5 +1,6 @@
 import { decodeWorkspaceResponse } from "./workspace-controller-codecs.js";
 import { isBridgeRequestError } from "./bridge-client.js";
+import { verifyOpenTarget } from "./verified-project-context.js";
 import { planVersionActivate, planVersionPrepareReview } from "./version/review-plan.js";
 
 const SHA256 = /^sha256:[a-f0-9]{64}$/u;
@@ -166,8 +167,6 @@ export class VersionWorkflow {
       || typeof bridgeClient.versionFile !== "function"
       || typeof bridgeClient.source !== "function"
       || typeof bridgeClient.activateReadyVersion !== "function"
-      || typeof bridgeClient.continueEditingHistoryVersion !== "function"
-      || typeof bridgeClient.confirmEditingHistoryVersion !== "function"
     ) {
       throw new TypeError("VersionWorkflow requires its Version Bridge methods.");
     }
@@ -409,6 +408,53 @@ export class VersionWorkflow {
         "当前候选的完成资料不完整，不能打开。",
       );
     }
+    // A ready candidate from another Document must never reach Desktop. The
+    // candidate may still be structurally valid for its own frozen Request,
+    // but activating it against the current ProjectSession would otherwise
+    // let the Bridge mutate a destination that local Sessions cannot own.
+    try {
+      const readyTarget = this.#readyOpenTarget(ready);
+      const currentContext = this.#projectSession.context;
+      if (
+        !currentContext
+        || readyTarget.projectId !== currentContext.projectId
+        || readyTarget.documentId !== currentContext.documentId
+      ) {
+        if (currentContext) {
+          return succeeded({
+            current: false,
+            context: null,
+            versionId: ready.candidateVersionId,
+            candidateLabel: String(
+              ready.readyPayload?.candidateDisplayVersionLabel
+              || ready.candidateVersionLabel
+              || "",
+            ),
+            protocolViolation: Boolean(
+              ready.readyPayload?.protocolViolation
+              || ready.readyPayload?.outcome?.protocolViolation,
+            ),
+            committedSourcePath: ready.sourcePath,
+            lastModifiedAt: String(
+              ready.readyPayload?.lastModifiedAt
+              || ready.readyPayload?.outcome?.completedAt
+              || "",
+            ),
+          });
+        }
+        return blocked(
+          "VERSION_ACTIVATION_CONTEXT_MISMATCH",
+          "候选版本所属文档已不是当前编辑文档，本次采用已安全取消。",
+        );
+      }
+    } catch (cause) {
+      return this.#outcomeFromCause(
+        this.#nextOperationId("activation-context-validation"),
+        cause,
+        "VERSION_ACTIVATION_PAYLOAD_INVALID",
+        "当前候选的工作文件身份不完整，不能打开。",
+      );
+    }
     const hydratePlan = planVersionActivate({
       ready: true,
       projectHydrating: this.#projectWorkflow.projectHydrating,
@@ -439,18 +485,21 @@ export class VersionWorkflow {
     }
     const pending = this.#pendingActivations.get(operationKey);
     this.#runSession.trackRun({ ...ready, adoptionPhase: pending ? "unknown" : "applying", error: undefined });
+    let durableActivationOperationId = operation.operationId;
     try {
       const drained = pending ? { ok: true } : await this.#projectWorkflow.drain("history", { deadlineAt: this.#clock.now() + 15_000 });
       if (!this.#isNavigationCurrent(operation) || !this.#isCurrentReadyRun(ready)) return stale(this.#runIdentity(ready));
       if (!drained.ok) return blocked("ADOPTION_DRAFT_NOT_SAVED", drained.reason || "当前修改意见尚未保存，本次修改尚未采用。");
+      const readyCandidate = this.#readyCandidate(ready);
+      if (!readyCandidate) {
+        throw new Error("当前候选缺少经核对的 Candidate 身份，不能重放采用操作。");
+      }
       const readyTarget = this.#readyOpenTarget(ready);
       perfMark("pageroot:accept:promote-start");
       const activationRequest = pending?.request || {
         ...readyTarget,
-        candidateId: ready.readyPayload?.candidate?.candidateId || ready.candidateId || null,
-        ...(ready.readyPayload?.candidate?.candidateId || ready.candidateId ? {
-          decisionOperationId: `promote_${ready.readyPayload?.candidate?.candidateId || ready.candidateId}`,
-        } : {}),
+        candidateId: readyCandidate.candidateId,
+        decisionOperationId: `promote_${readyCandidate.candidateId}`,
         expectedSourceSha256: readyTarget.sourceSha256,
         sourcePath: ready.sourcePath,
         projectId: ready.projectId,
@@ -459,6 +508,16 @@ export class VersionWorkflow {
         attemptId: ready.attemptId,
         versionId: ready.candidateVersionId,
       };
+      if (
+        String(activationRequest.candidateId || "") !== readyCandidate.candidateId
+        || String(activationRequest.decisionOperationId || "")
+          !== `promote_${readyCandidate.candidateId}`
+      ) {
+        throw new Error("当前采用回执与 Candidate 身份不一致，不能重放旧操作。");
+      }
+      durableActivationOperationId = String(
+        activationRequest.decisionOperationId || operation.operationId,
+      );
       if (!pending) this.#pendingActivations.set(operationKey, { request: activationRequest, run: ready, reviewLease, timer: null, delay: 1000 });
       let activatedPayload;
       try {
@@ -468,8 +527,11 @@ export class VersionWorkflow {
         if (!this.#isNavigationCurrent(operation) || !this.#isCurrentReadyRun(ready)) return stale(this.#runIdentity(ready));
         activatedPayload = await this.#bridgeClient.activateReadyVersion(activationRequest);
       }
+      const activatedOpenTarget = this.#activatedOpenTarget(ready, activatedPayload);
       perfMark("pageroot:accept:promote-end");
-      if (!this.#isCurrentReadyRun(ready)) return stale(this.#runIdentity(ready));
+      if (!this.#isNavigationCurrent(operation) || !this.#isCurrentReadyRun(ready)) {
+        return stale(this.#runIdentity(ready));
+      }
       const opened = await this.#openCommittedVersion({
         run: ready,
         payload: {
@@ -478,9 +540,11 @@ export class VersionWorkflow {
           completion: ready.readyPayload.completion,
           outcome: ready.readyPayload.outcome,
           version: activatedPayload.version || ready.readyPayload.version,
+          openTarget: activatedOpenTarget,
         },
         reviewLease,
         operation,
+        activationOperationId: durableActivationOperationId,
       });
       if (opened.status !== "succeeded") return opened;
 
@@ -494,7 +558,7 @@ export class VersionWorkflow {
       return succeeded(value);
     } catch (cause) {
       if (isBridgeRequestError(cause) && cause.outcome === "unknown") {
-        return unknown(operation.operationId, "采用结果待确认，正在自动核对。请勿重复采用或结束本轮。");
+        return unknown(durableActivationOperationId, "采用结果待确认，正在自动核对。请勿重复采用或结束本轮。");
       }
       this.#clearPendingActivation(operationKey);
       const reason = ["SOURCE_HASH_CONFLICT", "CANDIDATE_SOURCE_CHANGED", "CANDIDATE_SOURCE_CONFLICT"].includes(errorCode(cause, ""))
@@ -508,7 +572,7 @@ export class VersionWorkflow {
         });
       }
       return this.#outcomeFromCause(
-        operation.operationId,
+        durableActivationOperationId,
         cause,
         "VERSION_ACTIVATION_REJECTED",
         reason,
@@ -880,7 +944,14 @@ export class VersionWorkflow {
         expectedSha256: sha256, nextProjectId: current.projectId, nextDocumentId: current.documentId,
         versionId: result.versionId, openTarget: target, operationId,
       });
-      if (!this.#isNavigationCurrent(operation)) return stale(current);
+      if (!this.#isNavigationCurrent(operation)) {
+        return prepared?.coordination?.operationId
+          ? unknown(
+            operationId,
+            "桌面工作文件已完成激活，但当前版本导航已经变化，请按同一操作重新核对。",
+          )
+          : stale(current);
+      }
       const nextContext = this.#projectWorkflow.commitManagedSourceTransition({
         prepared, html: content, sourceSha256: sha256,
         publishSessions: (publishedContext) => {
@@ -894,7 +965,11 @@ export class VersionWorkflow {
             composerAttachments: [], composerTarget: null, editSession: null });
         },
       });
-      if (!nextContext || !this.#projectSession.matches(nextContext)) return stale(current);
+      if (!nextContext || !this.#projectSession.matches(nextContext)) {
+        return prepared?.coordination?.operationId
+          ? unknown(operationId, "桌面工作文件已完成激活，但本地项目状态待同一操作核对。")
+          : stale(current);
+      }
       this.#setHistoryCreation({ phase: "opening", operationId, context: nextContext, result }, generation);
       await this.#canvasPort.verifyRendered(content, sha256, nextContext);
       if (!this.#isNavigationActive(operation) || !this.#projectSession.matches(nextContext)) return stale(nextContext);
@@ -911,6 +986,12 @@ export class VersionWorkflow {
       const active = this.#projectSession.context;
       const owner = active?.projectId === current.projectId && active?.documentId === current.documentId ? active : current;
       this.#setHistoryCreation({ phase: result?.status === "created" ? "open-failed" : "unknown", operationId, context: owner, result }, generation);
+      if (cause?.projectOutcome === "unknown") {
+        return unknown(
+          operationId,
+          this.#codecs.errorMessage(cause, "桌面工作文件已完成激活，但本地项目状态待同一操作核对。"),
+        );
+      }
       return result?.status === "created"
         ? rejected("HISTORY_CREATED_OPEN_FAILED", this.#codecs.errorMessage(cause, "新版本已创建，但打开失败。可以打开已创建版本。"))
         : unknown(operationId, "暂时无法确认创建结果，请查询同一操作。");
@@ -920,203 +1001,13 @@ export class VersionWorkflow {
     }
   }
 
-  // Compatibility only: old activation receipts and protocol regression tests.
-  // Product history Edit must use createVersionFromHistory/openCreatedHistoryVersion.
-  async continueEditingHistoryVersion({
-    versionId = this.#versionSession.snapshot.viewingVersionId,
-    context = this.#projectSession.context,
-    fromDeferred = false,
-  } = {}) {
-    if (this.#disposed) {
-      return blocked("VERSION_WORKFLOW_DISPOSED", "版本工作流已经停止。");
-    }
-    const current = copyContext(context);
-    const requestedVersionId = String(versionId || "");
-    if (!current || !this.#projectSession.matches(current)) {
-      return stale(current || {});
-    }
-    if (
-      this.#versionSession.snapshot.viewMode !== "history"
-      || this.#versionSession.snapshot.viewingVersionId !== requestedVersionId
-      || !/^ver_\d{4,}$/.test(requestedVersionId)
-    ) {
-      return blocked(
-        "VERSION_HISTORY_CONTINUE_PRECONDITION",
-        "请先只读查看一份明确的历史版本，再基于它继续编辑。",
-      );
-    }
-    if (this.#projectWorkflow.projectHydrating || this.#projectWorkflow.projectLoadError) {
-      return blocked(
-        "VERSION_HISTORY_CONTINUE_PROJECT_UNAVAILABLE",
-        "项目状态尚未准备完成，不能基于历史版本继续编辑。",
-      );
-    }
-    if (this.#runSession.activeLocked) {
-      return blocked(
-        "VERSION_HISTORY_CONTINUE_RUN_LOCKED",
-        "当前 AI 处理尚未完成，不能切换到历史工作文件。",
-      );
-    }
-    if (!fromDeferred) {
-      const deferred = this.#deferCanvasCommand(
-        "project-switch",
-        () => this.continueEditingHistoryVersion({
-          versionId: requestedVersionId,
-          context: current,
-          fromDeferred: true,
-        }),
-      );
-      if (deferred) return deferred;
-    }
-    const operation = this.#beginNavigation("history", current);
-    if (!operation) {
-      return blocked("VERSION_NAVIGATION_BUSY", "当前 HTML 视图正在切换，请稍后重试。");
-    }
-    let historyActivation = null;
-    let activationMayHaveCommitted = false;
-    try {
-      const frozen = this.#freezeCurrentCanvas(
-        "当前历史视图尚未完成安全收口，无法切换到历史工作文件。",
-      );
-      if (!frozen.ok) {
-        return blocked("VERSION_HISTORY_CONTINUE_CANVAS_FENCE", frozen.reason);
-      }
-      const continueHistory = () => this.#bridgeClient.continueEditingHistoryVersion({
-        sourcePath: current.sourcePath,
-        projectId: current.projectId,
-        documentId: current.documentId,
-        versionId: requestedVersionId,
-        operationId: operation.operationId,
-      });
-      let payload;
-      try {
-        payload = await continueHistory();
-      } catch (cause) {
-        if (!isBridgeRequestError(cause) || cause.outcome !== "unknown") throw cause;
-        // The Repository receipt is keyed by this operation, so a single
-        // bounded retry can recover a lost response without another switch.
-        activationMayHaveCommitted = true;
-        payload = await continueHistory();
-      }
-      activationMayHaveCommitted = true;
-      const resumed = this.#historyContinuationPayload(payload, current, requestedVersionId);
-      historyActivation = resumed.historyActivation;
-      if (!this.#isNavigationCurrent(operation)) {
-        return unknown(
-          historyActivation.operationId,
-          "历史工作文件已提交；请重试以完成桌面切换。",
-        );
-      }
-      if (await this.#hashPort.sha256(resumed.content) !== resumed.sha256) {
-        throw new Error("历史工作文件内容与声明 Hash 不一致，不能继续编辑。");
-      }
-      const prepared = await this.#projectWorkflow.prepareManagedSourceTransition({
-        previousSourcePath: current.sourcePath,
-        nextSourcePath: resumed.openTarget.exactSourcePath,
-        expectedSha256: resumed.sha256,
-        nextProjectId: current.projectId,
-        nextDocumentId: current.documentId,
-        versionId: requestedVersionId,
-        openTarget: resumed.openTarget,
-        operationId: historyActivation.operationId,
-      });
-      const confirmation = await this.#bridgeClient.confirmEditingHistoryVersion({
-        sourcePath: current.sourcePath,
-        projectId: current.projectId,
-        documentId: current.documentId,
-        previousWorkingCopyId: historyActivation.previousWorkingCopyId,
-        activatedWorkingCopyId: historyActivation.activatedWorkingCopyId,
-        versionId: historyActivation.versionId,
-        operationId: historyActivation.operationId,
-      });
-      this.#historyConfirmationPayload(confirmation, current, historyActivation);
-      if (!this.#isNavigationCurrent(operation)) {
-        return unknown(
-          historyActivation.operationId,
-          "历史工作文件已完成桌面激活；请重试以恢复编辑会话。",
-        );
-      }
-      const nextContext = this.#projectWorkflow.commitManagedSourceTransition({
-        prepared,
-        html: resumed.content,
-        sourceSha256: resumed.sha256,
-        publishSessions: (publishedContext) => {
-          this.#versionSession.hydrate({
-            versions: resumed.versions,
-            latestVersionId: resumed.latestVersionId,
-            currentBasedOnVersionId: requestedVersionId,
-            currentExactVersionId: resumed.currentExactVersionId,
-            restoredFromVersionId: resumed.restoredFromVersionId,
-          });
-          this.#versionSession.returnCurrent({
-            currentBasedOnVersionId: requestedVersionId,
-            currentExactVersionId: resumed.currentExactVersionId,
-            restoredFromVersionId: resumed.restoredFromVersionId,
-          });
-          this.#draftSession.replaceAuthority(
-            publishedContext,
-            resumed.draft.draftRevision,
-            resumed.draft,
-          );
-          this.#commentSession.update({
-            comments: resumed.comments,
-            changeEvents: resumed.changeEvents,
-            deletedCommentIds: resumed.draft.deletedCommentIds,
-            composerDraft: "",
-            composerCommentId: null,
-            composerAttachments: [],
-            composerTarget: null,
-            editSession: null,
-          });
-        },
-      });
-      if (!nextContext || !this.#projectSession.matches(nextContext)) return stale(current);
-      if (!this.#isNavigationActive(operation)) return stale(current);
-      await this.#canvasPort.verifyRendered(resumed.content, resumed.sha256, nextContext);
-      if (!this.#isNavigationActive(operation) || !this.#projectSession.matches(nextContext)) {
-        return stale(nextContext);
-      }
-      this.#documentWorkflow.clearAudit();
-      this.#documentSession.setPersistence({ state: "idle", error: "" });
-      this.#documentWorkflow.clearRecovery(nextContext);
-      this.#projectWorkflow.scheduleProjectListRefreshAfterSettlement(nextContext);
-      const value = {
-        context: nextContext,
-        versionId: requestedVersionId,
-        workingCopyId: resumed.openTarget.workingCopyId,
-        content: resumed.content,
-        sha256: resumed.sha256,
-        lastModifiedAt: resumed.lastModifiedAt,
-      };
-      this.#emitEvent({ type: "version-history-editing-continued", ...value });
-      return succeeded(value);
-    } catch (cause) {
-      if (
-        historyActivation
-        || activationMayHaveCommitted
-        || (isBridgeRequestError(cause) && cause.outcome === "unknown")
-      ) {
-        return unknown(
-          historyActivation?.operationId || operation.operationId,
-          this.#codecs.errorMessage(
-            cause,
-            "历史工作文件可能已经激活；请重试以安全恢复编辑会话。",
-          ),
-        );
-      }
-      return rejected(
-        errorCode(cause, "VERSION_HISTORY_CONTINUE_REJECTED"),
-        this.#codecs.errorMessage(
-          cause,
-          "没有切换到历史工作文件；原来的历史视图仍保持不变。",
-        ),
-      );
-    } finally {
-      this.#finishNavigation(operation);
-    }
-  }
-
-  async #openCommittedVersion({ run, payload, reviewLease, operation }) {
+  async #openCommittedVersion({
+    run,
+    payload,
+    reviewLease,
+    operation,
+    activationOperationId = null,
+  }) {
     perfMark("pageroot:accept:open-start");
     const completion = this.#committedPayload(run, payload);
     const committedSourcePath = String(
@@ -1161,11 +1052,13 @@ export class VersionWorkflow {
     const sourceSha256 = source.sourceSha256;
     const resolvedCommittedSourcePath = source.sourcePath;
     const lastModifiedAt = source.lastModifiedAt;
+    const contentHash = await this.#hashPort.sha256(content);
+    if (!this.#isNavigationCurrent(operation)) return stale(this.#runIdentity(run));
     if (
       versionSha256 !== completion.expectedSha256
       || sourceSha256 !== completion.expectedSha256
       || !SHA256.test(versionSha256)
-      || await this.#hashPort.sha256(content) !== versionSha256
+      || contentHash !== versionSha256
     ) {
       throw new Error("版本快照、源 HTML 与完成记录的 Hash 不一致，已停止打开。");
     }
@@ -1174,10 +1067,30 @@ export class VersionWorkflow {
       throw new Error("当前源 HTML 缺少独立的最后修改时间，已停止打开。");
     }
 
+    // Current/background classification and any canvas/recovery mutation must
+    // use the response's complete authority tuple. Never borrow project,
+    // document, path, hash, or version identity from the frozen run or a
+    // surrounding workspace when the response omits or mismatches it.
+    const verifiedOpenTarget = verifyOpenTarget(payload.openTarget, {
+      projectId: run.projectId,
+      documentId: run.documentId,
+      sourcePath: resolvedCommittedSourcePath,
+      sourceSha256,
+      sameSourcePath: this.#codecs.sameSourcePath,
+      targetKind: "working-copy",
+    });
+    if (
+      !verifiedOpenTarget
+      || String(verifiedOpenTarget.versionId || "") !== String(completion.versionId || "")
+    ) {
+      throw new Error("已生成版本的工作文件 OpenTarget 不完整或身份不一致，已停止打开。");
+    }
+
     const activeContext = this.#projectSession.context;
     const affectsCurrentCanvas = Boolean(
       activeContext
       && activeContext.projectId === run.projectId
+      && activeContext.documentId === run.documentId
       && (
         this.#codecs.sameSourcePath(activeContext.sourcePath, run.sourcePath)
         || this.#codecs.sameSourcePath(activeContext.sourcePath, resolvedCommittedSourcePath)
@@ -1208,9 +1121,27 @@ export class VersionWorkflow {
       nextProjectId: run.projectId,
       nextDocumentId: run.documentId,
       versionId: completion.versionId,
-      openTarget: payload.openTarget || null,
+      openTarget: verifiedOpenTarget,
+      operationId: activationOperationId || operation.operationId,
     });
-    if (!this.#isNavigationCurrent(operation)) return stale(this.#runIdentity(run));
+    if (!this.#isNavigationCurrent(operation)) {
+      return prepared?.coordination?.operationId
+        ? unknown(
+          activationOperationId || operation.operationId,
+          "版本工作文件已完成激活，但当前版本导航已经变化，请按同一操作重新核对。",
+        )
+        : stale(this.#runIdentity(run));
+    }
+    if (
+      prepared?.updatesCurrentProject
+      && !this.#codecs.sameSourcePath(run.sourcePath, resolvedCommittedSourcePath)
+      && prepared?.activatedProject?.sha256 !== sourceSha256
+    ) {
+      return unknown(
+        activationOperationId || operation.operationId,
+        "桌面工作文件已返回，但本地项目状态缺少同一 Hash 的完整回执。",
+      );
+    }
     if (!prepared.updatesCurrentProject) {
       this.#projectWorkflow.scheduleProjectListRefreshAfterSettlement(
         this.#projectSession.context,
@@ -1240,7 +1171,14 @@ export class VersionWorkflow {
         });
       },
     });
-    if (!context || !this.#projectSession.matches(context)) return stale(this.#runIdentity(run));
+    if (!context || !this.#projectSession.matches(context)) {
+      return prepared?.coordination?.operationId
+        ? unknown(
+          activationOperationId || operation.operationId,
+          "版本工作文件已完成激活，但本地项目状态待同一操作核对。",
+        )
+        : stale(this.#runIdentity(run));
+    }
     perfMark("pageroot:accept:commit-end");
 
     // Durable promotion and complete Session publication are the user-facing
@@ -1257,7 +1195,9 @@ export class VersionWorkflow {
 
     await this.#canvasPort.verifyRendered(content, versionSha256, context);
     perfMark("pageroot:accept:canvas-verified");
-    if (!this.#projectSession.matches(context)) return stale(context);
+    if (!this.#isNavigationActive(operation) || !this.#projectSession.matches(context)) {
+      return stale(context);
+    }
 
     this.#documentWorkflow.clearAudit();
     this.#documentSession.setPersistence({ state: "idle", error: "" });
@@ -1393,18 +1333,48 @@ export class VersionWorkflow {
     const target = isRecord(run?.readyPayload?.openTarget)
       ? run.readyPayload.openTarget
       : null;
+    const verifiedTarget = verifyOpenTarget(target, {
+      projectId: run?.projectId,
+      documentId: run?.documentId,
+      sourcePath: run?.sourcePath,
+      sourceSha256: run?.baseSnapshotSha256 || run?.sourceSha256 || null,
+      sameSourcePath: this.#codecs.sameSourcePath,
+      targetKind: "working-copy",
+    });
+    if (!verifiedTarget) {
+      throw new Error("候选版本缺少其所属项目的完整工作文件身份，不能从其他项目借用当前页面。");
+    }
+    return verifiedTarget;
+  }
+
+  #activatedOpenTarget(run, payload) {
+    const candidateHash = this.#candidateHash(run, "");
+    const responseVersionId = String(payload?.versionId || "");
+    const responseSourcePath = String(
+      payload?.sourcePath
+      || payload?.currentPath
+      || payload?.workingCopyPath
+      || "",
+    );
+    const target = verifyOpenTarget(payload?.openTarget, {
+      projectId: run?.projectId,
+      documentId: run?.documentId,
+      sourcePath: responseSourcePath || null,
+      sourceSha256: candidateHash,
+      sameSourcePath: this.#codecs.sameSourcePath,
+      targetKind: "working-copy",
+    });
     if (
       !target
-      || target.targetKind !== "working-copy"
-      || String(target.projectId || "") !== String(run.projectId || "")
-      || String(target.documentId || "") !== String(run.documentId || "")
-      || !String(target.projectRootPath || "")
-      || !String(target.workingCopyId || "")
-      || !String(target.exactSourcePath || "")
-      || !this.#codecs.sameSourcePath(target.exactSourcePath, run.sourcePath)
-      || !SHA256.test(String(target.sourceSha256 || ""))
+      || !SHA256.test(candidateHash)
+      || !responseVersionId
+      || responseVersionId !== String(run?.candidateVersionId || "")
+      || target.versionId !== responseVersionId
+      || String(payload?.projectId || "") !== String(run?.projectId || "")
+      || String(payload?.documentId || "") !== String(run?.documentId || "")
+      || (responseSourcePath && !this.#codecs.sameSourcePath(target.exactSourcePath, responseSourcePath))
     ) {
-      throw new Error("候选版本缺少其所属项目的完整工作文件身份，不能从其他项目借用当前页面。");
+      throw new Error("Candidate Promotion 返回的工作文件 OpenTarget 不完整或身份不一致。");
     }
     return target;
   }
@@ -1459,115 +1429,6 @@ export class VersionWorkflow {
     ) {
       throw new Error("当前源 HTML 的项目身份发生变化，已拒绝切换视图。");
     }
-  }
-
-  #historyContinuationPayload(payload, context, versionId) {
-    const openTarget = isRecord(payload?.openTarget) ? payload.openTarget : null;
-    const sha256 = String(
-      payload?.currentHtmlSha256
-      || payload?.sourceSha256
-      || openTarget?.sourceSha256
-      || "",
-    );
-    const content = String(payload?.content || "");
-    const latestVersionId = String(payload?.latestVersionId || "");
-    const decodedWorkspace = decodeWorkspaceResponse(payload, this.#codecs);
-    const versions = decodedWorkspace.versions;
-    const historyActivation = isRecord(payload?.historyActivation)
-      ? payload.historyActivation
-      : null;
-    const operationId = String(historyActivation?.operationId || "");
-    const previousWorkingCopyId = historyActivation?.previousWorkingCopyId;
-    const activatedWorkingCopyId = String(historyActivation?.activatedWorkingCopyId || "");
-    if (
-      payload?.ok !== true
-      || payload?.status !== "history-working-copy-activated"
-      || String(payload?.projectId || "") !== context.projectId
-      || String(payload?.documentId || "") !== context.documentId
-      || String(payload?.currentBasedOnVersionId || "") !== versionId
-      || !openTarget
-      || openTarget.targetKind !== "working-copy"
-      || String(openTarget.projectId || "") !== context.projectId
-      || String(openTarget.documentId || "") !== context.documentId
-      || String(openTarget.versionId || "") !== versionId
-      || !String(openTarget.workingCopyId || "")
-      || !String(openTarget.projectRootPath || "")
-      || !String(openTarget.exactSourcePath || "")
-      || String(payload?.sourcePath || "") !== String(openTarget.exactSourcePath)
-      || String(openTarget.sourceSha256 || "") !== sha256
-      || !SHA256.test(sha256)
-      || !content
-      || !/^ver_\d{4,}$/.test(latestVersionId)
-      || !versions
-      || !versions.some((version) => version.id === versionId)
-      || !historyActivation
-      || String(historyActivation.projectId || "") !== context.projectId
-      || String(historyActivation.documentId || "") !== context.documentId
-      || String(historyActivation.versionId || "") !== versionId
-      || !/^[A-Za-z0-9_-]{8,160}$/.test(operationId)
-      || !["desktop-pending", "desktop-confirmed"].includes(historyActivation.state)
-      || !validTimestamp(historyActivation.createdAt)
-      || String(payload?.operationId || "") !== operationId
-      || (
-        previousWorkingCopyId !== null
-        && !/^work_ver_\d{4,}$/.test(String(previousWorkingCopyId || ""))
-      )
-      || !/^work_ver_\d{4,}$/.test(activatedWorkingCopyId)
-      || activatedWorkingCopyId !== String(openTarget.workingCopyId)
-      || !validTimestamp(payload?.lastModifiedAt)
-    ) {
-      throw new Error("历史继续编辑响应缺少完整、同一项目的工作文件身份。");
-    }
-    const { draft, comments, changeEvents } = decodedWorkspace;
-    return Object.freeze({
-      openTarget,
-      historyActivation: Object.freeze({
-        operationId,
-        projectId: context.projectId,
-        documentId: context.documentId,
-        previousWorkingCopyId,
-        activatedWorkingCopyId,
-        versionId,
-        state: String(historyActivation.state),
-        createdAt: String(historyActivation.createdAt),
-      }),
-      content,
-      sha256,
-      latestVersionId,
-      versions,
-      currentExactVersionId: payload.currentExactVersionId
-        ? String(payload.currentExactVersionId)
-        : null,
-      restoredFromVersionId: payload.restoredFromVersionId
-        ? String(payload.restoredFromVersionId)
-        : null,
-      lastModifiedAt: String(payload.lastModifiedAt),
-      draft,
-      comments,
-      changeEvents,
-    });
-  }
-
-  #historyConfirmationPayload(payload, context, activation) {
-    const confirmed = isRecord(payload?.historyActivation) ? payload.historyActivation : null;
-    if (
-      payload?.ok !== true
-      || payload?.status !== "history-working-copy-desktop-confirmed"
-      || String(payload?.projectId || "") !== context.projectId
-      || String(payload?.documentId || "") !== context.documentId
-      || String(payload?.operationId || "") !== activation.operationId
-      || !confirmed
-      || String(confirmed.operationId || "") !== activation.operationId
-      || String(confirmed.projectId || "") !== context.projectId
-      || String(confirmed.documentId || "") !== context.documentId
-      || confirmed.previousWorkingCopyId !== activation.previousWorkingCopyId
-      || String(confirmed.activatedWorkingCopyId || "") !== activation.activatedWorkingCopyId
-      || String(confirmed.versionId || "") !== activation.versionId
-      || confirmed.state !== "desktop-confirmed"
-    ) {
-      throw new Error("历史工作文件桌面确认响应缺少完整的一致回执。");
-    }
-    return confirmed;
   }
 
   #settleActivatedRun(run, value) {
@@ -1679,9 +1540,31 @@ export class VersionWorkflow {
       || run.status !== "ready-to-open"
       || !run.readyPayload
       || !run.candidateVersionId
+      || !this.#readyCandidate(run)
       || !this.#isCurrentReadyRun(run)
     ) return null;
     return run;
+  }
+
+  #readyCandidate(run) {
+    const payload = isRecord(run?.readyPayload) ? run.readyPayload : null;
+    const candidate = isRecord(payload?.candidate) ? payload.candidate : null;
+    const candidateId = String(payload?.candidateId || "");
+    if (
+      !candidate
+      || !/^candidate_[A-Za-z0-9_-]{8,160}$/u.test(candidateId)
+      || String(candidate.candidateId || "") !== candidateId
+      || String(run?.projectId || "") !== String(candidate.projectId || "")
+      || String(run?.documentId || "") !== String(candidate.documentId || "")
+      || String(run?.requestId || "") !== String(candidate.requestId || "")
+      || String(run?.attemptId || "") !== String(candidate.attemptId || "")
+      || String(run?.candidateVersionId || "") !== String(candidate.proposedVersionId || "")
+      || (
+        run?.sourceWorkingCopyId
+        && String(run.sourceWorkingCopyId) !== String(candidate.sourceWorkingCopyId || "")
+      )
+    ) return null;
+    return Object.freeze({ ...candidate, candidateId });
   }
 
   #isCurrentReadyRun(run) {
@@ -1762,7 +1645,10 @@ export class VersionWorkflow {
 
   #outcomeFromCause(operationId, cause, fallbackCode, fallbackReason) {
     const reason = this.#codecs.errorMessage(cause, fallbackReason);
-    if (isBridgeRequestError(cause) && cause.outcome === "unknown") {
+    if (
+      (isBridgeRequestError(cause) && cause.outcome === "unknown")
+      || cause?.projectOutcome === "unknown"
+    ) {
       return unknown(operationId, reason);
     }
     return rejected(errorCode(cause, fallbackCode), reason);

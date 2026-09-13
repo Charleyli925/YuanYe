@@ -1,3 +1,6 @@
+import { loadWorkbenchModel } from "./helpers/workbench-model-loader.mjs";
+const commentModel = await loadWorkbenchModel("comment-model");
+const { commentVisualTarget } = commentModel;
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -130,6 +133,8 @@ function createHarness({
     persistedSourceSha256: SOURCE_SHA256,
   }),
   bridge = {},
+  codecs = {},
+  recoveryStore = memoryRecoveryStore(),
 } = {}) {
   const projectSession = new ProjectSession();
   const locator = projectSession.openLocator(SOURCE_PATH);
@@ -178,7 +183,7 @@ function createHarness({
   };
   const draftSession = new DraftSession({
     bridgeClient: client,
-    encodeComment: (value) => value,
+    encodeComment: codecs.persistedComment || ((value) => value),
     encodeChangeEvent: (value) => value,
   });
   if (context) draftSession.activate(context, 0, serverDraft);
@@ -231,9 +236,10 @@ function createHarness({
       }),
       commentEditSessionHasChanges,
       errorMessage: (cause, fallback) => String(cause?.message || fallback),
+      ...codecs,
     },
     ports: {
-      recoveryStore: memoryRecoveryStore(),
+      recoveryStore,
       attachmentBinary: {
         async prepare(file, { includeDataBase64 }) {
           return {
@@ -345,6 +351,8 @@ test("lazy registration ignores a non-composer working-copy refresh", async () =
   const outcome = await pending;
   assert.equal(outcome.status, "succeeded");
   assert.equal(outcome.value.comment.text, "不会被无关同步取消。");
+  assert.equal(Object.hasOwn(outcome.value.comment, "target"), false);
+  assert.equal(outcome.value.comment.sourceAnchor.elementId, target().elementId);
 });
 
 test("attachment batches retain successful files while reporting individual failures", async () => {
@@ -439,7 +447,7 @@ test("cancelling an edit cleans only attachments staged during that edit", () =>
       commentId: "comment_edit",
       createdAt: "2026-08-11T00:00:00.000Z",
       updatedAt: "2026-08-11T00:00:00.000Z",
-      target: target("target_comment_edit"),
+      sourceAnchor: target("target_comment_edit"),
       text: "原评论",
       attachments: [baseline],
       basedOnVersionId: "V1",
@@ -494,7 +502,7 @@ test("an unknown Draft POST reconciles authority without a second mutation", asy
     commentId: "comment_unknown",
     createdAt: "2026-08-11T00:00:00.000Z",
     updatedAt: "2026-08-11T00:00:00.000Z",
-    target: target("target_unknown"),
+    sourceAnchor: target("target_unknown"),
     text: "保留这条评论",
     basedOnVersionId: "V1",
   }]);
@@ -537,7 +545,7 @@ test("rebindCommentTarget is the unique comment-location commit path", () => {
     commentId: "comment_rebind",
     createdAt: "2026-08-11T00:00:00.000Z",
     updatedAt: "2026-08-11T00:00:00.000Z",
-    target: target("target_old"),
+    sourceAnchor: target("target_old"),
     text: "位置失效",
     basedOnVersionId: "V1",
   }]);
@@ -549,8 +557,8 @@ test("rebindCommentTarget is the unique comment-location commit path", () => {
   assert.equal(outcome.status, "succeeded");
   assert.equal(outcome.value.target.id, "target_old");
   assert.equal(outcome.value.target.selector, "main p");
-  assert.equal(harness.commentSession.comments[0].target.id, "target_old");
-  assert.equal(outcome.value.comment.target.resolution, "exact");
+  assert.equal(harness.commentSession.comments[0].sourceAnchor.id, "target_old");
+  assert.equal(outcome.value.comment.sourceAnchor.resolution, "exact");
 });
 
 test("relinking a runtime comment to a source target clears the old visual hint", () => {
@@ -560,10 +568,6 @@ test("relinking a runtime comment to a source target clears the old visual hint"
     commentId: "comment_runtime_to_source",
     createdAt: "2026-08-11T00:00:00.000Z",
     updatedAt: "2026-08-11T00:00:00.000Z",
-    target: {
-      ...runtimeTarget(sourceHost, "财务数据表", "table:nth-of-type(1)"),
-      id: "target_runtime_to_source",
-    },
     sourceAnchor: sourceHost,
     visualHint: runtimeTarget(sourceHost, "财务数据表", "table:nth-of-type(1)").visualHint,
     text: "运行时评论",
@@ -576,10 +580,10 @@ test("relinking a runtime comment to a source target clears the old visual hint"
   });
   assert.equal(outcome.status, "succeeded");
   const rebound = harness.commentSession.comments[0];
-  assert.equal(rebound.target.selector, "main p");
+  assert.equal(commentVisualTarget(rebound).selector, "main p");
   assert.equal(rebound.sourceAnchor.selector, "main p");
   assert.equal(Object.hasOwn(rebound, "visualHint"), false);
-  assert.equal(Object.hasOwn(rebound.target, "visualHint"), false);
+  assert.equal(Object.hasOwn(commentVisualTarget(rebound), "visualHint"), false);
 });
 
 test("relinking between runtime objects replaces the visual hint", () => {
@@ -591,7 +595,6 @@ test("relinking between runtime objects replaces the visual hint", () => {
     commentId: "comment_runtime_pair",
     createdAt: "2026-08-11T00:00:00.000Z",
     updatedAt: "2026-08-11T00:00:00.000Z",
-    target: { ...firstRuntime, id: "target_runtime_pair" },
     sourceAnchor: sourceHost,
     visualHint: firstRuntime.visualHint,
     text: "运行时评论",
@@ -606,7 +609,7 @@ test("relinking between runtime objects replaces the visual hint", () => {
   const rebound = harness.commentSession.comments[0];
   assert.equal(rebound.visualHint.label, "利润数据表");
   assert.equal(rebound.visualHint.relativePath, "table:nth-of-type(2)");
-  assert.equal(rebound.target.label, "利润数据表");
+  assert.equal(commentVisualTarget(rebound).label, "利润数据表");
 });
 
 test("relinking a source comment to a runtime object adds a new visual hint", () => {
@@ -616,7 +619,6 @@ test("relinking a source comment to a runtime object adds a new visual hint", ()
     commentId: "comment_source_to_runtime",
     createdAt: "2026-08-11T00:00:00.000Z",
     updatedAt: "2026-08-11T00:00:00.000Z",
-    target: sourceHost,
     sourceAnchor: sourceHost,
     text: "源码评论",
     basedOnVersionId: "V1",
@@ -630,7 +632,9 @@ test("relinking a source comment to a runtime object adds a new visual hint", ()
   assert.equal(outcome.status, "succeeded");
   const rebound = harness.commentSession.comments[0];
   assert.equal(rebound.visualHint.kind, "table");
-  assert.equal(rebound.target.visualHint.relativePath, "table:nth-of-type(1)");
+  assert.equal(Object.hasOwn(rebound, "target"), false);
+  assert.equal(Object.hasOwn(rebound.sourceAnchor, "visualHint"), false);
+  assert.equal(commentVisualTarget(rebound).visualHint.relativePath, "table:nth-of-type(1)");
   assert.equal(rebound.sourceAnchor.elementId, sourceHost.elementId);
 });
 
@@ -640,7 +644,7 @@ test("beginEdit and confirmEdit keep an exclusive editing session", () => {
     commentId: "comment_edit_intent",
     createdAt: "2026-08-11T00:00:00.000Z",
     updatedAt: "2026-08-11T00:00:00.000Z",
-    target: target("target_edit_intent"),
+    sourceAnchor: target("target_edit_intent"),
     text: "原评论",
     basedOnVersionId: "V1",
   }]);
@@ -691,20 +695,17 @@ test("deleting a source subtree removes its saved comments and draft in one dura
     comments: [
       {
         commentId: "comment_removed_root",
-        target: { ...target("target_removed_root"), elementId: removedRootId },
         sourceAnchor: { ...target("target_removed_root"), elementId: removedRootId },
         text: "删除根元素时一起删除",
         attachments: [rootAttachment],
       },
       {
         commentId: "comment_removed_child",
-        target: { ...target("target_removed_child"), elementId: removedChildId },
         sourceAnchor: { ...target("target_removed_child"), elementId: removedChildId },
         text: "删除后代元素时一起删除",
       },
       {
         commentId: "comment_survives",
-        target: { ...target("target_survives"), elementId: survivingId },
         sourceAnchor: { ...target("target_survives"), elementId: survivingId },
         text: "保留",
       },
@@ -748,4 +749,83 @@ test("deleting a source subtree removes its saved comments and draft in one dura
     harness.draftWrites.at(-1).comments.map((comment) => comment.commentId),
     ["comment_survives"],
   );
+});
+
+
+test("restoring canonical comments never publishes an empty durable draft between recovery fields", async (t) => {
+  const h = createHarness({ codecs: {
+    persistedComment: commentModel.persistedComment,
+    commentsFromRecords: commentModel.commentsFromRecords,
+  } });
+  t.after(() => h.workflow.dispose());
+  h.commentSession.update({
+    composerCommentId: "comment_restore", composerTarget: target(), composerDraft: "保留这条评论。",
+  });
+  assert.equal((await h.workflow.commitComment({ commentId: "comment_restore" })).status, "succeeded");
+  assert.equal((await h.workflow.flushDraft()).status, "succeeded");
+  const server = (await h.client.workspace()).runtimeState.draft;
+  assert.equal(server.comments.length, 1);
+  const writesBeforeRestore = h.draftWrites.length;
+  h.draftSession.deactivate();
+  h.commentSession.reset();
+  h.draftSession.activate(h.projectSession.context, server.draftRevision, server);
+  const recovered = h.workflow.recoverDraft({
+    context: h.projectSession.context,
+    serverComments: commentModel.commentsFromRecords(server.comments),
+    serverEvents: [], serverDraftRevision: server.draftRevision,
+    serverDeletedCommentIds: server.deletedCommentIds,
+    serverAppliedOperationIds: server.appliedOperationIds,
+    serverBasedOnVersionId: "V1",
+  });
+  assert.equal(h.draftWrites.length, writesBeforeRestore, "reading recovery must not publish an intermediate empty write");
+  h.commentSession.update(recovered);
+  assert.equal((await h.workflow.flushDraft()).status, "succeeded");
+  const after = (await h.client.workspace()).runtimeState.draft;
+  assert.deepEqual(after.comments, server.comments);
+  assert.equal(after.draftRevision, server.draftRevision);
+  assert.equal(h.commentSession.comments[0].text, "保留这条评论。");
+});
+
+
+test("unapplied recovery publishes tombstones and later text together", async (t) => {
+  const recoveryStore = memoryRecoveryStore();
+  const h = createHarness({ recoveryStore, codecs: {
+    persistedComment: commentModel.persistedComment,
+    commentsFromRecords: commentModel.commentsFromRecords,
+  } });
+  t.after(() => h.workflow.dispose());
+  for (const commentId of ["comment_keep", "comment_delete"]) {
+    h.commentSession.update({ composerCommentId: commentId, composerTarget: target(), composerDraft: commentId });
+    assert.equal((await h.workflow.commitComment({ commentId })).status, "succeeded");
+    assert.equal((await h.workflow.flushDraft()).status, "succeeded");
+  }
+  const server = (await h.client.workspace()).runtimeState.draft;
+  const context = h.projectSession.context;
+  const keys = [`html-ai-draft-recovery:${context.documentId}`, `html-ai-draft-recovery:${context.sourcePath}`];
+  const local = recoveryStore.readRecords(keys)[0].value;
+  const operationId = "draftop_pending_local_restore_0001";
+  recoveryStore.write(keys, {
+    ...local, operationId, baseDraftRevision: server.draftRevision,
+    comments: local.comments.filter((comment) => comment.commentId === "comment_keep")
+      .map((comment) => ({ ...comment, text: "恢复后的最新要求", updatedAt: "2099-01-01T00:00:00.000Z" })),
+    deletedCommentIds: ["comment_delete"],
+  });
+  const writesBeforeRestore = h.draftWrites.length;
+  h.draftSession.deactivate();
+  h.commentSession.reset();
+  h.draftSession.activate(context, server.draftRevision, server);
+  const recovered = h.workflow.recoverDraft({
+    context, serverComments: commentModel.commentsFromRecords(server.comments),
+    serverDraftRevision: server.draftRevision, serverEvents: [],
+    serverDeletedCommentIds: server.deletedCommentIds,
+    serverAppliedOperationIds: server.appliedOperationIds, serverBasedOnVersionId: "V1",
+  });
+  assert.equal(h.draftWrites.length, writesBeforeRestore);
+  assert.deepEqual(recovered.deletedCommentIds, ["comment_delete"]);
+  h.commentSession.update(recovered);
+  assert.equal((await h.workflow.flushDraft()).status, "succeeded");
+  const after = (await h.client.workspace()).runtimeState.draft;
+  assert.deepEqual(after.comments.map((comment) => [comment.commentId, comment.text]), [["comment_keep", "恢复后的最新要求"]]);
+  assert.deepEqual(after.deletedCommentIds, ["comment_delete"]);
+  assert.equal(h.draftWrites.slice(writesBeforeRestore).every((write) => write.comments.length === 1), true);
 });

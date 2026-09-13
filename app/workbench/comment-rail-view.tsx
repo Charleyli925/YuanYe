@@ -16,8 +16,7 @@ import { XIcon } from "@phosphor-icons/react/dist/csr/X";
 
 import { shouldSubmitCommentOnEnter } from "../lib/comment-rail-layout.js";
 import {
-  commentSourceAnchor,
-  commentVisualHintForSelection,
+  commentVisualTarget,
   insertionLabel,
   isExplicitGlobalCommentTarget,
 } from "./comment-model";
@@ -579,12 +578,8 @@ export const CommentRailView = memo(function CommentRailView({
               const index = sortedVisibleCommentItems.findIndex(
                 (item) => item.commentId === comment.commentId,
               );
-              const sourceTarget = commentSourceAnchor(comment) || comment.target;
-              const visualHint = comment.visualHint
-                || commentVisualHintForSelection(comment.target);
-              const displayTarget = visualHint
-                ? { ...sourceTarget, label: visualHint.label, visualHint }
-                : sourceTarget;
+              const sourceTarget = comment.sourceAnchor;
+              const displayTarget = commentVisualTarget(comment);
               const editable = viewMode === "current" && !interactionLocked;
               const editing = (
                 editingCommentId === comment.commentId
@@ -603,7 +598,7 @@ export const CommentRailView = memo(function CommentRailView({
               const targetLayout = commentTargetLayouts[sourceTarget.id];
               const targetResolution =
                 targetLayout?.resolution ?? sourceTarget.resolution;
-              const targetLocatable = commentTargetIsLocatable(comment.target);
+              const targetLocatable = commentTargetIsLocatable(comment.sourceAnchor);
               return (
                 <article
                   className="comment-card"

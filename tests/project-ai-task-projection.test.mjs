@@ -92,6 +92,7 @@ test("AI task projections are re-creatable, collision-safe and never Candidate a
   const promoted = await value.repository.promoteCandidate({
     target: imported.target,
     candidateId: request.candidateId,
+    decisionOperationId: `promote_${request.candidateId}`,
   });
   assert.equal(promoted.version.versionId, "ver_0002");
   assert.equal(await readFile(rebuilt.candidatePath, "utf8"), candidateHtml);

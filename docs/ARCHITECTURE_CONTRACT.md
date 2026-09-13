@@ -64,8 +64,11 @@ The renderer's main workspace facts are partitioned as follows:
 
 - `ProjectSession`: open/registered identity, generation and query fencing;
 - `DocumentSession`: current HTML bytes, Hash, edit/persist revisions,
-  persistence projection, pending write, flush single flight, Canvas authority
-  generation and exact-byte reconciliation at persistence boundaries;
+  persistence projection, pending write, flush single flight, monotonic source
+  receipts with a session incarnation, Canvas authority generation and
+  exact-byte reconciliation at persistence boundaries. A receipt binds origin,
+  operation, edit revision, Canvas generation, source Hash and the complete
+  Project/session context;
 - `CommentSession`: disposable comment working copy, composer, tombstones and
   saved-comment edit session;
 - `DraftSession`: acknowledged Draft revision, pending mutation and
@@ -83,7 +86,17 @@ The renderer's main workspace facts are partitioned as follows:
 - `RunSession`: current/background run projections, per-Request Agent delivery
   status, background outcomes, the one preparing/frozen/uncertain submission
   lock, and operation locks. ACP events remain bounded presentation facts and
-  never become completion authority;
+  never become completion authority. Request origin includes project/document
+  and the known source Working Copy; pending projection identity includes the
+  existing submission token. Locator-scoped run, result, handoff,
+  copied/recovered and outcome facts share one internal aggregate entry; active
+  presentation retains locator keys only and projects from that entry. A newer
+  Request/Attempt replaces the locator's attempt facts atomically and rejects
+  late old-attempt writers. Locator rebind never selects a whole project's runs,
+  changes the Request origin when Promotion creates a new Working Copy, or
+  adds fact fields to the frozen public snapshot. The narrow locator revision
+  and prepare/commit seams are coordination-only; they publish no additional
+  Session facts and preserve the ordinary method semantics;
 - `RunWorkflow`: ticketless Agent diagnosis for Settings, pre-Request Agent use-time check, Request freeze/persisted-boundary
   verification, final-saved-HTML text-locator preflight, safely fenced same-Request
   Agent start/retry, unknown-POST authority reconciliation, tracked-run polling,
@@ -156,14 +169,15 @@ The renderer's main workspace facts are partitioned as follows:
 - `VersionSession`: immutable Version records, verified immutable history preview bytes, plus the current/history
   projection facts;
 - `VersionWorkflow`: Version operation identity/generation, Bridge version
-  reads and activation mutation, review-candidate preparation, historical
-  Working Copy continuation, manual historical creation/result reconciliation, complete project/document/version/OpenTarget
+  reads and activation mutation, review-candidate preparation, validated opening
+  of manually created historical Versions, manual historical creation/result reconciliation, complete project/document/version/OpenTarget
   identity and Hash validation, synchronous cross-Session publication, and
   read-only history verification and projection publication. History reads never
   publish through DocumentSession; return-current removes that projection and
-  delegates external-file observation to DocumentWorkflow without reloading bytes. A committed historical
-  activation recovers forward through its receipt; it never restores V6 over
-  durable V2 state. It publishes through `ProjectSession`,
+  delegates external-file observation to DocumentWorkflow without reloading bytes. A validated
+  manually created-history open recovers forward through its creation receipt;
+  disk-only legacy activation replay never restores V6 over durable V2 state.
+  It publishes through `ProjectSession`,
   `DocumentSession`, `VersionSession`, `DraftSession` and `CommentSession`; it
   never owns a second mutable Version store. Manual creation journals and their
   manifest commit remain in ProjectFileRepository; creation receipts do not
@@ -177,8 +191,8 @@ The renderer's main workspace facts are partitioned as follows:
 - `ProjectWorkflow`: hydration generation/load outcome, picker/external/switch
   operation identity, accepted-result execution, close request lifecycle,
   project-switch publication, typed source-rename transition and the unified
-  managed-source prepare/commit handoff used by Candidate promotion, historical
-  Working Copy continuation and future Registry opens. The command fences/drains
+  managed-source prepare/commit handoff used by Candidate promotion, validated
+  opening of manually created historical Versions and future Registry opens. The command fences/drains
   existing owners, validates the expected source Hash and trusted desktop result
   (including lost-response reconciliation), then synchronously publishes through
   existing Session owners. It is an operation owner, not a second owner of any
@@ -205,14 +219,20 @@ forwards typed workflow events through `subscribeEvents()`; it does not create a
 second mutable store. It owns the unique `DrainCoordinator`, protocol Sessions,
 and Project, Comment, Run, Version and Workbench Tabs workflow composition.
 Capability facets such as `controller.comments`, `controller.runs`,
-`controller.navigation` and the narrow
-`controller.projectCatalog` projection are stable views of this same
+`controller.navigation`, `controller.conversation`, `controller.projectRules`,
+`controller.shell` and the narrow `controller.projectCatalog` projection are stable views of this same
 Controller instance. A facet exposes only `getSnapshot`, `subscribe` and typed
 business commands; it neither stores copied facts nor exposes another
 capability. React capability containers subscribe to facets directly so local
 draft or focus updates do not publish through the Workbench composition root.
-The aggregate contract remains available during migration and for genuinely
-cross-capability presentation.
+The complete aggregate remains current for operation-time reads and existing
+Application coordinators. Workbench renders `controller.shell`, a stable,
+explicit presentation projection: it has no Conversation record/messages/draft,
+comment composer/edit draft text, PROJECT.md text, or Agent narration/clock/byte
+fields. It retains only cross-capability source, identity, lifecycle, errors and
+comment structure (including empty/nonempty composer text). This single previous
+projection reuses owner references; it is not a store, authority cache or stale
+full snapshot. Workbench has no aggregate subscription or comparator fallback.
 
 Comment geometry is a disposable presentation port, not Controller or Session
 state. `HtmlCanvasEditor` publishes source-tagged layout snapshots to one stable
@@ -226,13 +246,20 @@ but it must not subscribe its composition render to comment presentation changes
 open/switch actions and the existing version-tree context. There is no
 user-facing project management panel, `controller.projects` presentation facet
 or `projectPanelPort`. `ProjectRulesSession` and `ProjectRulesWorkflow` retain
-the durable rules facts and safe lifecycle commands, but rules editing,
-version-detail presentation, Finder/export actions and history-preview entry
-points are not exposed through a drawer or a React editor container.
-`RunConversationOutlet` subscribes `controller.runs`; public Agent narration
-and its timestamps therefore commit only the conversation region. Workbench's
-aggregate comparator still publishes run identity, lifecycle, phase and error
-changes needed by cross-capability locks and navigation.
+the durable rules facts and safe lifecycle commands. The existing rules page
+reads their Controller facet; it does not gain version-detail, Finder/export,
+history-preview or other project-management commands.
+`RunConversationOutlet` subscribes `controller.runs` and `controller.conversation`;
+public Agent narration, timestamps, received bytes, messages and draft text update
+only that region. The root conversation hook owns visibility and document-load
+lifecycle, not local facts. Before a new load effect runs, the outlet rejects a
+snapshot from another project/document. Close preparing/ready disables the draft
+through shell lifecycle; the existing Controller command fence and Conversation
+Workflow drain remain authoritative. `ProjectRulesEditorPage` subscribes
+`controller.projectRules` directly and retains its existing local IME/selection
+state; shell never passes filtered full rules text to the editor. Shell continues
+to publish run identity, lifecycle, phase and errors, rules status/composition and
+comment structure needed by cross-capability locks and navigation.
 `WorkbenchTabBarContainer` subscribes `controller.navigation` and owns tab
 commands, keyboard shortcuts and post-close focus restoration. Startup restore,
 Registry reconciliation and tab persistence enter through Controller-owned
@@ -242,8 +269,8 @@ pending-write payload nor a Promise crosses into Workbench.
 
 Workbench owns only cross-capability presentation state and narrow host
 adapters. Capability-local presentation state belongs in its container.
-Workbench receives the aggregate snapshot, stable facets and Controller
-commands, never a business Session or the
+Workbench renders its narrow shell snapshot and stable facets, and uses Controller
+commands plus live aggregate reads within operations, never a business Session or the
 Bridge client. Its direct-Bridge allowance is exactly 0: the checked architecture
 gate permits no `bridgeClient.*` call, generic Bridge-command escape, business
 Session/Workflow construction or Session ref in Workbench. The gate also forbids React,
@@ -362,16 +389,37 @@ Version authority, HTML bytes and Hash. The publication phase contains no
 `CommentSession`, then invalidates prior Canvas acknowledgements. Publishing
 only the path, only the Hash or any other partial combination is forbidden.
 
-The history “continue editing” command is not a Version restore or snapshot
-write. It accepts only the current project identity, one `versionId` and an
-operation ID; Repository chooses the one matching existing Working Copy after
-validating its state and immutable snapshot, atomically records V2 as active
-with a `desktop-pending` receipt, and confirms that receipt only after Desktop
-activation. If a Bridge, Desktop or confirmation response is lost, the same
-receipt operation is safe to replay and must resolve to the same `workingCopyId`;
-it must not roll durable V2 back to V6. A background Candidate carries its own
-complete OpenTarget and may never use whichever target happens to be mounted in
-the foreground.
+Initial registration additionally records a Controller-owned, operation-bound
+publication continuation as soon as local Project/Run authority commits. Its
+monotonic cursor makes Document receipt, Version, Comment, Draft, recovery
+identity, source history and event publication idempotent. `ensureRegistered`
+must resume this receipt before any existing-context or Draft-only shortcut;
+managed Desktop activation and `/project/ensure` are not repeated. Before the
+core Project/Run/Document/Version/Draft/Comment tuple is complete, aggregate
+observers retain the last complete tuple and expose only registration status.
+True navigation retires the receipt, but a same-document Working Copy Hash
+refresh may advance it only from `DocumentWorkflow`'s current persisted
+authority. A first autosave that receives an unknown post-commit result rekeys
+its latest pending write and SourceHistory evidence to the registered context;
+its next drain resumes registration before writing bytes. Late comments are
+rebound from the live working copy, while an edit from a still-presented frame
+whose HTML differs from the registered authority is rejected until the new
+Canvas receipt is presented. Canvas ACK cleanup, recovery-store projection and
+version-summary refresh are rebuildable effects: their failure is diagnostic
+and cannot turn completed source authority back into an unknown write.
+
+The current UI has no history “continue editing” command. Manual history work
+first creates an immutable Version under one durable creation operation, then
+`openCreatedHistoryVersion` re-queries that same receipt and validates its full
+project/document/version/Working Copy/OpenTarget/HTML/Hash tuple before using
+the ordinary managed-source transition. A lost creation or opened acknowledgement
+is reconciled under the same operation and never recreates the Version or rolls a
+newer Working Copy back. The old `/history-version/continue` route is disk-only
+compatibility: it may only read and replay an already-existing `historyActivation`
+receipt after complete identity and immutable-snapshot validation. It cannot
+create a receipt or change the active Working Copy. A background Candidate
+carries its own complete OpenTarget and may never use whichever target happens
+to be mounted in the foreground.
 
 ## Canvas target contract
 
@@ -423,7 +471,7 @@ deferrable projections: the renderer publishes Project/Document/Version/Draft/
 Comment authority and confirms Working Copy activation first, then schedules
 the list refresh behind the current context fence. A slow or failed catalog
 scan therefore cannot reorder the Repository mutation queue ahead of a
-confirmation or downgrade a completed rename/continuation to unknown.
+confirmation or downgrade a completed rename/created-history open to unknown.
 
 `AI任务/` is intentionally outside every authority chain. Once a durable
 Request or verified Candidate already exists, the Repository validates the
@@ -463,13 +511,20 @@ Request-relative paths. A failed attachment or bundle validation stops before
 public `request.json` and Runtime authority are published, and the copy is
 never a hard link to the mutable Draft.
 
-Edit and preview surfaces acknowledge the exact Canvas authority generation and
-rendered source Hash. Acknowledgements are disposable and generation-fenced;
-they never become source authority. The safe-save projection requires both the
-persisted Document revision/Hash and the currently visible surface
-acknowledgement. A missing acknowledgement triggers at most one Canvas rebuild;
-a clean source mismatch triggers at most one authoritative reread before that
-rebuild. Neither recovery path delegates internal reconciliation to the user.
+Edit and preview surfaces observe the exact source receipt, rendered HTML,
+rendered Hash and physical frame generation. `DocumentWorkflow` is the only
+production confirmer; Canvas returns observations and WorkspaceController
+forwards them without mutating source authority. Observations are disposable and fenced by the
+receipt session incarnation/sequence, origin, Canvas generation and complete
+Project/session context; old, duplicate or cross-document observations are
+discarded and never become source authority. Local/history receipts keep the
+mounted iframe, while every authority receipt advances Canvas generation and
+requires a fresh physical frame, including when the HTML bytes are equal. The safe-save projection
+requires both the persisted Document revision/Hash and the currently visible
+surface acknowledgement. A missing acknowledgement triggers at most one
+Canvas rebuild; a clean source mismatch triggers at most one authoritative
+reread before that rebuild. Neither recovery path delegates internal
+reconciliation to the user.
 
 The preview-to-edit `PageViewContext` is a non-durable projection owned by the
 Workbench for one current document key and preview generation. It contains
@@ -484,9 +539,11 @@ renders source-static content, but desktop may choose one bounded direct author
 runtime before the initial editable frame becomes interactive. The sole
 `EditAuthorRuntimeSession`, composed by `WorkspaceController`, keys the attempt
 to `(sourcePath, canvasGeneration)` rather than an autosave revision, source
-echo or comment state. A same-directory path-only rename that keeps the same
-HTML, source SHA and canvas generation relocates that live key and does not
-consume another prepare. It accepts one exact persisted-source prepare result
+echo or comment state. The Session can relocate an explicitly equivalent
+same-generation key without consuming another prepare, but an accepted Finder
+or source-authority locator transition never uses that capability: it publishes
+a fresh authority receipt, advances generation and rebuilds the physical Canvas.
+It accepts one exact persisted-source prepare result
 only for the same source SHA and generation; a late old result is revoked and a
 settled session cannot prepare again. The stable attempt key is distinct from
 the latest retry identity: every valid refresh observes current Working HTML,
@@ -782,7 +839,9 @@ before/after Hash, source path and bootstrap mode. Comment collections and
 the current Review session are applied after a cache hit; they are not cache
 identity and never authorize Candidate adoption. The multi-entry cache is
 byte bounded at 32 MiB for those source facts only, not a second full prepared
-copy. Parsing and annotation yield between phases,
+copy. The retired shell callback/document builder and unused prepared-copy size
+estimator are absent; only complete formal projection publishes Review pages.
+Parsing and annotation yield between phases,
 and stale work stops before publication. Complete, valid and unique
 `data-pageroot-id` enables exact persistent continuity and current-frame visual
 enhancement. Absent, partial, malformed or duplicate identity makes visual
@@ -790,6 +849,15 @@ enhancement `unsupported`, but does not cancel source Review: the existing
 semantic matcher remains the historical-source fallback. When Stable-ID
 continuity exists, it distinguishes insertion from reorder and cross-parent
 movement while added/removed subtrees retain the outermost-only rule.
+
+Only pure-style evidence referenced by a `visual-change` focus region and by
+that region's corresponding `ReviewChange.evidenceStableIds` enters the optional
+outline observation plan. Text, element presence/movement, ordinary attributes,
+mixed evidence and `never` outline regions create no observation request, result
+Map or deadline. The plan is derived once per formal document pair by the existing
+paint-plan module; it owns no source facts. The challenged ports still carry
+source projection and comment highlighting even when no observation is needed,
+and each frame reload repeats the existing identity/generation handshake.
 
 Every planned observation settles internally to `changed`, `unchanged` or
 `unverified`, but those verdicts neither replace deterministic position-bound
@@ -820,15 +888,27 @@ Topology groups common IDs by source parent in one pass before sibling-order
 analysis, and each parent's identified-child indexes are built once. Per-parent
 rescans of the complete inventory and per-child rescans of siblings are forbidden.
 Analysis-local signature caches and projection facts are
-disposable; a trusted 25th distinct fact is an explicit analysis failure, while
-an oversized serialized payload fails closed rather than being treated as a
-complete review.
+disposable. Only the actual `ReviewProjectionFactOverflowError` from a trusted
+25th distinct canonical fact degrades optional annotations. After that failure,
+the analyzer reparses both original sources, clears reserved markup and repeats
+panel/action pairing; it never serializes the partially annotated DOM. The same
+formal comment-binding, serializer and bootstrap pipeline builds the pages.
+Transient `annotationAvailability: unavailable` retains visual source binding
+and evidence, with empty changes, outline and focus groups; the toolbar says
+“变化标注暂不可用，可直接查看前后页面。” instead of claiming equality.
+Cancellation discards the result before publication or cache insertion. Unknown
+errors, forged error codes, exact-atom/transport budgets, parse/pair/serialization
+and bootstrap failures remain failures; none enter a catch-all or old shell path.
 
 Exact completed review entries survive unrelated tab applications; only stale
 in-flight analysis is cancelled. Candidate-ready state does not start analysis;
 only the explicit Review command may populate the cache and it waits for complete analyzed documents before opening;
-a Candidate with diagnostics but no position-bound change stays outside Review
-and uses the existing no-effective-page-change result.
+a Candidate with diagnostics but no position-bound change opens the same Review.
+Candidate eligibility depends on validated identity, hashes, paths and preview
+construction, never a nonempty change list. Empty facts keep the overview,
+null focus and no initial navigation; the existing explicit decision workflow
+retains all adoption checks. Exact HTML equality is a content fact, not proof
+of equal runtime pixels or fulfilled comments.
 
 Successful Candidate adoption and stale Review invalidation clear the prepared
 document cache immediately. Unmounting the Review workspace then releases its
@@ -848,11 +928,12 @@ and browser Review use the same static contract.
 Each change owns a side-specific `ReviewPresentation` derived from its actual
 marker/evidence host. Ordered reveal steps currently admit a panel key and a
 Stable-ID-bound `<details>` ancestor. Review coordinates both disposable frames,
-waits for their presentation acknowledgements, then focuses the first change;
+waits for their presentation acknowledgements, then may navigate to the first
+locatable change without activating focus. Empty facts start no navigation;
 no reveal state is persisted to source. Review renders no non-blocking visual
 status, scope card, candidate-attention notice or global Toast. A new Review
-session hides the AI conversation once; an explicit user reopen remains visible
-for that session.
+session opens the existing AI conversation decision panel; the user may close
+and reopen it without replacing that Review session.
 
 Comment location remains a separate private capability. An opaque initial
 bootstrap binding may identify a frozen before target for comment geometry, but
@@ -943,6 +1024,15 @@ Text, style, sibling reorder, insert, duplicate, delete and cross-parent move
 already use this boundary. Canvas publishes the kernel's single SourcePatch
 materialization, including tracked comment and selection target mappings;
 SourcePatch is not a second public apply. Persistence checks remain independent.
+Element-level style, text-range style and same-parent up/down intents construct
+the existing semantic operations directly; their old Canvas SourcePatch
+command adapters are retired. The kernel's materialization type and exact
+patches drive local projection. When a range needs wrappers, the same Kernel
+materialization allocates their IDs and returns that evidence; Canvas inspects
+the result for flex/grid and visible-background layout safety before publishing
+source. Editable islands now use the same semantic apply directly; their live
+line-break ID reconciliation is only a post-acceptance projection step under
+the expected-mutation guard.
 Repository and Desktop Main do not own
 or persist the semantic revision or the current-open history stack.
 
@@ -979,17 +1069,23 @@ including comment-aware same-parent reorder, so no valid move/delete/insert/
 replacement can authorize an additional source change. The shared planner also
 owns the safe parent boundary and explicit-end/void/source-self-closing sibling
 preconditions, preventing Repository from accepting a reorder Canvas rejects.
-Native editable-island `<br>` nodes receive fresh IDs in the accepted Canvas
-plan before `setText` is formed, and Repository binds that operation to one
-exact target-content patch and the shared materializer's normalized
-`contentHtml`; multiple new line breaks must retain their declared allocation
-order, not merely the same ID set. Deleting a hard break retires that break
-identity with the node; other persistent element identities remain fail-closed. Canvas copies only
-those accepted IDs onto the matching live line-break objects under its expected
-mutation guard. The controller first proves the prior live DOM still equals its
-owned canonical draft, then proves the reconciled live DOM equals the newly
-saved canonical island before advancing both owned and baseline state without a
-page reload; this identity update does not grant Runtime source authority. Plain
+Native editable-island input forms `setText` with logical text and canonical
+`contentHtml` but no `createdPagerootIds`. When IDs are absent, the Kernel runs
+the fresh editable-island planner and passes the caller's `randomUUID` through
+to `materializeEditableIslandHtml`; the ordered IDs it allocates become
+`allocation.allocatedElementIds` and are sealed into the accepted operation
+only after Canvas validation. A replay operation with IDs uses the existing
+exact-ID path. Repository binds the sealed operation to one exact
+target-content patch and the shared materializer's normalized `contentHtml`;
+multiple new line breaks must retain their declared allocation order, not merely
+the same ID set. Deleting a hard break retires that break identity with the
+node; other persistent element identities remain fail-closed. Canvas copies
+only Kernel-returned IDs onto matching live line-break objects under its
+expected-mutation guard. The controller first proves the prior live DOM still
+equals its owned canonical draft, then proves the reconciled live DOM equals the
+newly saved canonical island before advancing both owned and baseline state
+without a page reload; this identity update does not grant Runtime source
+authority. Plain
 `setText` uses one shared Canvas/Repository planner that rejects void/raw-text
 targets and binds the exact target range, original bytes, canonical escaped
 text bytes and patch kind; decoded-equivalent entities and extra patches fail
@@ -1087,7 +1183,10 @@ Working Copy selects one official resolver contract: only the valid unique
 SourceIndex ID entry may resolve. Tag changes retain that identity; deletion
 or a missing/invalid ID is orphaned without heuristic fallback. Selector,
 ancestor-fingerprint, source-offset and text-affix scoring are not an official
-result and are not retained as a shadow path. Incomplete identity HTML may
+result and are not retained as a shadow path. Insertion targets likewise require
+a valid unique parent ID; exact source boundaries and prefix/suffix rebind may
+only locate a child boundary inside that same identified parent. They cannot
+choose or replace the parent. Incomplete identity HTML may
 resolve the same-revision source-anchor only; it cannot rebound across a
 hash change and cannot enable direct Canvas edit. A source target that survives while its
 current Canvas projection cannot display it remains the same target with a
@@ -1187,7 +1286,9 @@ Source durability and detach protection are separate facts. A failed/conflict
 source write may resolve the reversible switch/close obligation only after
 `DocumentWorkflow` writes and reads back the exact current revision from the
 Main-owned recovery journal (or verifies an exact export receipt) and matches
-`workingHtmlSha256 === canvasRenderedSha256 === protectionHtmlSha256`.
+`workingHtmlSha256 === workingSourceSha256 === protectionHtmlSha256`, where
+`workingSourceSha256` comes from the complete frozen source, not the disposable
+rendered projection.
 `persistedSourceSha256` remains the last disk-confirmed Hash and is not required
 to equal those three values after a failed write. That evidence never changes
 `persistState` to `idle`,
@@ -1207,6 +1308,13 @@ window creation; bounded scans isolate corrupt entries and Start lists only
 verified summaries. Draft, PROJECT.md, attachment and other non-HTML drains
 retain their existing owner-specific policies and are not reclassified as HTML
 protection evidence by this contract.
+
+For a switch, `DocumentWorkflow` captures an operation-local context, epoch,
+revision and immutable HTML reference after the Canvas fence. After the aggregate
+is drained, that owner verifies the same context and bytes and rereads current
+persistence/recovery evidence. `ProjectWorkflow` consumes the result; it does
+not reconstruct save authority from DocumentSession fields or cache a successful
+result for later operations. A changed source or document must be checked anew.
 
 After the aggregate drains, `ProjectWorkflow` asks `DocumentWorkflow` to
 reconcile source close readiness against the independently hashed frozen HTML

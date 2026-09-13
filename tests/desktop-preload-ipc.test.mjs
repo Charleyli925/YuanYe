@@ -1317,6 +1317,7 @@ test("preload exposes a clean product error without IPC implementation details",
     error: {
       code: "PERMISSION_DENIED",
       message: "没有访问该位置的权限，请选择其他位置。",
+      details: { operationId: "operation_0001", reason: "destination" },
     },
   }));
 
@@ -1325,10 +1326,109 @@ test("preload exposes a clean product error without IPC implementation details",
     (error) => {
       assert.equal(error.code, "PERMISSION_DENIED");
       assert.equal(error.message, "没有访问该位置的权限，请选择其他位置。");
+      assert.deepEqual(JSON.parse(JSON.stringify(error.details)), {
+        operationId: "operation_0001",
+        reason: "destination",
+      });
+      assert.equal("stack" in error, false);
+      assert.equal("channel" in error, false);
       assert.doesNotMatch(
         error.message,
         /Error invoking remote method|html-projects:|ProjectFileError|stack/i,
       );
+      return true;
+    },
+  );
+});
+
+test("preload preserves only a validated public reclassification confirmation", async () => {
+  const api = await loadPreload(async () => ({
+    protocol: PROJECT_IPC_PROTOCOL,
+    version: PROJECT_IPC_VERSION,
+    ok: false,
+    error: {
+      code: "OPEN_INTENT_RECLASSIFIED",
+      message: "这个文件之前已经导入过了，请确认后打开之前的项目。",
+      details: {
+        confirmation: {
+          openKind: "confirmation",
+          requestId: "req_reclassified",
+          classification: "known-external",
+          sourceFileName: "产品首页.html",
+          visibleV1FileName: "产品首页.html",
+          projectsRootLabel: "HTML编辑器",
+          projectName: "产品首页",
+          currentBasedOnVersionId: null,
+          currentBasedOnOrdinal: 0,
+          latestOfficialVersionId: null,
+          latestOfficialOrdinal: 0,
+          currentDiffersFromBase: false,
+          sourceRelation: "unchanged",
+          sourcePath: "/private/secret.html",
+          nested: { secret: "do-not-forward" },
+        },
+        safeReason: "reclassified",
+        unknownNested: { channel: "html-projects:open" },
+      },
+    },
+  }));
+
+  await assert.rejects(
+    api.openHtml(),
+    (error) => {
+      assert.equal(error.code, "OPEN_INTENT_RECLASSIFIED");
+      assert.deepEqual(JSON.parse(JSON.stringify(error.details)), {
+        confirmation: {
+          openKind: "confirmation",
+          requestId: "req_reclassified",
+          classification: "known-external",
+          sourceFileName: "产品首页.html",
+          projectName: "产品首页",
+          currentBasedOnVersionId: null,
+          currentBasedOnOrdinal: 0,
+          latestOfficialVersionId: null,
+          latestOfficialOrdinal: 0,
+          currentDiffersFromBase: false,
+          sourceRelation: "unchanged",
+        },
+        safeReason: "reclassified",
+      });
+      assert.doesNotMatch(JSON.stringify(error), /secret|channel|html-projects|sourcePath/u);
+      return true;
+    },
+  );
+
+  const forgedCodeApi = await loadPreload(async () => ({
+    protocol: PROJECT_IPC_PROTOCOL,
+    version: PROJECT_IPC_VERSION,
+    ok: false,
+    error: {
+      code: "PERMISSION_DENIED",
+      message: "拒绝访问。",
+      details: {
+        confirmation: {
+          openKind: "confirmation",
+          requestId: "req_reclassified",
+          classification: "known-external",
+          sourceFileName: "产品首页.html",
+          visibleV1FileName: "产品首页.html",
+          projectsRootLabel: "HTML编辑器",
+          projectName: "产品首页",
+          currentBasedOnVersionId: null,
+          currentBasedOnOrdinal: 0,
+          latestOfficialVersionId: null,
+          latestOfficialOrdinal: 0,
+          currentDiffersFromBase: false,
+          sourceRelation: "unchanged",
+        },
+      },
+    },
+  }));
+  await assert.rejects(
+    forgedCodeApi.openHtml(),
+    (error) => {
+      assert.equal(error.code, "PERMISSION_DENIED");
+      assert.equal(error.details, undefined);
       return true;
     },
   );

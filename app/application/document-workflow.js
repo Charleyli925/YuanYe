@@ -3,14 +3,28 @@ import { createDocumentWorkflowCodecs } from "./document-workflow-codecs.js";
 import {
   planDocumentEnqueue,
   planDocumentSave,
+  planDocumentLeaveReadiness,
+  planDocumentLeaveAfterDrain,
+  planDocumentLeaveProtection,
 } from "./document/save-plan.js";
 import {
   copyProjectContext as copyContext,
   verifyProjectContext,
 } from "./verified-project-context.js";
+import {
+  isSourceReceipt,
+  sameSourceReceipt,
+} from "./document-session.js";
 
 const AUTOSAVE_DELAY_MS = 100;
 const SHA256 = /^sha256:[a-f0-9]{64}$/u;
+
+function composerTargetForDisplay(sourceTarget, selection) {
+  const visualHint = selection?.visualHint;
+  return visualHint
+    ? { ...sourceTarget, label: visualHint.label, visualHint }
+    : sourceTarget;
+}
 
 function isNativeEditCheckpoint(mutation) {
   return Boolean(
@@ -55,6 +69,26 @@ function stale(context) {
 function revision(value) {
   const next = Number(value);
   return Number.isSafeInteger(next) && next >= 0 ? next : 0;
+}
+
+function canvasRenderObservation(value) {
+  if (
+    !value
+    || typeof value !== "object"
+    || !isSourceReceipt(value.receipt)
+    || typeof value.renderedHtml !== "string"
+    || !SHA256.test(String(value.renderedSha256 || ""))
+    || !SHA256.test(String(value.receipt.sourceSha256 || ""))
+    || value.receipt.sourceSha256 !== String(value.renderedSha256)
+    || !Number.isSafeInteger(Number(value.frameGeneration))
+    || Number(value.frameGeneration) < 0
+  ) return null;
+  return Object.freeze({
+    receipt: value.receipt,
+    renderedHtml: value.renderedHtml,
+    renderedSha256: String(value.renderedSha256),
+    frameGeneration: Number(value.frameGeneration),
+  });
 }
 
 function sourceErrorCode(cause, fallback) {
@@ -104,17 +138,6 @@ function sameOpenRoute(left, right, sameSourcePath) {
   );
 }
 
-function commentSourceTarget(comment) {
-  return comment?.sourceAnchor || comment?.target || null;
-}
-
-function commentTargetForDisplay(sourceTarget, comment) {
-  const visualHint = comment?.visualHint || comment?.target?.visualHint;
-  return visualHint
-    ? { ...sourceTarget, label: visualHint.label, visualHint }
-    : sourceTarget;
-}
-
 function invalidAcknowledgement(message, code) {
   const error = new Error(message);
   error.code = code;
@@ -141,6 +164,7 @@ function identityMatches(left, right, sameSourcePath) {
 export class DocumentWorkflow {
   #bridgeClient;
   #ensureRegistered;
+  #registrationPending;
   #projectSession;
   #documentSession;
   #commentSession;
@@ -170,6 +194,7 @@ export class DocumentWorkflow {
   constructor({
     bridgeClient,
     ensureRegistered,
+    registrationPending = () => false,
     projectSession,
     documentSession,
     commentSession,
@@ -191,6 +216,9 @@ export class DocumentWorkflow {
     }
     if (typeof ensureRegistered !== "function") {
       throw new TypeError("DocumentWorkflow requires project registration authority.");
+    }
+    if (typeof registrationPending !== "function") {
+      throw new TypeError("DocumentWorkflow registration reconciliation must be a function.");
     }
     if (!projectSession || typeof projectSession.matches !== "function") {
       throw new TypeError("DocumentWorkflow requires ProjectSession injection.");
@@ -236,6 +264,7 @@ export class DocumentWorkflow {
 
     this.#bridgeClient = bridgeClient;
     this.#ensureRegistered = ensureRegistered;
+    this.#registrationPending = registrationPending;
     this.#projectSession = projectSession;
     this.#documentSession = documentSession;
     this.#commentSession = commentSession;
@@ -273,6 +302,82 @@ export class DocumentWorkflow {
 
   get recoveryCheckpoint() {
     return this.#recoveryCheckpoint;
+  }
+
+  inspectLeaveReadiness({ hasPendingNativeEdit = false } = {}) {
+    const document = this.#documentSession.snapshot;
+    const plan = planDocumentLeaveReadiness({
+      obligationsResolved: !this.#disposed,
+      hasPendingNativeEdit,
+      hasHistoryAction: this.hasHistoryAction,
+      persistState: document.persistState,
+      pendingWrite: document.hasPendingWrite,
+      flushInFlight: document.isFlushing,
+      editRevision: document.editRevision,
+      lastPersistedRevision: document.lastPersistedRevision,
+      sourcePath: this.#projectSession.sourcePath,
+      persistedSourceSha256: document.persistedSourceSha256,
+      workingHtmlSha256: document.workingHtmlSha256,
+      canvasStatus: document.canvasAuthority?.status,
+      canvasRenderedSha256: document.canvasAuthority?.renderedSha256,
+    });
+    return Object.freeze({ ...plan, sourceSha256: document.persistedSourceSha256 });
+  }
+
+  captureLeaveBoundary() {
+    // Operation-local immutable references, never a cached permission to leave.
+    return Object.freeze({
+      context: copyContext(this.#projectSession.context || this.#projectSession.locator),
+      epoch: this.#projectSession.epoch,
+      revision: this.#documentSession.editRevision,
+      html: this.#documentSession.html,
+    });
+  }
+
+  verifyLeaveBoundary(boundary, {
+    needsSourceProtection = false,
+    committedSourceSha256 = "",
+  } = {}) {
+    const current = this.#projectSession.context;
+    if (
+      this.#disposed || !boundary
+      || boundary.epoch !== this.#projectSession.epoch
+      || (boundary.context
+        ? (boundary.context.targetKind
+          ? !sameOpenRoute(boundary.context, current, this.#codecs.sameSourcePath)
+          : !this.#isCurrent(boundary.context))
+        : Boolean(current))
+      || boundary.html !== this.#documentSession.html
+    ) {
+      return Object.freeze({
+        kind: "reject", code: "PROJECT_SWITCH_SOURCE_CHANGED",
+        reason: "当前 HTML 在切换边界后仍有修改尚未安全写回。",
+      });
+    }
+    const document = this.#documentSession.snapshot;
+    const evidence = this.verifiedProtectionEvidence({
+      context: current || boundary.context, revision: boundary.revision,
+    });
+    const afterDrain = planDocumentLeaveAfterDrain({
+      editRevision: document.editRevision,
+      cutoffRevision: boundary.revision,
+      pendingWrite: document.hasPendingWrite,
+      flushInFlight: document.isFlushing,
+      hasHistoryAction: this.hasHistoryAction,
+      recoveryProtected: Boolean(evidence),
+    });
+    if (afterDrain.kind === "reject") return afterDrain;
+    return planDocumentLeaveProtection({
+      needsSourceProtection,
+      sourcePath: this.#projectSession.sourcePath,
+      lastPersistedRevision: document.lastPersistedRevision,
+      cutoffRevision: boundary.revision,
+      persistedSourceSha256: document.persistedSourceSha256,
+      workingHtmlSha256: document.workingHtmlSha256,
+      committedSourceSha256,
+      protectionHtmlSha256: evidence?.htmlSha256 || "",
+      recoveryProtected: Boolean(evidence),
+    });
   }
 
   canProtectForDetach(context = this.#projectSession.context) {
@@ -661,6 +766,7 @@ export class DocumentWorkflow {
     const writeContext = this.#writeContext(context);
     const nextHtml = String(html ?? "");
     const nextRevision = this.#documentSession.editRevision + 1;
+    const operationId = this.#nextOperationId("edit");
     if (sourceTransaction && writeContext.sourcePath) {
       try {
         this.#sourceHistorySession.record(
@@ -677,7 +783,12 @@ export class DocumentWorkflow {
       }
     }
 
-    const revisionAfterEdit = this.#documentSession.beginEdit(nextHtml);
+    const revisionAfterEdit = this.#documentSession.beginEdit(nextHtml, {
+      origin: "local-edit",
+      operationId,
+      sourceSha256: sourceTransaction?.afterSourceSha256 || "",
+      context: writeContext,
+    });
     if (revisionAfterEdit !== nextRevision) {
       return blocked(
         "DOCUMENT_EDIT_REJECTED",
@@ -715,7 +826,11 @@ export class DocumentWorkflow {
         persistState: "preview-dirty",
         persistError: "",
       });
-      return succeeded({ revision: nextRevision, queued: false });
+      return succeeded({
+        revision: nextRevision,
+        queued: false,
+        receipt: this.#documentSession.sourceReceipt,
+      });
     }
 
     const write = this.#createWrite(writeContext, nextHtml, nextRevision);
@@ -728,7 +843,11 @@ export class DocumentWorkflow {
       context: writeContext,
       revision: nextRevision,
     });
-    return succeeded({ revision: nextRevision, queued: true });
+    return succeeded({
+      revision: nextRevision,
+      queued: true,
+      receipt: this.#documentSession.sourceReceipt,
+    });
   }
 
   async flush({ throughRevision } = {}) {
@@ -868,6 +987,8 @@ export class DocumentWorkflow {
         pendingWrite: null,
         persistState: "idle",
         persistError: "",
+        context: activeContext,
+        operationId: this.#nextOperationId("authority-reload"),
       });
       this.#versionSession.returnCurrent({
         currentExactVersionId: payload.currentExactVersionId || null,
@@ -900,6 +1021,8 @@ export class DocumentWorkflow {
           pendingWrite: previousPendingWrite,
           persistState: previousDocument.persistState,
           persistError: previousDocument.persistError,
+          context: activeContext,
+          operationId: this.#nextOperationId("authority-reload-rollback"),
         });
         this.#versionSession.restoreView(previousVersionView);
         this.#canvasPort.invalidateRenderAcks();
@@ -1008,6 +1131,8 @@ export class DocumentWorkflow {
         persistState: "idle",
         persistError: "",
         lastPersistedRevision: editRevision,
+        context: activeContext,
+        operationId: this.#nextOperationId("authority-unlock"),
       });
       this.#versionSession.returnCurrent({
         currentExactVersionId: payload.currentExactVersionId || null,
@@ -1040,6 +1165,8 @@ export class DocumentWorkflow {
           pendingWrite: previousPendingWrite,
           persistState: previousDocument.persistState,
           persistError: previousDocument.persistError,
+          context: activeContext,
+          operationId: this.#nextOperationId("authority-unlock-rollback"),
         });
         this.#versionSession.restoreView(previousVersionView);
         this.#canvasPort.invalidateRenderAcks();
@@ -1064,6 +1191,7 @@ export class DocumentWorkflow {
   async ensureCurrentCanvas({ context } = {}) {
     const activeContext = copyContext(context) || this.#projectSession.context;
     let expectedHtml = this.#documentSession.html;
+    let receipt = this.#documentSession.sourceReceipt;
     const clean = Boolean(
       activeContext
       && this.#documentSession.persistState === "idle"
@@ -1091,6 +1219,7 @@ export class DocumentWorkflow {
       });
     }
     let expectedSha256 = await this.#hashPort.sha256(expectedHtml);
+    let observation = null;
     try {
       if (
         activeContext
@@ -1119,6 +1248,8 @@ export class DocumentWorkflow {
           pendingWrite: null,
           persistState: "idle",
           persistError: "",
+          context: activeContext,
+          operationId: this.#nextOperationId("authority-repair"),
         });
         this.#versionSession.updateAuthority({
           currentBasedOnVersionId: payload.currentBasedOnVersionId || undefined,
@@ -1128,13 +1259,19 @@ export class DocumentWorkflow {
         this.#canvasPort.invalidateRenderAcks();
         expectedHtml = repairedHtml;
         expectedSha256 = repairedSha256;
+        receipt = this.#documentSession.sourceReceipt;
         this.#emit({
           type: "document-authority-repaired",
           context: activeContext,
           lastModifiedAt: String(payload.lastModifiedAt || ""),
         });
       }
-      await this.#verifyRendered(expectedHtml, expectedSha256, activeContext || undefined);
+      observation = await this.#verifyRendered(
+        expectedHtml,
+        expectedSha256,
+        activeContext || undefined,
+        receipt,
+      );
       if (!this.#documentSession.confirmWorkingHtml({
         revision: this.#documentSession.editRevision,
         htmlSha256: expectedSha256,
@@ -1143,12 +1280,19 @@ export class DocumentWorkflow {
           code: "DOCUMENT_WORKING_HTML_STALE",
         });
       }
-      const confirmed = this.#documentSession.confirmCanvas({
-        generation: this.#documentSession.canvasGeneration,
-        renderedSha256: expectedSha256,
-        workingHtmlSha256: expectedSha256,
-      });
-      if (!confirmed) {
+      const confirmed = this.confirmCanvas(observation);
+      const alreadyVerifiedExactObservation = Boolean(
+        !confirmed
+        && this.#documentSession.canvasAuthority.status === "verified"
+        && sameSourceReceipt(
+          observation.receipt,
+          this.#documentSession.sourceReceipt,
+        )
+        && observation.renderedHtml === this.#documentSession.html
+        && observation.renderedSha256 === this.#documentSession.canvasAuthority.renderedSha256
+        && observation.renderedSha256 === this.#documentSession.workingHtmlSha256,
+      );
+      if (!confirmed && !alreadyVerifiedExactObservation) {
         throw Object.assign(new Error("当前画布尚未完成自动恢复。"), {
           code: "DOCUMENT_CANVAS_AUTHORITY_REJECTED",
         });
@@ -1157,14 +1301,13 @@ export class DocumentWorkflow {
         html: expectedHtml,
         persistedSourceSha256: this.#documentSession.persistedSourceSha256,
         workingHtmlSha256: expectedSha256,
-        canvasRenderedSha256: expectedSha256,
+        canvasRenderedSha256: observation.renderedSha256,
       });
     } catch (cause) {
       if (activeContext && !this.#isCurrent(activeContext)) return stale(activeContext);
-      this.#documentSession.failCanvas({
-        generation: this.#documentSession.canvasGeneration,
-        error: this.#codecs.errorMessage(cause, "当前画布尚未完成自动恢复。"),
-      });
+      this.#failCurrentCanvas(
+        this.#codecs.errorMessage(cause, "当前画布尚未完成自动恢复。"),
+      );
       return this.#outcomeFromCause(
         this.#nextOperationId("canvas"),
         cause,
@@ -1172,6 +1315,35 @@ export class DocumentWorkflow {
         this.#codecs.errorMessage(cause, "当前画布尚未完成自动恢复。"),
       );
     }
+  }
+
+  /**
+   * Source receipts are settled only here. Canvas ports may observe a frame,
+   * but they must not mutate DocumentSession authority themselves.
+   */
+  confirmCanvas(observation) {
+    const normalized = canvasRenderObservation(observation);
+    const currentReceipt = this.#documentSession.sourceReceipt;
+    const currentSnapshot = this.#documentSession.snapshot;
+    if (
+      !normalized
+      || !SHA256.test(String(normalized.receipt.sourceSha256 || ""))
+      || normalized.receipt.sourceSha256 !== normalized.renderedSha256
+      || !SHA256.test(String(currentSnapshot.workingHtmlSha256 || ""))
+      || currentSnapshot.workingHtmlSha256 !== normalized.renderedSha256
+      || !sameSourceReceipt(normalized.receipt, currentReceipt)
+      || normalized.receipt.canvasGeneration !== currentSnapshot.canvasGeneration
+      || normalized.renderedHtml !== currentSnapshot.html
+      || currentSnapshot.canvasAuthority.status === "failed"
+      || currentSnapshot.canvasAuthority.status === "verified"
+    ) return false;
+    return this.#documentSession.confirmCanvas({
+      generation: normalized.receipt.canvasGeneration,
+      renderedSha256: normalized.renderedSha256,
+      workingHtmlSha256: normalized.renderedSha256,
+      renderedHtml: normalized.renderedHtml,
+      receipt: normalized.receipt,
+    });
   }
 
   async observeExternalSourceChange({ sourcePath } = {}) {
@@ -1491,6 +1663,8 @@ export class DocumentWorkflow {
         workingHtmlSha256: targetSha256,
         editRevision: nextRevision,
         pendingWrite: write,
+        context: activeContext,
+        operationId: this.#nextOperationId("authority-recovery"),
       });
       this.#versionSession.markSourceEdited();
       this.#canvasPort.invalidateRenderAcks();
@@ -1552,8 +1726,11 @@ export class DocumentWorkflow {
       html: write.html,
       persistedSourceSha256: authoritativeSourceSha256 || null,
       workingHtmlSha256: null,
+      sourceSha256: "",
       editRevision: write.revision,
       pendingWrite: write,
+      context: activeContext,
+      operationId: this.#nextOperationId("authority-conflict-candidate"),
     });
     this.#versionSession.markSourceEdited();
     this.#canvasPort.invalidateRenderAcks();
@@ -1839,7 +2016,11 @@ export class DocumentWorkflow {
         if (this.#isCurrent(writeContext)) {
           this.#documentSession.setPersistence({ state: "writing", error: "" });
         }
-        if (!write.projectId || !write.documentId) {
+        if (
+          !write.projectId
+          || !write.documentId
+          || this.#registrationPending()
+        ) {
           const registration = await this.#ensureRegistered({
             sourcePath: write.sourcePath,
             expectedSourceSha256: write.expectedSourceSha256,
@@ -1852,13 +2033,14 @@ export class DocumentWorkflow {
               writeContext,
             });
           }
+          const previousWriteSourcePath = write.sourcePath;
           write = {
             ...write,
             ...registration.value,
             expectedSourceSha256: this.#documentSession.persistedSourceSha256,
           };
           writeContext = registration.value;
-          this.#updateQueuedWriteAfterRegistration(write);
+          this.#updateQueuedWriteAfterRegistration(write, previousWriteSourcePath);
           // Registration changes recovery identity before the durable write.
           // Persist that transition now so a crash in the subsequent POST has
           // a record the next registered workspace can safely resume.
@@ -2029,35 +2211,79 @@ export class DocumentWorkflow {
       && !this.#documentSession.pendingWrite,
     );
     const acknowledgedHtml = String(payload.content);
-    this.#documentSession.update(writeCompletesCurrentDocument
-      ? {
-          html: acknowledgedHtml,
-          persistedSourceSha256: sourceSha256,
-          workingHtmlSha256: sourceSha256,
-          lastPersistedRevision: Math.max(
-            this.#documentSession.lastPersistedRevision,
-            persistedRevision,
-          ),
-        }
-      : {
-          persistedSourceSha256: sourceSha256,
-          lastPersistedRevision: Math.max(
-            this.#documentSession.lastPersistedRevision,
-            persistedRevision,
-          ),
-        });
-    if (writeCompletesCurrentDocument) {
-      this.#rebindTargets(acknowledgedHtml);
-      this.#versionSession.updateAuthority({
-        currentExactVersionId: payload.currentExactVersionId,
-      });
-    }
     const rebound = this.#reconcileOpenTargetAfterAutosave({
       writeContext,
       payload,
       sourceSha256,
     });
     const acknowledgedContext = rebound.context;
+    const currentReceipt = this.#documentSession.sourceReceipt;
+    const receiptNeedsHashRepair = Boolean(
+      writeCompletesCurrentDocument
+      && (!currentReceipt
+        || !SHA256.test(String(currentReceipt.sourceSha256 || ""))
+        || currentReceipt.sourceSha256 !== sourceSha256),
+    );
+    const nextLastPersistedRevision = Math.max(
+      this.#documentSession.lastPersistedRevision,
+      persistedRevision,
+    );
+    if (rebound.routingChanged) {
+      const currentDocument = this.#documentSession.snapshot;
+      // A moved Working Copy changes the complete source tuple. Publish the
+      // final HTML, Hash, revisions and adopted context in one authority
+      // receipt so the old route cannot retain a valid Canvas ACK.
+      this.#documentSession.publishAuthority({
+        html: writeCompletesCurrentDocument ? acknowledgedHtml : currentDocument.html,
+        persistedSourceSha256: sourceSha256,
+        workingHtmlSha256: writeCompletesCurrentDocument
+          ? sourceSha256
+          : currentDocument.workingHtmlSha256,
+        editRevision: currentDocument.editRevision,
+        lastPersistedRevision: nextLastPersistedRevision,
+        persistState: currentDocument.persistState,
+        persistError: currentDocument.persistError,
+        context: acknowledgedContext,
+        operationId: this.#nextOperationId("authority-autosave-route"),
+      });
+      this.#canvasPort.invalidateRenderAcks?.();
+    } else {
+      this.#documentSession.update(writeCompletesCurrentDocument
+        ? {
+            html: acknowledgedHtml,
+            persistedSourceSha256: sourceSha256,
+            workingHtmlSha256: sourceSha256,
+            lastPersistedRevision: nextLastPersistedRevision,
+          }
+        : {
+            persistedSourceSha256: sourceSha256,
+            lastPersistedRevision: nextLastPersistedRevision,
+          });
+    }
+    if (receiptNeedsHashRepair && !rebound.routingChanged) {
+      // A conflict candidate deliberately carries no working hash, so its
+      // authority receipt cannot be confirmed from the persisted hash. Once
+      // the exact autosave acknowledgement establishes the working hash,
+      // issue a new receipt instead of mutating the old authority identity.
+      this.#documentSession.publishAuthority({
+        html: acknowledgedHtml,
+        persistedSourceSha256: sourceSha256,
+        workingHtmlSha256: sourceSha256,
+        editRevision: this.#documentSession.editRevision,
+        lastPersistedRevision: nextLastPersistedRevision,
+        persistState: this.#documentSession.persistState,
+        persistError: this.#documentSession.persistError,
+        context: acknowledgedContext,
+        operationId: this.#nextOperationId("authority-autosave-hash"),
+      });
+      this.#canvasPort.invalidateRenderAcks?.();
+    }
+    if (writeCompletesCurrentDocument) {
+      this.#rebindTargets(acknowledgedHtml);
+      this.#versionSession.updateAuthority({
+        currentExactVersionId: payload.currentExactVersionId,
+      });
+    }
     if (rebound.routingChanged) {
       const memoryHistory = this.#sourceHistorySession.snapshot;
       const pendingHistory = this.#sourceHistorySession.pendingOperations;
@@ -2195,13 +2421,21 @@ export class DocumentWorkflow {
     };
   }
 
-  #updateQueuedWriteAfterRegistration(write) {
+  #updateQueuedWriteAfterRegistration(write, previousSourcePath = write.sourcePath) {
     const queued = this.#documentSession.pendingWrite;
-    if (!queued || !this.#codecs.sameSourcePath(queued.sourcePath, write.sourcePath)) return;
+    if (
+      !queued
+      || (
+        !this.#codecs.sameSourcePath(queued.sourcePath, previousSourcePath)
+        && !this.#codecs.sameSourcePath(queued.sourcePath, write.sourcePath)
+      )
+    ) return;
     this.#documentSession.setPendingWrite({
       ...queued,
+      epoch: write.epoch,
       projectId: write.projectId,
       documentId: write.documentId,
+      sourcePath: write.sourcePath,
       projectRootPath: write.projectRootPath,
       targetKind: write.targetKind,
       workingCopyId: write.workingCopyId,
@@ -2213,21 +2447,92 @@ export class DocumentWorkflow {
     });
   }
 
-  #restoreWriteAfterFailure(write, context) {
+  #restoreWriteAfterFailure(write, context, { replacePending = false } = {}) {
     const pending = this.#documentSession.pendingWrite;
-    const recoveryWrite = pending
+    const recoveryWrite = !replacePending && pending
       && sameContext(pending, write, this.#codecs.sameSourcePath)
       && pending.revision > write.revision
       ? pending
       : write;
     if (
       this.#isCurrent(context)
-      && (!pending || pending.revision < recoveryWrite.revision)
+      && (
+        replacePending
+        || !pending
+        || pending.revision < recoveryWrite.revision
+      )
     ) {
       this.#documentSession.setPendingWrite(recoveryWrite);
     }
     this.#persistRecovery(recoveryWrite, context);
     return recoveryWrite;
+  }
+
+  #rebindRegistrationFailureWrite(write, writeContext, outcome) {
+    if (outcome?.status !== "unknown" || !this.#registrationPending()) {
+      return { write, context: writeContext, replacePending: false };
+    }
+    const context = copyContext(this.#projectSession.context);
+    const receiptContext = copyContext(
+      this.#documentSession.sourceReceipt?.context,
+    );
+    if (
+      !context
+      || !receiptContext
+      || !this.#isCurrent(context)
+      || !sameOpenRoute(
+        context,
+        receiptContext,
+        this.#codecs.sameSourcePath,
+      )
+    ) {
+      return { write, context: writeContext, replacePending: false };
+    }
+
+    const pending = this.#documentSession.pendingWrite;
+    const latestWrite = pending
+      && pending.revision > write.revision
+      && (
+        sameContext(pending, write, this.#codecs.sameSourcePath)
+        || sameOpenRoute(pending, context, this.#codecs.sameSourcePath)
+      )
+      ? pending
+      : write;
+    const sourceSha256 = String(
+      this.#documentSession.workingHtmlSha256
+      || latestWrite.historyOperations?.at(-1)?.afterSourceSha256
+      || this.#documentSession.persistedSourceSha256
+      || "",
+    );
+    if (SHA256.test(sourceSha256)) {
+      const history = this.#sourceHistorySession.snapshot;
+      this.#sourceHistorySession.activate(
+        context,
+        sourceSha256,
+        history
+          ? {
+            ...history,
+            projectId: context.projectId,
+            documentId: context.documentId,
+            sourcePath: context.sourcePath,
+          }
+          : null,
+      );
+      this.#sourceHistorySession.restorePendingEvidence(
+        context,
+        latestWrite.historyOperations || [],
+      );
+    }
+    return {
+      context,
+      replacePending: true,
+      write: {
+        ...latestWrite,
+        ...context,
+        expectedSourceSha256: this.#documentSession.persistedSourceSha256,
+        historyOperations: this.#sourceHistorySession.pendingOperations,
+      },
+    };
   }
 
   #settleRegistrationFailure({ registration, write, writeContext }) {
@@ -2241,12 +2546,21 @@ export class DocumentWorkflow {
     const code = outcome.status === "unknown"
       ? "PROJECT_REGISTRATION_UNKNOWN"
       : String(outcome.code || "PROJECT_REGISTRATION_UNAVAILABLE");
-    const recoveryWrite = this.#restoreWriteAfterFailure(write, writeContext);
-    if (outcome.status !== "stale" && this.#isCurrent(writeContext)) {
+    const rebound = this.#rebindRegistrationFailureWrite(
+      write,
+      writeContext,
+      outcome,
+    );
+    const recoveryWrite = this.#restoreWriteAfterFailure(
+      rebound.write,
+      rebound.context,
+      { replacePending: rebound.replacePending },
+    );
+    if (outcome.status !== "stale" && this.#isCurrent(rebound.context)) {
       this.#documentSession.setPersistence({ state: "failed", error: message });
       this.#emit({
         type: "document-persistence-failed",
-        context: writeContext,
+        context: rebound.context,
         code,
         message,
         conflict: false,
@@ -2394,7 +2708,7 @@ export class DocumentWorkflow {
 
   #rebindTargets(html) {
     const targets = [
-      ...this.#commentSession.comments.map(commentSourceTarget),
+      ...this.#commentSession.comments.map((comment) => comment.sourceAnchor),
       ...this.#commentSession.changeEvents.map((event) => event.target),
       ...(this.#commentSession.composerTarget
         ? [this.#commentSession.composerTarget.commentAnchor || this.#commentSession.composerTarget]
@@ -2405,12 +2719,8 @@ export class DocumentWorkflow {
     this.#commentSession.update({
       comments: this.#commentSession.comments.map((comment) => ({
         ...comment,
-        target: commentTargetForDisplay(
-          byId.get(commentSourceTarget(comment)?.id) || commentSourceTarget(comment),
-          comment,
-        ),
-        sourceAnchor: byId.get(commentSourceTarget(comment)?.id)
-          || commentSourceTarget(comment),
+        sourceAnchor: byId.get(comment.sourceAnchor?.id)
+          || comment.sourceAnchor,
       })),
       changeEvents: this.#commentSession.changeEvents.map((event) => ({
         ...event,
@@ -2421,7 +2731,7 @@ export class DocumentWorkflow {
       const composerTarget = this.#commentSession.composerTarget;
       const sourceTarget = composerTarget.commentAnchor || composerTarget;
       this.#commentSession.setComposerTarget(
-        commentTargetForDisplay(
+        composerTargetForDisplay(
           byId.get(sourceTarget.id) || sourceTarget,
           composerTarget,
         ),
@@ -2472,11 +2782,12 @@ export class DocumentWorkflow {
           "当前页面没有可撤销或重做的本次打开记录。",
         );
       }
-      this.#queueLocalHistoryEdit({
+      const receipt = this.#queueLocalHistoryEdit({
         context,
         direction,
         applied,
         nextRevision,
+        operationId,
       });
       const persisted = await this.flush({ throughRevision: nextRevision });
       if (!persisted || persisted.status !== "succeeded") return persisted;
@@ -2484,6 +2795,7 @@ export class DocumentWorkflow {
         direction,
         sourceSha256: applied.sourceSha256,
         persistedRevision: this.#documentSession.lastPersistedRevision,
+        receipt,
       });
     } catch (cause) {
       if (!this.#isCurrent(context)) return stale(context);
@@ -2509,7 +2821,7 @@ export class DocumentWorkflow {
     }
   }
 
-  #queueLocalHistoryEdit({ context, direction, applied, nextRevision }) {
+  #queueLocalHistoryEdit({ context, direction, applied, nextRevision, operationId }) {
     const canonicalHtml = applied.html;
     const rawTarget = this.#codecs.isRecord(applied.target)
       ? this.#codecs.selectionFromRecord(applied.target)
@@ -2526,7 +2838,7 @@ export class DocumentWorkflow {
         : null,
     };
     const targets = [
-      ...this.#commentSession.comments.map(commentSourceTarget),
+      ...this.#commentSession.comments.map((comment) => comment.sourceAnchor),
       ...this.#commentSession.changeEvents.map((event) => event.target),
       ...(this.#commentSession.composerTarget
         ? [this.#commentSession.composerTarget.commentAnchor || this.#commentSession.composerTarget]
@@ -2545,15 +2857,8 @@ export class DocumentWorkflow {
     this.#commentSession.update({
       comments: this.#commentSession.comments.map((comment) => ({
         ...comment,
-        target: commentTargetForDisplay(
-          byId.get(commentSourceTarget(comment)?.id) || {
-            ...commentSourceTarget(comment),
-            resolution: "orphaned",
-          },
-          comment,
-        ),
-        sourceAnchor: byId.get(commentSourceTarget(comment)?.id) || {
-          ...commentSourceTarget(comment),
+        sourceAnchor: byId.get(comment.sourceAnchor?.id) || {
+          ...comment.sourceAnchor,
           resolution: "orphaned",
         },
       })),
@@ -2569,7 +2874,7 @@ export class DocumentWorkflow {
       const composerTarget = this.#commentSession.composerTarget;
       const sourceTarget = composerTarget.commentAnchor || composerTarget;
       this.#commentSession.setComposerTarget(
-        commentTargetForDisplay(
+        composerTargetForDisplay(
           byId.get(sourceTarget.id) || {
             ...sourceTarget,
             resolution: "orphaned",
@@ -2584,7 +2889,12 @@ export class DocumentWorkflow {
       historyTarget,
       this.#codecs.historyTextSelectionFromRecord(applied.selection),
     );
-    if (this.#documentSession.beginEdit(canonicalHtml) !== nextRevision) {
+    if (this.#documentSession.beginEdit(canonicalHtml, {
+      origin: "history",
+      operationId,
+      sourceSha256: applied.sourceSha256,
+      context,
+    }) !== nextRevision) {
       throw invalidAcknowledgement(
         "当前文档没有接受撤销结果。",
         "SOURCE_HISTORY_EDIT_REJECTED",
@@ -2601,6 +2911,7 @@ export class DocumentWorkflow {
       context,
       direction,
     });
+    return this.#documentSession.sourceReceipt;
   }
 
   #assertSourcePayload(payload, context, message) {
@@ -2615,34 +2926,57 @@ export class DocumentWorkflow {
     ) throw invalidAcknowledgement(message, "SOURCE_IDENTITY_MISMATCH");
   }
 
+  #failCurrentCanvas(error) {
+    const snapshot = this.#documentSession.snapshot;
+    return this.#documentSession.failCanvas({
+      generation: snapshot.canvasGeneration,
+      error,
+      receipt: snapshot.sourceReceipt,
+    });
+  }
+
   async #acknowledgeCanvas(html, sourceSha256, context) {
     if (typeof this.#canvasPort.verifyRendered !== "function") return true;
     try {
-      await this.#canvasPort.verifyRendered(html, sourceSha256, context);
+      const observation = await this.#verifyRendered(html, sourceSha256, context);
       if (context && !this.#isCurrent(context)) return false;
-      const confirmed = this.#documentSession.confirmCanvas({
-        generation: this.#documentSession.canvasGeneration,
-        renderedSha256: sourceSha256,
-        workingHtmlSha256: sourceSha256,
-      });
+      const confirmed = this.confirmCanvas(observation);
       if (confirmed) return true;
-      this.#documentSession.failCanvas({
-        generation: this.#documentSession.canvasGeneration,
-        error: "当前画布尚未完成自动恢复。",
-      });
+      this.#failCurrentCanvas("当前画布尚未完成自动恢复。");
       return false;
     } catch (cause) {
-      this.#documentSession.failCanvas({
-        generation: this.#documentSession.canvasGeneration,
-        error: this.#codecs.errorMessage(cause, "当前画布尚未完成自动恢复。"),
-      });
+      if (context && !this.#isCurrent(context)) return false;
+      this.#failCurrentCanvas(
+        this.#codecs.errorMessage(cause, "当前画布尚未完成自动恢复。"),
+      );
       return false;
     }
   }
 
-  async #verifyRendered(html, sourceSha256, context) {
-    if (typeof this.#canvasPort.verifyRendered !== "function") return;
-    await this.#canvasPort.verifyRendered(html, sourceSha256, context);
+  async #verifyRendered(html, sourceSha256, context, expectedReceipt = null) {
+    const receipt = expectedReceipt || this.#documentSession.sourceReceipt;
+    if (typeof this.#canvasPort.verifyRendered !== "function") {
+      return canvasRenderObservation({
+        receipt,
+        renderedHtml: html,
+        renderedSha256: sourceSha256,
+        frameGeneration: this.#documentSession.canvasGeneration,
+      });
+    }
+    const observation = canvasRenderObservation(await this.#canvasPort.verifyRendered(
+      html,
+      sourceSha256,
+      context,
+      receipt,
+    ));
+    const currentReceipt = this.#documentSession.sourceReceipt;
+    if (!observation || !sameSourceReceipt(observation.receipt, currentReceipt)) {
+      throw invalidAcknowledgement(
+        "画布回执没有绑定当前源码回执。",
+        "DOCUMENT_CANVAS_RECEIPT_STALE",
+      );
+    }
+    return observation;
   }
 
   async #freezeAuthority(reason) {

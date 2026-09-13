@@ -147,6 +147,9 @@ export class ExternalFileOpenSession {
         }
 
         if (generation !== this.#generation) break;
+        // The executor may complete or cancel this Prepared Intent before its
+        // promise returns. Its late result cannot resurrect a released head.
+        if (this.#active?.requestId !== request.requestId) continue;
         if (result === "awaiting-confirmation") {
           this.#awaitingConfirmation = true;
           this.#confirmation = request.confirmation || this.#confirmation;

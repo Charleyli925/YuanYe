@@ -16,6 +16,12 @@ import { requireCompleteHtml, sha256 } from "../../lifecycle-core.mjs";
 import { prepareCandidateSourceIdentity } from "../../project-file-repository/candidate-identity.mjs";
 import { defineAgentRuntime } from "./agent-runtime-contract.mjs";
 import { safePublicAgentText } from "../agent-session-projector.mjs";
+import {
+  decodeHttpAgentText,
+  httpAgentSupportsTextAttachment,
+  httpAgentInputBudget,
+  HTTP_AGENT_MAX_INPUT_BYTES,
+} from "../../../shared/agent-input-policy.mjs";
 
 const execFileAsync = promisify(execFile);
 export const DEFAULT_INACTIVITY_TIMEOUT_MS = 45 * 60_000;
@@ -23,7 +29,6 @@ export const DEFAULT_INACTIVITY_TIMEOUT_MS = 45 * 60_000;
 // timeout name. It now describes the sliding inactivity window, not a total
 // turn duration.
 export const DEFAULT_TURN_TIMEOUT_MS = DEFAULT_INACTIVITY_TIMEOUT_MS;
-const MAX_CONTEXT_BYTES = 2 * 1024 * 1024;
 
 function fail(code, message, options) {
   throw agentProviderError(code, message, options);
@@ -174,17 +179,6 @@ export function classifyOpenAiCompatibleHttpStatus(status, bodyText) {
   return openAiCompatibleVendorAdapter("custom").normalizeError({ status, payload });
 }
 
-function textAttachment(mediaType, fileName) {
-  const value = String(mediaType || "").toLowerCase();
-  if (value.startsWith("text/")
-    || ["application/json", "application/xml", "application/javascript"].includes(value)
-    || value.endsWith("+json")
-    || value.endsWith("+xml")) return true;
-  if (value && value !== "application/octet-stream") return false;
-  return /\.(?:txt|md|markdown|json|jsonl|csv|tsv|xml|html?|css|js|jsx|ts|tsx|yml|yaml|toml|ini|log|sql|py|rb|go|rs|java|c|h|cpp|hpp|sh|zsh|fish)$/iu
-    .test(String(fileName || ""));
-}
-
 export async function readHttpAgentContext(policy) {
   const parts = [];
   let used = 0;
@@ -194,9 +188,12 @@ export async function readHttpAgentContext(policy) {
       policy.requestRoot,
       file.relativePath || "frozen input",
     );
+    if (read.bytes.byteLength !== file.byteLength || sha256(read.bytes) !== file.sha256) {
+      throw policyError("FROZEN_INPUT_DRIFT", "Frozen input changed before HTTP serialization.");
+    }
     if (
       file.role === "comment-attachment"
-      && !textAttachment(file.mediaType, file.relativePath || file.path)
+      && !httpAgentSupportsTextAttachment({ mediaType: file.mediaType, fileName: file.relativePath || file.path })
     ) {
       fail(
         "AGENT_ATTACHMENT_UNSUPPORTED",
@@ -204,11 +201,8 @@ export async function readHttpAgentContext(policy) {
         { status: 422 },
       );
     }
-    if (read.bytes.includes(0)) {
-      fail("AGENT_ATTACHMENT_UNSUPPORTED", "文本附件不是可用的 UTF-8 文本。", { status: 422 });
-    }
-    const text = read.bytes.toString("utf8");
-    if (!Buffer.from(text, "utf8").equals(read.bytes)) {
+    const text = decodeHttpAgentText(read.bytes, { allowEmpty: file.role !== "comment-attachment" });
+    if (text === null) {
       fail("AGENT_ATTACHMENT_UNSUPPORTED", "文本附件不是可用的 UTF-8 文本。", { status: 422 });
     }
     const name = String(file.relativePath || file.path);
@@ -218,7 +212,7 @@ export async function readHttpAgentContext(policy) {
       "</untrusted-file>",
     ].join("\n");
     const chunkBytes = Buffer.byteLength(chunk, "utf8");
-    if (used + chunkBytes > MAX_CONTEXT_BYTES) {
+    if (used + chunkBytes > HTTP_AGENT_MAX_INPUT_BYTES) {
       fail("AGENT_PROMPT_TOO_LARGE", "冻结页面超出当前模型可发送的长度。", { status: 413 });
     }
     parts.push(chunk);
@@ -717,27 +711,17 @@ export async function completeOpenAiCompatibleChat({
   return extractHtmlDocument(content);
 }
 
-function approximateTokens(text) {
-  return Math.ceil(Buffer.byteLength(String(text || ""), "utf8") / 3);
-}
-
-export function assertCompleteHtmlBudget(context, modelBudget) {
-  if (!modelBudget) return Object.freeze({ inputTokens: approximateTokens(context), outputTokens: null });
-  const inputTokens = approximateTokens(context) + 1_200;
-  // A complete-document edit needs room to return roughly the current frozen
-  // payload again. This intentionally errs on the safe side.
-  const outputTokens = Math.ceil(approximateTokens(context) * 1.15);
-  if (modelBudget.supportsCompleteHtml !== true
-    || inputTokens > Number(modelBudget.recommendedMaxInputTokens || 0)
-    || outputTokens > Number(modelBudget.maxOutputTokens || 0)
-    || inputTokens + outputTokens > Number(modelBudget.contextWindow || 0)) {
+export function assertCompleteHtmlBudget(context, modelBudget, baseHtmlBytes) {
+  const budget = httpAgentInputBudget({ inputBytes: Buffer.byteLength(String(context || ""), "utf8"),
+    baseHtmlBytes, model: modelBudget });
+  if (budget.status === "exceeded") {
     fail(
       "AGENT_PROMPT_TOO_LARGE",
       "当前页面可能超过所选模型的完整输出能力，请更换模型或使用 Qoder/Codex。",
       { status: 413 },
     );
   }
-  return Object.freeze({ inputTokens, outputTokens });
+  return budget;
 }
 
 async function runOfficialFinalizer(policy, signal) {
@@ -812,7 +796,6 @@ export function createHttpRuntime({
       onEvent({ kind: "initialized", agentName: "源页 Agent", agentVersion: "1.0.0" });
       await assertRuntimeProcessingAuthority(policy);
       const context = await readHttpAgentContext(policy);
-      const budget = assertCompleteHtmlBudget(context, launch.modelBudget);
       onEvent({ kind: "request-sent" });
       let receivedFirstContent = false;
       const baseFile = policy.readableFiles.find((file) => file.role === "base-html");
@@ -826,12 +809,6 @@ export function createHttpRuntime({
         modelId,
         vendorId: String(launch.environment?.PAGEROOT_API_VENDOR || ""),
         reasoning: String(launch.reasoning || ""),
-        maxOutputTokens: launch.modelBudget && budget.outputTokens
-          ? Math.min(
-              Number(launch.modelBudget.maxOutputTokens),
-              Math.max(4_096, Math.ceil(budget.outputTokens * 1.5)),
-            )
-          : undefined,
         signal,
         onEvent: (event) => {
           if (!receivedFirstContent && (event.kind === "visible-text" || (event.kind === "activity" && event.channel === "html" && event.byteDelta > 0))) {
@@ -879,8 +856,9 @@ export function createHttpRuntime({
           await assertRuntimeProcessingAuthority(policy);
         },
         generate: (messages) => {
-          assertCompleteHtmlBudget(messages.map((message) => message.content).join("\n"), launch.modelBudget);
-          return completeChat({ ...chatOptions, messages });
+          const budget = assertCompleteHtmlBudget(messages.map((message) => message.content).join("\n"),
+            launch.modelBudget, baseRead.bytes.byteLength);
+          return completeChat({ ...chatOptions, messages, maxOutputTokens: budget.maxOutputTokens ?? undefined });
         },
       });
       signal?.throwIfAborted();

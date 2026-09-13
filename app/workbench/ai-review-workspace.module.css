@@ -131,12 +131,15 @@
 
   .reviewMainWithSidebar .reviewSidebar {
     position: absolute;
-    z-index: 24;
+    /* The overlay must also clear Review's z-index 72 directory header. */
+    z-index: 80;
     top: 0;
     right: 0;
     bottom: 0;
     width: min(var(--workbench-inspector-width, 376px), 100%);
     height: auto;
+    grid-column: auto;
+    grid-row: auto;
   }
 }
 
@@ -419,6 +422,13 @@
   border-bottom: 1px solid #e6e6eb;
   background: rgb(250 250 252 / 94%);
   backdrop-filter: blur(12px) saturate(140%);
+}
+
+.reviewEmpty {
+  padding: 5px 9px;
+  color: #55525f;
+  font-size: 11px;
+  line-height: 18px;
 }
 
 .reviewDirectory {

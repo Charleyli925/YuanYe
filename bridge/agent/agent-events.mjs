@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { createPublicAgentTextAccumulator } from "./agent-session-projector.mjs";
 
 const DEFAULT_TEXT_LIMIT = 64 * 1024;
 const DEFAULT_EVENT_LIMIT = 2_048;
@@ -41,18 +42,6 @@ export function canonicalAgentEvent(input, {
   });
 }
 
-function appendVisibleText(current, chunk, limit) {
-  if (typeof chunk !== "string" || current.length >= limit) {
-    return { text: current, truncated: typeof chunk === "string" && chunk.length > 0 };
-  }
-  let next = current;
-  const room = limit - next.length;
-  if (/[.!?]$/u.test(next) && /^[A-Z`]/u.test(chunk) && room > 1) next += " ";
-  const left = limit - next.length;
-  next += chunk.slice(0, Math.max(0, left));
-  return { text: next, truncated: chunk.length > left };
-}
-
 export function createAgentEventReducer({
   maxEvents = DEFAULT_EVENT_LIMIT,
   maxTextLength = DEFAULT_TEXT_LIMIT,
@@ -71,8 +60,7 @@ export function createAgentEventReducer({
         eventIds: new Set(),
         eventCount: 0,
         retainedEvents: [],
-        visibleText: "",
-        textTruncated: false,
+        publicText: createPublicAgentTextAccumulator({ maxTextLength: textLimit }),
       };
       turns.set(turnId, state);
     }
@@ -85,8 +73,7 @@ export function createAgentEventReducer({
     lastTimestamp: state.lastTimestamp,
     eventCount: state.eventCount,
     retainedEvents: Object.freeze([...state.retainedEvents]),
-    visibleText: state.visibleText,
-    textTruncated: state.textTruncated,
+    ...state.publicText.snapshot(),
   });
 
   return Object.freeze({
@@ -108,14 +95,12 @@ export function createAgentEventReducer({
       state.lastTimestamp = event.timestamp;
       state.eventCount = Math.min(Number.MAX_SAFE_INTEGER, state.eventCount + 1);
       if (event.kind === "visible-text") {
-        const appended = appendVisibleText(state.visibleText, event.text, textLimit);
-        state.visibleText = appended.text;
-        state.textTruncated ||= appended.truncated;
+        state.publicText.append(event);
       }
       if (event.kind === "visible-text-truncated") {
         // A runtime can hit its byte-based public-text boundary before this
         // character-based reducer reaches its own cap.
-        state.textTruncated = true;
+        state.publicText.markTruncated();
       }
       if (state.retainedEvents.length < eventLimit) {
         state.retainedEvents.push(event);

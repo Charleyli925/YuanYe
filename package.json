@@ -381,6 +381,10 @@
         "to": "bridge/project-file-repository/submission.mjs"
       },
       {
+        "from": "bridge/project-file-repository/save-retirement.mjs",
+        "to": "bridge/project-file-repository/save-retirement.mjs"
+      },
+      {
         "from": "bridge/project-file-repository/constants.mjs",
         "to": "bridge/project-file-repository/constants.mjs"
       },
@@ -543,6 +547,10 @@
       {
         "from": "shared/agent-auth-source.mjs",
         "to": "shared/agent-auth-source.mjs"
+      },
+      {
+        "from": "shared/agent-input-policy.mjs",
+        "to": "shared/agent-input-policy.mjs"
       },
       {
         "from": "shared/openai-compatible-vendors.mjs",

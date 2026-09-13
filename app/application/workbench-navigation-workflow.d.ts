@@ -49,6 +49,8 @@ export class WorkbenchNavigationWorkflow {
   }): Readonly<{ accepted: boolean; kind: "authority-refresh" | "transaction" | "stale" }>;
   applyProject(input: Readonly<Record<string, unknown>>): WorkbenchNavigationReceipt;
   onConfirmationPresented(input: { transactionId?: string; requestId?: string }): boolean;
+  onPreparedOpenStarted(input: { transactionId?: string; requestId?: string }): boolean;
+  onPreparedOpenSettled(input: { transactionId?: string; requestId?: string; outcome?: ProjectWorkflowOutcome }): boolean;
   onTerminalFailure(input: { transactionId?: string; reason?: string }): boolean;
   prepareClose(input: { deadlineAt: number }): Promise<boolean>;
   waitForIdle(input: { deadlineAt: number }): Promise<boolean>;

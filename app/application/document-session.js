@@ -23,6 +23,172 @@ const CANVAS_AUTHORITY_STATES = new Set([
   "failed",
 ]);
 
+const SOURCE_RECEIPT_ORIGINS = new Set([
+  "local-edit",
+  "history",
+  "authority",
+]);
+const SHA256 = /^sha256:[a-f0-9]{64}$/u;
+
+// A sequence is scoped to one DocumentSession.  Keep the session incarnation
+// in a module-wide monotonic domain so a rebuilt controller cannot accidentally
+// reuse a lower sequence in the same renderer process.
+let sourceSessionIncarnationSequence = 0;
+
+function nextSourceSessionIncarnation() {
+  sourceSessionIncarnationSequence += 1;
+  if (!Number.isSafeInteger(sourceSessionIncarnationSequence)) {
+    sourceSessionIncarnationSequence = 1;
+  }
+  return sourceSessionIncarnationSequence;
+}
+
+function sourceReceiptContext(context) {
+  if (!context || typeof context !== "object" || Array.isArray(context)) return null;
+  const epoch = Number(context.epoch);
+  const projectId = String(context.projectId || "");
+  const documentId = String(context.documentId || "");
+  const sourcePath = String(context.sourcePath || "");
+  if (!Number.isSafeInteger(epoch) || !projectId || !documentId || !sourcePath) return null;
+  const hasTarget = [
+    "projectRootPath",
+    "targetKind",
+    "workingCopyId",
+    "versionId",
+    "exactSourcePath",
+    "sourceSha256",
+    "sessionEpoch",
+  ].some((key) => Object.hasOwn(context, key));
+  if (!hasTarget) {
+    return Object.freeze({
+      epoch,
+      projectId,
+      documentId,
+      sourcePath,
+    });
+  }
+  const requiredTargetFields = [
+    "projectRootPath",
+    "targetKind",
+    "workingCopyId",
+    "versionId",
+    "exactSourcePath",
+    "sourceSha256",
+    "sessionEpoch",
+  ];
+  if (!requiredTargetFields.every((key) => Object.hasOwn(context, key))) return null;
+  const targetKind = String(context.targetKind || "");
+  if (targetKind !== "working-copy" && targetKind !== "version") return null;
+  const projectRootPath = String(context.projectRootPath || "");
+  const exactSourcePath = String(context.exactSourcePath || "");
+  const sourceSha256 = String(context.sourceSha256 || "");
+  const sessionEpoch = Number(context.sessionEpoch);
+  if (
+    !projectRootPath
+    || !exactSourcePath
+    || !/^sha256:[a-f0-9]{64}$/u.test(sourceSha256)
+    || !Number.isSafeInteger(sessionEpoch)
+    || (targetKind === "working-copy" && !String(context.workingCopyId || ""))
+    || (targetKind === "version" && !String(context.versionId || ""))
+  ) return null;
+  return Object.freeze({
+    epoch,
+    projectId,
+    documentId,
+    sourcePath,
+    projectRootPath,
+    targetKind,
+    workingCopyId: context.workingCopyId ? String(context.workingCopyId) : null,
+    versionId: context.versionId ? String(context.versionId) : null,
+    exactSourcePath,
+    sourceSha256,
+    sessionEpoch,
+  });
+}
+
+function sourceReceipt({
+  sessionIncarnation,
+  sequence,
+  origin,
+  operationId,
+  editRevision,
+  canvasGeneration,
+  sourceSha256,
+  context,
+} = {}) {
+  const normalizedSequence = revision(sequence);
+  const normalizedOrigin = SOURCE_RECEIPT_ORIGINS.has(origin) ? origin : "authority";
+  const normalizedContext = sourceReceiptContext(context);
+  return Object.freeze({
+    sessionIncarnation: revision(sessionIncarnation),
+    sequence: normalizedSequence,
+    origin: normalizedOrigin,
+    operationId: String(operationId || `${normalizedOrigin}-${normalizedSequence}`),
+    editRevision: revision(editRevision),
+    canvasGeneration: revision(canvasGeneration),
+    sourceSha256: String(sourceSha256 || ""),
+    context: normalizedContext,
+    epoch: normalizedContext?.epoch ?? null,
+    projectId: normalizedContext?.projectId || null,
+    documentId: normalizedContext?.documentId || null,
+    sourcePath: normalizedContext?.sourcePath || null,
+    sessionEpoch: normalizedContext?.sessionEpoch ?? null,
+  });
+}
+
+export function isSourceReceipt(value) {
+  return Boolean(
+    value
+    && typeof value === "object"
+    && !Array.isArray(value)
+    && Number.isSafeInteger(Number(value.sessionIncarnation))
+    && Number(value.sessionIncarnation) > 0
+    && Number.isSafeInteger(Number(value.sequence))
+    && Number(value.sequence) > 0
+    && SOURCE_RECEIPT_ORIGINS.has(value.origin)
+    && String(value.operationId || "")
+    && Number.isSafeInteger(Number(value.editRevision))
+    && Number.isSafeInteger(Number(value.canvasGeneration))
+    && (value.context == null || sourceReceiptContext(value.context))
+    && (value.sourceSha256 === "" || /^sha256:[a-f0-9]{64}$/u.test(String(value.sourceSha256)))
+  );
+}
+
+export function sameSourceReceiptContext(left, right) {
+  if (left?.context == null && right?.context == null) return true;
+  const a = sourceReceiptContext(left?.context || left);
+  const b = sourceReceiptContext(right?.context || right);
+  if (!a || !b) return false;
+  return (
+    a.epoch === b.epoch
+    && a.projectId === b.projectId
+    && a.documentId === b.documentId
+    && a.sourcePath === b.sourcePath
+    && String(a.projectRootPath || "") === String(b.projectRootPath || "")
+    && String(a.targetKind || "") === String(b.targetKind || "")
+    && String(a.workingCopyId || "") === String(b.workingCopyId || "")
+    && String(a.versionId || "") === String(b.versionId || "")
+    && a.exactSourcePath === b.exactSourcePath
+    && a.sessionEpoch === b.sessionEpoch
+    && String(a.sourceSha256 || "") === String(b.sourceSha256 || "")
+  );
+}
+
+export function sameSourceReceipt(left, right) {
+  return Boolean(
+    isSourceReceipt(left)
+    && isSourceReceipt(right)
+    && left.sessionIncarnation === right.sessionIncarnation
+    && left.sequence === right.sequence
+    && left.origin === right.origin
+    && left.operationId === right.operationId
+    && left.editRevision === right.editRevision
+    && left.canvasGeneration === right.canvasGeneration
+    && left.sourceSha256 === right.sourceSha256
+    && sameSourceReceiptContext(left, right)
+  );
+}
+
 function canvasAuthority({
   status = "idle",
   generation = 0,
@@ -64,6 +230,7 @@ function initialSnapshot({
     persistedSourceSha256: persistedHash,
     workingHtmlSha256: workingHtmlSha256 ? String(workingHtmlSha256) : null,
     canvasGeneration: 0,
+    sourceReceipt: null,
     editRevision: 0,
     lastPersistedRevision: 0,
     persistState: "idle",
@@ -83,8 +250,27 @@ export class DocumentSession {
 
   #flushPromise = null;
 
+  #receiptSequence = 0;
+
+  #confirmedReceiptSequence = null;
+
+  #sessionIncarnation;
+
   constructor(options = {}) {
+    this.#sessionIncarnation = nextSourceSessionIncarnation();
     this.#snapshot = initialSnapshot(options);
+    this.#snapshot = Object.freeze({
+      ...this.#snapshot,
+      sourceReceipt: this.#nextReceipt({
+        origin: "authority",
+        operationId: options.operationId || "document-session-initial-authority",
+        editRevision: this.#snapshot.editRevision,
+        canvasGeneration: this.#snapshot.canvasGeneration,
+        sourceSha256: this.#snapshot.workingHtmlSha256
+          || this.#snapshot.persistedSourceSha256,
+        context: options.context || null,
+      }),
+    });
   }
 
   setObserver(observer) {
@@ -161,9 +347,20 @@ export class DocumentSession {
     workingHtmlSha256 = persistedSourceSha256,
     editRevision = 0,
     lastPersistedRevision = 0,
+    context = null,
+    operationId = "",
   }) {
     this.#pendingWrite = null;
+    this.#confirmedReceiptSequence = null;
     const canvasGeneration = this.#snapshot.canvasGeneration + 1;
+    const receipt = this.#nextReceipt({
+      origin: "authority",
+      operationId,
+      editRevision,
+      canvasGeneration,
+      sourceSha256: workingHtmlSha256 || persistedSourceSha256,
+      context,
+    });
     this.#emit({
       html: String(html || ""),
       persistedSourceSha256: persistedSourceSha256
@@ -171,6 +368,7 @@ export class DocumentSession {
         : null,
       workingHtmlSha256: workingHtmlSha256 ? String(workingHtmlSha256) : null,
       canvasGeneration,
+      sourceReceipt: receipt,
       editRevision: revision(editRevision),
       lastPersistedRevision: revision(lastPersistedRevision),
       persistState: "idle",
@@ -184,13 +382,27 @@ export class DocumentSession {
     html,
     persistedSourceSha256 = null,
     workingHtmlSha256 = persistedSourceSha256,
+    sourceSha256,
     editRevision,
     lastPersistedRevision,
     persistState: nextPersistState,
     persistError,
     pendingWrite,
+    context = null,
+    operationId = "",
   }) {
+    this.#confirmedReceiptSequence = null;
     const canvasGeneration = this.#snapshot.canvasGeneration + 1;
+    const receipt = this.#nextReceipt({
+      origin: "authority",
+      operationId,
+      editRevision: editRevision ?? this.#snapshot.editRevision,
+      canvasGeneration,
+      sourceSha256: sourceSha256 === undefined
+        ? workingHtmlSha256 || persistedSourceSha256
+        : sourceSha256,
+      context,
+    });
     const next = {
       ...this.#snapshot,
       html: String(html),
@@ -199,6 +411,7 @@ export class DocumentSession {
         : null,
       workingHtmlSha256: workingHtmlSha256 ? String(workingHtmlSha256) : null,
       canvasGeneration,
+      sourceReceipt: receipt,
       canvasAuthority: pendingCanvasAuthority(canvasGeneration),
     };
     if (editRevision !== undefined) {
@@ -220,11 +433,22 @@ export class DocumentSession {
     return this.#snapshot;
   }
 
-  reloadCanvas() {
+  reloadCanvas({ context = null, operationId = "" } = {}) {
+    this.#confirmedReceiptSequence = null;
     const canvasGeneration = this.#snapshot.canvasGeneration + 1;
+    const receipt = this.#nextReceipt({
+      origin: "authority",
+      operationId,
+      editRevision: this.#snapshot.editRevision,
+      canvasGeneration,
+      sourceSha256: this.#snapshot.workingHtmlSha256
+        || this.#snapshot.persistedSourceSha256,
+      context,
+    });
     this.#emit({
       ...this.#snapshot,
       canvasGeneration,
+      sourceReceipt: receipt,
       canvasAuthority: pendingCanvasAuthority(canvasGeneration),
     });
     return this.#snapshot;
@@ -244,21 +468,46 @@ export class DocumentSession {
     return true;
   }
 
-  confirmCanvas({ generation, renderedSha256, workingHtmlSha256 } = {}) {
+  confirmCanvas({
+    generation,
+    renderedSha256,
+    workingHtmlSha256,
+    renderedHtml,
+    receipt,
+  } = {}) {
     const expectedGeneration = revision(generation);
     const renderedHash = renderedSha256 ? String(renderedSha256) : "";
     const workingHash = String(this.#snapshot.workingHtmlSha256 || "");
     const reportedWorkingHash = workingHtmlSha256
       ? String(workingHtmlSha256)
       : workingHash;
+    const currentReceipt = this.#snapshot.sourceReceipt;
+    const receivedReceipt = receipt && typeof receipt === "object"
+      ? receipt
+      : currentReceipt?.context == null
+        ? currentReceipt
+        : null;
     if (
       expectedGeneration !== this.#snapshot.canvasGeneration
-      || !/^sha256:[a-f0-9]{64}$/u.test(renderedHash)
+      || !SHA256.test(renderedHash)
+      || !SHA256.test(workingHash)
+      || !isSourceReceipt(receivedReceipt)
+      || !SHA256.test(String(receivedReceipt.sourceSha256 || ""))
+      || receivedReceipt.sourceSha256 !== renderedHash
       || reportedWorkingHash !== workingHash
       || renderedHash !== workingHash
+      || !isSourceReceipt(currentReceipt)
+      || !sameSourceReceipt(receivedReceipt, currentReceipt)
+      || receivedReceipt.canvasGeneration !== expectedGeneration
+      || (currentReceipt.context != null && typeof renderedHtml !== "string")
+      || (renderedHtml !== undefined && String(renderedHtml) !== this.#snapshot.html)
+      || this.#snapshot.canvasAuthority.status === "failed"
+      || this.#snapshot.canvasAuthority.status === "verified"
+      || this.#confirmedReceiptSequence === receivedReceipt.sequence
     ) {
       return false;
     }
+    this.#confirmedReceiptSequence = receivedReceipt.sequence;
     this.#emit({
       ...this.#snapshot,
       canvasAuthority: canvasAuthority({
@@ -270,9 +519,24 @@ export class DocumentSession {
     return true;
   }
 
-  failCanvas({ generation, error } = {}) {
+  failCanvas({ generation, error, receipt } = {}) {
     const expectedGeneration = revision(generation);
-    if (expectedGeneration !== this.#snapshot.canvasGeneration) return false;
+    const currentReceipt = this.#snapshot.sourceReceipt;
+    const receivedReceipt = receipt && typeof receipt === "object"
+      ? receipt
+      : currentReceipt?.context == null
+        ? currentReceipt
+        : null;
+    if (
+      expectedGeneration !== this.#snapshot.canvasGeneration
+      || !isSourceReceipt(receivedReceipt)
+      || !isSourceReceipt(currentReceipt)
+      || !sameSourceReceipt(receivedReceipt, currentReceipt)
+      || receivedReceipt.canvasGeneration !== expectedGeneration
+      || this.#snapshot.canvasAuthority.status === "failed"
+      || this.#snapshot.canvasAuthority.status === "verified"
+      || this.#confirmedReceiptSequence === receivedReceipt.sequence
+    ) return false;
     this.#emit({
       ...this.#snapshot,
       canvasAuthority: canvasAuthority({
@@ -284,17 +548,35 @@ export class DocumentSession {
     return true;
   }
 
-  beginEdit(html) {
+  beginEdit(html, {
+    origin = "local-edit",
+    operationId = "",
+    sourceSha256 = "",
+    context = null,
+  } = {}) {
     if (this.#snapshot.persistState === "conflict") {
       return this.#snapshot.editRevision;
     }
+    this.#confirmedReceiptSequence = null;
     const nextRevision = this.#snapshot.editRevision + 1;
+    const nextWorkingHash = SHA256.test(String(sourceSha256 || ""))
+      ? String(sourceSha256)
+      : null;
+    const receipt = this.#nextReceipt({
+      origin,
+      operationId,
+      editRevision: nextRevision,
+      canvasGeneration: this.#snapshot.canvasGeneration,
+      sourceSha256: nextWorkingHash || "",
+      context,
+    });
     this.#emit({
       ...this.#snapshot,
       html: String(html),
       editRevision: nextRevision,
+      sourceReceipt: receipt,
       persistError: "",
-      workingHtmlSha256: null,
+      workingHtmlSha256: nextWorkingHash,
       canvasAuthority: pendingCanvasAuthority(this.#snapshot.canvasGeneration),
     });
     return nextRevision;
@@ -525,6 +807,19 @@ export class DocumentSession {
 
   get html() {
     return this.#snapshot.html;
+  }
+
+  #nextReceipt(input) {
+    this.#receiptSequence += 1;
+    return sourceReceipt({
+      ...input,
+      sequence: this.#receiptSequence,
+      sessionIncarnation: this.#sessionIncarnation,
+    });
+  }
+
+  get sourceReceipt() {
+    return this.#snapshot.sourceReceipt;
   }
 
   get persistedSourceSha256() {

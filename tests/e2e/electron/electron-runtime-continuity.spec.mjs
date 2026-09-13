@@ -685,6 +685,10 @@ test("the read-only recovery notice reloads source authority even when dynamic p
     await expect(page.getByTestId('edit-runtime-static-fallback')).toContainText('页面暂时无法编辑');
     const working = await managedWorkingCopyPath(page, sourcePath);
     await expect.poll(() => readPublishedWorkingCopy(working)).toContain('FAIL_CHART');
+    const activeFrame = editor.locator('iframe[data-runtime-slot-role="active"]');
+    await activeFrame.evaluate((frame) => {
+      window.__M5_BEFORE_AUTHORITY_CONTENT_DOCUMENT__ = frame.contentDocument;
+    });
     // A second, independent failure during reload used to retain the previous
     // runtime's read-only flag forever, despite a verified static document.
     await electronApp.evaluate(({ ipcMain }) => {
@@ -696,6 +700,10 @@ test("the read-only recovery notice reloads source authority even when dynamic p
     await expect(page.locator('.workbench-chrome-status')).toHaveText('页面已重新加载，可以继续编辑');
     await expect(editor).toHaveAttribute('aria-readonly', 'false');
     await expect(page.getByTestId('edit-runtime-static-fallback')).toHaveCount(0);
+    await expect.poll(() => activeFrame.evaluate((frame) => Boolean(
+      frame.contentDocument
+      && frame.contentDocument !== window.__M5_BEFORE_AUTHORITY_CONTENT_DOCUMENT__
+    ))).toBe(true);
     await target.dblclick();
     await expect(target).toHaveAttribute('contenteditable', 'true');
     await target.press(keyShortcut('ArrowRight'));
@@ -734,9 +742,35 @@ test("Canvas shortcuts follow the promoted frame and same-source reload keeps ch
     await expect.poll(() => readPublishedWorkingCopy(working)).toContain("HISTORY_CONTINUITY");
     await expect(editor.locator('iframe[data-runtime-slot-role="active"]')).not.toHaveAttribute("data-frame-generation", generation);
     await expect.poll(() => page.evaluate(() => document.activeElement?.getAttribute("data-runtime-slot-role"))).toBe("active");
+    await expect(editor).toHaveAttribute("data-runtime-activation", "activation-ready");
+    await expect(editor).not.toHaveAttribute("data-runtime-candidate-id", /.+/u);
+    await expect(editor).not.toHaveAttribute("data-runtime-refresh-pending", "");
+    const activeFrame = editor.locator('iframe[data-runtime-slot-role="active"]');
+    const beforeReloadDocument = await documentToken(page);
+    const beforeReloadScriptCount = await page.evaluate(() => (
+      window.__PAGEROOT_DELAYED_CHART_RUNTIME_COUNT__ || 0
+    ));
+    const beforeReloadLastKnownGood = await editor.getAttribute(
+      "data-runtime-last-known-good-id",
+    );
+    await activeFrame.evaluate((frame) => {
+      window.__M5_BEFORE_SAME_BYTE_AUTHORITY_CONTENT_DOCUMENT__ = frame.contentDocument;
+    });
     await page.getByRole("button", { name: "更多", exact: true }).click();
     await page.getByRole("menuitem", { name: "从磁盘重新载入 HTML", exact: true }).click();
     await expect(page.locator(".workbench-chrome-status")).toHaveText("页面已重新加载，可以继续编辑");
+    await expect.poll(() => page.evaluate(() => (
+      window.__PAGEROOT_DELAYED_CHART_RUNTIME_COUNT__ || 0
+    ))).toBe(beforeReloadScriptCount + 1);
+    await expect.poll(() => documentToken(page)).not.toBe(beforeReloadDocument);
+    await expect.poll(() => activeFrame.evaluate((frame) => Boolean(
+      frame.contentDocument
+      && frame.contentDocument !== window.__M5_BEFORE_SAME_BYTE_AUTHORITY_CONTENT_DOCUMENT__
+    ))).toBe(true);
+    await expect(editor).toHaveAttribute("data-runtime-activation", "activation-ready");
+    await expect(editor).not.toHaveAttribute("data-runtime-candidate-id", /.+/u);
+    await expect.poll(() => editor.getAttribute("data-runtime-last-known-good-id"))
+      .not.toBe(beforeReloadLastKnownGood);
     await expect.poll(() => frame.locator("#chart canvas").evaluateAll(canvases => canvases.filter(canvas => (
       canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height).data.some((value, index) => index % 4 === 3 && value > 0)
     )).length)).toBe(1);
@@ -806,6 +840,77 @@ test("a layout-safe format refusal keeps the Runtime text session active", {
       window.__PAGEROOT_FLEX_FORMAT_RUNTIME_COUNT__ || 0
     ))).toBe(beforeScriptCount);
     await expect(editor).not.toHaveAttribute("data-runtime-refresh-pending", "");
+  });
+});
+
+test("a partial background fill refusal validates the Kernel result before publication", {
+  tag: ["@gate-smoke", "@smoke-editing"],
+}, async () => {
+  const source = `<!doctype html><html><head><title>Background format refusal</title></head><body>
+  <p data-native-case="background-format-refusal">Background source text</p>
+  <script>
+    parent.__PAGEROOT_BACKGROUND_FORMAT_RUNTIME_COUNT__ =
+      (parent.__PAGEROOT_BACKGROUND_FORMAT_RUNTIME_COUNT__ || 0) + 1;
+  </script></body></html>`;
+  await withRuntimeProject("pageroot-background-format-refusal-e2e-", {
+    "runtime-report.html": source,
+  }, async ({ page, sourcePath }) => {
+    const { frame } = await loadedDiskFrame(page, sourcePath, "background-format-refusal");
+    const editor = page.getByTestId("html-canvas-editor");
+    const target = frame.locator('[data-native-case="background-format-refusal"]');
+    const beforeDocument = await documentToken(page);
+    const beforeGeneration = await editor.locator('iframe[data-runtime-slot-role="active"]')
+      .getAttribute("data-frame-generation");
+    const beforeScriptCount = await page.evaluate(() => (
+      window.__PAGEROOT_BACKGROUND_FORMAT_RUNTIME_COUNT__ || 0
+    ));
+
+    await activateNativeEdit(frame, "background-format-refusal");
+    await target.evaluate((element) => {
+      const text = [...element.childNodes].find((node) => node.nodeType === Node.TEXT_NODE);
+      if (!(text instanceof Text) || text.data.length < 10) {
+        throw new Error("Background formatting fixture text is missing.");
+      }
+      const range = element.ownerDocument.createRange();
+      range.setStart(text, 0);
+      range.setEnd(text, 10);
+      const selection = element.ownerDocument.getSelection();
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+      element.ownerDocument.dispatchEvent(new Event("selectionchange"));
+    });
+    await editor.getByText("样式与间距", { exact: true }).click();
+    const fill = editor.getByLabel("元素填充色");
+    await expect(fill).toBeEnabled();
+    await fill.evaluate((element) => {
+      if (!(element instanceof HTMLInputElement)) throw new Error("Fill input is missing.");
+      const valueSetter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )?.set;
+      valueSetter?.call(element, "#ff0000");
+      element.dispatchEvent(new Event("input", { bubbles: true }));
+      element.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await expect(editor).toHaveAttribute(
+      "data-native-format-resume",
+      "rejected:requested:resumed",
+    );
+    await expect(target).toHaveAttribute("contenteditable", "true");
+    const working = await managedWorkingCopyPath(page, sourcePath);
+    expect(await readPublishedWorkingCopy(working, "utf8"))
+      .not.toMatch(/background-color\s*:/u);
+    await target.press("End");
+    await page.keyboard.insertText(" STILL_TYPING_AFTER_BACKGROUND_REFUSAL");
+    await page.keyboard.press(keyShortcut("s"));
+    await expect.poll(() => readPublishedWorkingCopy(working, "utf8"))
+      .toContain("STILL_TYPING_AFTER_BACKGROUND_REFUSAL");
+    await expect.poll(() => documentToken(page)).toBe(beforeDocument);
+    await expect(editor.locator('iframe[data-runtime-slot-role="active"]'))
+      .toHaveAttribute("data-frame-generation", beforeGeneration);
+    expect(await page.evaluate(() => (
+      window.__PAGEROOT_BACKGROUND_FORMAT_RUNTIME_COUNT__ || 0
+    ))).toBe(beforeScriptCount);
   });
 });
 

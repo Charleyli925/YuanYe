@@ -15,7 +15,7 @@ function comment(overrides = {}) {
     commentId: "comment_1",
     createdAt: "2026-08-24T00:00:00.000Z",
     updatedAt: "2026-08-24T00:00:00.000Z",
-    target: {
+    sourceAnchor: {
       id: "target_comment_1",
       elementId: ELEMENT_ID,
       label: "正文",
@@ -43,22 +43,22 @@ test("unsafeRelinkComments keeps only contentful comments with unprovable target
   const safe = comment();
   const orphaned = comment({
     commentId: "comment_2",
-    target: { ...comment().target, resolution: "orphaned" },
+    sourceAnchor: { ...comment().sourceAnchor, resolution: "orphaned" },
   });
   const ambiguous = comment({
     commentId: "comment_3",
-    target: { ...comment().target, resolution: "ambiguous" },
+    sourceAnchor: { ...comment().sourceAnchor, resolution: "ambiguous" },
   });
   const emptyAndOrphaned = comment({
     commentId: "comment_4",
     text: "   ",
-    target: { ...comment().target, resolution: "orphaned" },
+    sourceAnchor: { ...comment().sourceAnchor, resolution: "orphaned" },
   });
   const attachmentsOnlyOrphaned = comment({
     commentId: "comment_5",
     text: "",
     attachments: [{ attachmentId: "attachment_x1" }],
-    target: { ...comment().target, resolution: "orphaned" },
+    sourceAnchor: { ...comment().sourceAnchor, resolution: "orphaned" },
   });
 
   const unsafe = unsafeRelinkComments([

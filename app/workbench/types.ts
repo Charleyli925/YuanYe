@@ -78,6 +78,22 @@ export type ProjectVersionSummary = {
   isLatestOfficial: boolean | null;
 };
 
+/**
+ * Structured-clone rejection exposed by the trusted project IPC adapter.
+ * Main-process Error instances and transport metadata never cross the
+ * contextBridge boundary.
+ */
+export type DesktopProjectOperationError = Readonly<{
+  code: string;
+  message: string;
+  details?: Readonly<Record<string, string | number | boolean | null>>;
+}>;
+
+/**
+ * Project API promises reject with DesktopProjectOperationError. The
+ * Promise value type below describes only the successful result, as required
+ * by TypeScript's standard Promise contract.
+ */
 export type DesktopProjectsApi = {
   getActiveProject: () => Promise<HtmlOpenResult | null>;
   openHtml: () => Promise<HtmlOpenResult | null>;
@@ -114,6 +130,7 @@ export type DesktopProjectsApi = {
     versionId: string;
   }) => Promise<{ versionPath: string }>;
   activateGeneratedVersion?: (payload: {
+    operationId?: string;
     previousSourcePath: string;
     nextSourcePath: string;
     expectedSha256: string;
@@ -461,9 +478,8 @@ export type CommentItem = {
   commentId: string;
   createdAt: string;
   updatedAt: string;
-  target: HtmlCanvasSelection;
-  /** Exact source host used for persistence and cross-version resolution. */
-  sourceAnchor?: HtmlCanvasSelection;
+  /** The only writable source target, including its optional UTF-16 text locator. */
+  sourceAnchor: HtmlCanvasSelection;
   /** Runtime-only visual context; it never grants source authority. */
   visualHint?: HtmlCanvasRuntimeVisualHint;
   text: string;
@@ -602,12 +618,7 @@ export type RecoveryIdentity = {
   editRevision: number;
   token: string;
 };
-export type ProjectContext = {
-  epoch: number;
-  projectId: string;
-  documentId: string;
-  sourcePath: string;
-};
+export type { ProjectContext } from "../application/project-session.js";
 export type PendingDraft = DraftSnapshot<CommentItem, DirectEditEvent>;
 export type BackgroundProjectResult = {
   state: "processing" | "ready" | "no-change" | "error" | "conflict";

@@ -1,9 +1,7 @@
 import type { ReviewAnalysisSession } from "../application/review-analysis-session.js";
 import type { VersionReviewCandidate } from "../application/version-workflow.js";
 import { commentHasContent } from "./comment-relink-model.js";
-import { commentSourceAnchor } from "./comment-model";
 import {
-  buildReviewShellDocuments,
   buildReviewSourceFactsAsync,
   projectReviewDocuments,
   type ReviewDocuments,
@@ -36,25 +34,7 @@ export function reviewSourceFactsByteSize(facts: ReviewSourceFacts): number {
     + JSON.stringify(facts.diagnostics).length
     + JSON.stringify(facts.visualBinding).length
     + JSON.stringify(facts.visualEvidence).length
-  );
-}
-
-export function preparedReviewByteSize(prepared: PreparedReviewDocuments): number {
-  return 2 * (
-    prepared.beforeHtml.length
-    + prepared.afterHtml.length
-    + prepared.commentsKey.length
-    + prepared.documents.before.length
-    + prepared.documents.after.length
-    + prepared.documents.bootstrapJavaScript.before.length
-    + prepared.documents.bootstrapJavaScript.after.length
-    + prepared.documents.bootstrapFallbackJavaScript.before.length
-    + prepared.documents.bootstrapFallbackJavaScript.after.length
-    + JSON.stringify(prepared.documents.commentTargets).length
-    + JSON.stringify(prepared.documents.visualBinding).length
-    + JSON.stringify(prepared.documents.visualEvidence).length
-    + JSON.stringify(prepared.documents.reviewImpact || null).length
-    + JSON.stringify(prepared.documents.diagnostics).length
+    + JSON.stringify(facts.annotationAvailability).length
   );
 }
 
@@ -96,10 +76,10 @@ function reviewImpactFromCandidate(
 
 export function reviewCommentsForAnalysis(comments: readonly CommentItem[]): CommentItem[] {
   return comments.filter(commentHasContent).map((comment) => {
-    const sourceTarget = commentSourceAnchor(comment) || comment.target;
+    const sourceTarget = comment.sourceAnchor;
     return {
       ...comment,
-      target: {
+      sourceAnchor: {
         ...sourceTarget,
         ...(sourceTarget.sourceAnchor
           ? { sourceAnchor: { ...sourceTarget.sourceAnchor } }
@@ -117,16 +97,6 @@ export function reviewCommentsForAnalysis(comments: readonly CommentItem[]): Com
           ? { boundingBox: { ...sourceTarget.boundingBox } }
           : {}),
       },
-      ...(comment.sourceAnchor
-        ? {
-            sourceAnchor: {
-              ...sourceTarget,
-              ...(sourceTarget.sourceAnchor
-                ? { sourceAnchor: { ...sourceTarget.sourceAnchor } }
-                : {}),
-            },
-          }
-        : {}),
       ...(comment.attachments?.length
         ? { attachments: comment.attachments.map((item) => ({ ...item })) }
         : {}),
@@ -141,7 +111,6 @@ export async function prepareReviewAnalysis({
   comments,
   externalBootstrap,
   sessionId,
-  onShell,
 }: {
   session: ReviewAnalysisSession<ReviewSourceFacts>;
   candidate: VersionReviewCandidate;
@@ -149,7 +118,6 @@ export async function prepareReviewAnalysis({
   comments: readonly CommentItem[];
   externalBootstrap: boolean;
   sessionId: string;
-  onShell?: (documents: ReviewDocuments) => void;
 }): Promise<PreparedReviewDocuments> {
   const reviewComments = reviewCommentsForAnalysis(comments);
   const reviewImpact = reviewImpactFromCandidate(candidate);
@@ -160,14 +128,6 @@ export async function prepareReviewAnalysis({
     candidate.sourcePath,
     externalBootstrap ? "external" : "inline",
   ].join("\u0000");
-  if (!session.peek(sourceKey)) {
-    onShell?.(buildReviewShellDocuments(beforeHtml, candidate.content, {
-      sessionId,
-      sourcePath: candidate.sourcePath,
-      externalBootstrap,
-      ...(reviewImpact ? { reviewImpact } : {}),
-    }));
-  }
   const facts = await session.analyze({
     key: sourceKey,
     compute: async ({ isCancelled }) => buildReviewSourceFactsAsync(
@@ -192,4 +152,3 @@ export async function prepareReviewAnalysis({
     }),
   };
 }
-

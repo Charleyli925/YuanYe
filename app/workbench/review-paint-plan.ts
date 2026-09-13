@@ -28,6 +28,39 @@ export const EMPTY_REVIEW_PAINT_PLAN: ReviewPaintPlan = Object.freeze({
   after: EMPTY_SIDE,
 });
 
+function isPureStyleEvidence(evidence: SourceEvidence) {
+  return evidence.kinds.length > 0 && evidence.kinds.every((kind) => kind === "style");
+}
+
+/** Only region-local evidence that can affect an optional outline needs observing. */
+export function eligibleReviewVisualEvidence({
+  focusGroups,
+  changes,
+  visualEvidence,
+}: Readonly<{
+  focusGroups: readonly ReviewFocusGroup[];
+  changes: readonly ReviewChange[];
+  visualEvidence: readonly SourceEvidence[];
+}>): SourceEvidence[] {
+  const visualGroups = focusGroups.filter((group) => group.focusOutlinePolicy === "visual-change");
+  if (!visualGroups.length) return [];
+  const pureStyleEvidence = visualEvidence.filter(isPureStyleEvidence);
+  if (!pureStyleEvidence.length) return [];
+  const changesById = new Map(changes.map((change) => [change.id, change]));
+  const referencedIds = new Set<string>();
+  for (const group of visualGroups) {
+    for (const region of [...group.regions.before, ...group.regions.after]) {
+      const changeEvidence = new Set(region.changeIds.flatMap((id) => (
+        changesById.get(id)?.evidenceStableIds || []
+      )));
+      for (const stableId of region.visualEvidenceStableIds) {
+        if (changeEvidence.has(stableId)) referencedIds.add(stableId);
+      }
+    }
+  }
+  return pureStyleEvidence.filter((evidence) => referencedIds.has(evidence.stableId));
+}
+
 function regionHasConfirmedVisualChange(
   region: ReviewFocusGroup["regions"][ReviewSide][number],
   changes: readonly ReviewChange[],
@@ -39,8 +72,7 @@ function regionHasConfirmedVisualChange(
     const sourceCandidate = visualEvidence.find((evidence) => evidence.stableId === stableId);
     // A mixed text/attribute candidate cannot prove that this locality's style
     // changed. Failing closed may omit a box, but never borrows unrelated proof.
-    if (!sourceCandidate?.kinds.length
-      || sourceCandidate.kinds.some((kind) => kind !== "style")) return false;
+    if (!sourceCandidate || !isPureStyleEvidence(sourceCandidate)) return false;
     return changes.some((change) => (
       region.changeIds.includes(change.id)
       && (change.evidenceStableIds || []).includes(stableId)

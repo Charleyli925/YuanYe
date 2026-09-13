@@ -2741,50 +2741,288 @@ test("Review keeps Candidate scope diagnostics out of the comparison canvas", {
   }
 });
 
-test("CSS and Script comment-only changes stay out of Review", {
-  tag: ["@gate-smoke", "@smoke-review"],
-}, async () => {
-  test.setTimeout(120_000);
-  const fixture = createSourceFixture("source-only-diagnostics.html");
-  const launched = await launchPageRoot({ activeSourcePath: fixture.sourcePath });
-  try {
-    const request = await addCommentAndSubmit(
-      launched.page,
-      launched.electronApp,
-      fixture.sourcePath,
-    );
-    writeAiOutput(request.requestRoot, (base) => base
-      .replace("    :root {", "    /* source-only QA */\n    :root {")
-      .replace(
-        'document.documentElement.dataset.authorScriptRan = "true";',
-        '/* source-only QA */ document.documentElement.dataset.authorScriptRan = "true";',
-      ));
-    runOfficialFinalizer(request.requestRoot, request.changeRequest);
-    await expect(launched.page.getByTestId("ai-conversation-action-bar"))
-      .toContainText("修改已准备好，尚未采用", { timeout: 30_000 });
+async function installReviewObservationProbe(page, { dropObservations = false } = {}) {
+  await page.evaluate(({ dropObservations }) => {
+    const probe = { projections: [], observations: [], deadlines: 0 };
+    window.__reviewObservationProbe = probe;
+    const post = MessagePort.prototype.postMessage;
+    MessagePort.prototype.postMessage = function(message, ...rest) {
+      if (message?.type === "verdicts") probe.projections.push(message.side);
+      if (message?.type === "observe") {
+        probe.observations.push({ side: message.side, generation: message.generation, candidates: message.candidates });
+        if (dropObservations) return;
+      }
+      return Reflect.apply(post, this, [message, ...rest]);
+    };
+    const schedule = window.setTimeout;
+    window.setTimeout = function(callback, delay, ...args) {
+      // Observe the real optional-outline deadline without changing its duration.
+      if (delay === 4_000 && typeof callback === "function") {
+        return schedule(() => { probe.deadlines += 1; callback(...args); }, delay);
+      }
+      return schedule(callback, delay, ...args);
+    };
+  }, { dropObservations });
+}
 
-    await launched.page.getByRole("button", { name: "查看修改" }).click();
-    await expect(launched.page.getByTestId("ai-review-workspace")).toHaveCount(0);
-    await expect(launched.page.locator(".toast"))
-      .toContainText("未识别到明确的页面变化", { timeout: 30_000 });
-    await expect(launched.page.locator(".toast"))
-      .toContainText("没有找到能够定位到页面具体位置的内容、结构或视觉变化");
-    // A repeated ready response must not erase the user's Review outcome.
-    // Hover pauses the ordinary notice lifetime while the real poll completes.
-    await launched.page.locator(".toast").hover();
-    await launched.page.bringToFront();
-    const response = await launched.page.waitForResponse(
-      (response) => new URL(response.url()).pathname === "/status",
-      { timeout: 30_000 },
-    );
-    expect((await response.json()).status).toBe("ready-to-open");
-    await expect(launched.page.locator(".toast"))
-      .toContainText("未识别到明确的页面变化");
-  } finally {
-    await stopPageRoot(launched.electronApp, launched.isolatedUserData);
-    removeSourceFixture(fixture.sourceDirectory);
+async function expectReviewProjectionWithoutObservations(page) {
+  await expect.poll(() => page.evaluate(() => [...new Set(window.__reviewObservationProbe.projections)].sort()))
+    .toEqual(["after", "before"]);
+  expect(await page.evaluate(() => window.__reviewObservationProbe.observations)).toEqual([]);
+}
+
+async function readSharedToolbarLayout(page) {
+  return page.evaluate(() => {
+    const readRect = (element) => {
+      if (!element) return null;
+      const box = element.getBoundingClientRect();
+      return {
+        x: box.x,
+        y: box.y,
+        width: box.width,
+        height: box.height,
+        right: box.right,
+        bottom: box.bottom,
+      };
+    };
+    const root = document.querySelector(".workbench-header");
+    const modeSwitch = root?.querySelector(".canvas-mode-switch") || null;
+    const aiEntry = root?.querySelector(".workbench-toolbar-actions > .header-send-button") || null;
+    return {
+      header: readRect(root),
+      stage: readRect(document.querySelector(".review-scroll-stage")),
+      primary: readRect(root?.querySelector(".workbench-toolbar-primary") || null),
+      center: readRect(root?.querySelector(".workbench-toolbar-center") || null),
+      actions: readRect(root?.querySelector(".workbench-toolbar-actions") || null),
+      modeSwitch: readRect(modeSwitch),
+      aiEntry: readRect(aiEntry),
+      modeButtons: [...(modeSwitch?.querySelectorAll("button") || [])].map((button) => ({
+        rect: readRect(button),
+        label: button.textContent?.trim() || "",
+        disabled: button.disabled,
+        pressed: button.getAttribute("aria-pressed"),
+      })),
+      innerWidth: window.innerWidth,
+      documentWidth: Math.max(
+        document.documentElement.scrollWidth,
+        document.body?.scrollWidth || 0,
+      ),
+    };
+  });
+}
+
+function expectRectNear(actual, expected, label, keys = ["x", "y", "width", "height"]) {
+  expect(actual, `${label} should exist`).not.toBeNull();
+  expect(expected, `${label} baseline should exist`).not.toBeNull();
+  for (const key of keys) {
+    expect(Math.abs(actual[key] - expected[key]), `${label}.${key}`).toBeLessThanOrEqual(0.5);
   }
-});
+}
+
+function expectSharedToolbarLayout(layout) {
+  expect(layout.header).not.toBeNull();
+  expect(layout.stage).not.toBeNull();
+  expect(layout.primary).not.toBeNull();
+  expect(layout.center).not.toBeNull();
+  expect(layout.actions).not.toBeNull();
+  expect(layout.modeSwitch).not.toBeNull();
+  expect(layout.aiEntry).not.toBeNull();
+  expect(layout.modeSwitch.width).toBe(180);
+  expect(layout.modeSwitch.height).toBe(34);
+  expect(layout.modeButtons).toHaveLength(3);
+  for (const button of layout.modeButtons) expect(button.rect.height).toBe(28);
+  expect(layout.primary.right).toBeLessThanOrEqual(layout.center.x + 0.5);
+  expect(layout.center.right).toBeLessThanOrEqual(layout.actions.x + 0.5);
+  expect(layout.documentWidth - layout.innerWidth).toBeLessThanOrEqual(1);
+}
+
+function expectStableSharedToolbar(current, baseline, { includeActions = true } = {}) {
+  for (const key of ["header", "stage", "primary", "modeSwitch"]) {
+    expectRectNear(current[key], baseline[key], key);
+  }
+  // Review legitimately gives the previously empty center slot intrinsic
+  // height. Its horizontal allocation is the cross-mode layout invariant.
+  expectRectNear(current.center, baseline.center, "center", ["x", "width"]);
+  if (includeActions) {
+    expectRectNear(current.actions, baseline.actions, "actions");
+    expectRectNear(current.aiEntry, baseline.aiEntry, "aiEntry");
+  }
+  expectSharedToolbarLayout(current);
+}
+
+function emptyReviewScenario(scenario) {
+  return async ({}, testInfo) => {
+    test.setTimeout(120_000);
+    const fixture = createSourceFixture(
+      scenario.longFileName
+        ? "2026-年度核心经营指标与跨区域增长归因分析完整终稿-source-only-diagnostics.html"
+        : "source-only-diagnostics.html",
+      scenario.darkSource
+        ? (source) => source.replace(
+            "    :root {",
+            "    body { background: rgb(8, 10, 14); color: rgb(238, 240, 245); }\n    :root {",
+          )
+        : undefined,
+    );
+    const original = readFileSync(fixture.sourcePath);
+    const launched = await launchPageRoot({ activeSourcePath: fixture.sourcePath });
+    try {
+      if (scenario.narrow) {
+        await launched.electronApp.evaluate(({ BrowserWindow }) => {
+          const window = BrowserWindow.getAllWindows().find((candidate) => (
+            candidate.webContents.getURL().includes("/dist-desktop/renderer/")
+            || candidate.getTitle() === "源页"
+          ));
+          const bounds = window?.getBounds();
+          if (window && bounds) window.setBounds({ ...bounds, width: 1024, height: 768 }, false);
+        });
+        await expect.poll(() => launched.page.evaluate(() => window.innerWidth))
+          .toBeLessThanOrEqual(1120);
+      }
+      const header = launched.page.locator(".workbench-header");
+      await expect(header).toBeVisible();
+      const modeSwitch = launched.page.getByRole("group", { name: "工作模式", exact: true });
+      const editButton = modeSwitch.getByRole("button", { name: "编辑", exact: true });
+      const previewButton = modeSwitch.getByRole("button", { name: "预览", exact: true });
+      const reviewButton = modeSwitch.getByRole("button", { name: "审阅", exact: true });
+      const initialLayout = await readSharedToolbarLayout(launched.page);
+      expectSharedToolbarLayout(initialLayout);
+      await expect(reviewButton).toBeDisabled();
+      await expect(reviewButton).toHaveCSS("opacity", "0.38");
+      await expect(editButton).toHaveAttribute("aria-pressed", "true");
+      const previewRect = await previewButton.boundingBox();
+      await previewButton.hover();
+      expectRectNear(await previewButton.boundingBox(), previewRect, "preview hover");
+      await expect(previewButton).not.toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+      await previewButton.focus();
+      await expect(previewButton).toBeFocused();
+      await expect(previewButton).toHaveCSS("outline-width", "2px");
+      expectRectNear(await previewButton.boundingBox(), previewRect, "preview focus");
+      if (scenario.visualMatrix) {
+        await launched.page.emulateMedia({ reducedMotion: "reduce" });
+        await expect(previewButton).toHaveCSS("transition-duration", "0s");
+        await expect(previewButton.locator("svg")).toHaveCSS("transition-duration", "0s");
+        await launched.page.screenshot({
+          path: testInfo.outputPath("narrow-long-dark-edit-hover-focus-reduced-motion.png"),
+          animations: "disabled",
+        });
+      }
+      await modeSwitch.getByRole("button", { name: "预览", exact: true }).click();
+      await expect(modeSwitch.getByRole("button", { name: "预览", exact: true })).toHaveAttribute("aria-pressed", "true");
+      await expect(launched.page.getByRole("group", { name: "页面预览", exact: true })).toHaveCount(0);
+      expectStableSharedToolbar(await readSharedToolbarLayout(launched.page), initialLayout);
+      await modeSwitch.getByRole("button", { name: "编辑", exact: true }).click();
+      await expect(modeSwitch.getByRole("button", { name: "编辑", exact: true })).toHaveAttribute("aria-pressed", "true");
+      expectStableSharedToolbar(await readSharedToolbarLayout(launched.page), initialLayout);
+      await launched.page.screenshot({ path: testInfo.outputPath("edit-toolbar.png"), animations: "disabled" });
+      await installReviewObservationProbe(launched.page);
+      const request = await addCommentAndSubmit(launched.page, launched.electronApp, fixture.sourcePath);
+      writeAiOutput(request.requestRoot, (base) => scenario.script
+        ? base.replace('document.documentElement.dataset.authorScriptRan = "true";',
+          'document.documentElement.dataset.authorScriptRan = "true"; document.addEventListener("DOMContentLoaded", () => { document.body.style.backgroundColor = "rgb(210, 230, 250)"; });')
+        : base.replace("    :root {", "    /* source-only QA */\n    :root {")
+          .replace('document.documentElement.dataset.authorScriptRan = "true";',
+            '/* source-only QA */ document.documentElement.dataset.authorScriptRan = "true";'));
+      runOfficialFinalizer(request.requestRoot, request.changeRequest);
+      await expect(launched.page.getByTestId("ai-conversation-action-bar"))
+        .toContainText("修改已准备好，尚未采用", { timeout: 30_000 });
+      const readyLayout = await readSharedToolbarLayout(launched.page);
+      expectSharedToolbarLayout(readyLayout);
+      await launched.page.getByRole("button", { name: "查看修改" }).click();
+      await expect(launched.page.getByTestId("ai-review-workspace")).toBeVisible({ timeout: 30_000 });
+      await expect(launched.page.getByTestId("review-empty-changes"))
+        .toHaveText("未定位到可标注的变化，可直接查看前后页面。");
+      await expect(launched.page.getByRole("group", { name: "变化审阅", exact: true })).toHaveCount(0);
+      expectStableSharedToolbar(await readSharedToolbarLayout(launched.page), readyLayout);
+      await expect(launched.page.getByRole("group", { name: "页面预览", exact: true })).toBeVisible();
+      await expect(launched.page.getByRole("group", { name: "滚动方式", exact: true })).toBeVisible();
+      await expect(launched.page.getByRole("group", { name: "画布缩放", exact: true })).toBeVisible();
+      const before = launched.page.frameLocator('iframe[title^="修改前"]');
+      const after = launched.page.frameLocator('iframe[title^="修改后"]');
+      for (const frame of [before, after]) {
+        await expect(frame.locator("body")).toBeVisible();
+        await expect(frame.locator("[data-pageroot-review-marker]")).toHaveCount(0);
+      }
+      if (scenario.darkSource) {
+        await expect(before.locator("body")).toHaveCSS("background-color", "rgb(8, 10, 14)");
+        await expect(header).not.toHaveCSS("background-color", "rgb(8, 10, 14)");
+      }
+      await expectReviewProjectionWithoutObservations(launched.page);
+      if (scenario.script) await expect(after.locator("body")).toHaveCSS("background-color", "rgb(210, 230, 250)");
+      for (const frame of [before, after]) {
+        await expect(frame.locator("html")).toHaveAttribute("data-pageroot-review-focus", "all");
+        await expect(frame.locator("html")).toHaveAttribute("data-pageroot-review-focus-group", "");
+        await expect(frame.locator("[data-pageroot-review-overlay-box], [data-pageroot-review-mask-hole], [data-pageroot-review-region-bar]"))
+          .toHaveCount(0);
+      }
+      await launched.page.screenshot({ path: testInfo.outputPath("empty-review-overview.png"), animations: "disabled" });
+      await launched.page.getByRole("button", { name: "只看修改前", exact: true }).click();
+      await launched.page.getByRole("button", { name: "双页对比", exact: true }).click();
+      await launched.page.screenshot({ path: testInfo.outputPath("empty-review-returned-to-split.png"), animations: "disabled" });
+      // Closing/reopening the existing decision owner preserves the empty Review.
+      const closeConversation = launched.page.getByRole("button", { name: "收起会话面板" });
+      if (scenario.narrow) {
+        const hitTest = await closeConversation.evaluate((button) => {
+          const box = button.getBoundingClientRect();
+          const target = document.elementFromPoint(
+            box.left + box.width / 2,
+            box.top + box.height / 2,
+          );
+          const conversation = button.closest('[data-testid="ai-conversation-sidebar"]');
+          const reviewSidebar = conversation?.parentElement || null;
+          const rect = (element) => {
+            if (!element) return null;
+            const value = element.getBoundingClientRect();
+            return { x: value.x, y: value.y, width: value.width, height: value.height };
+          };
+          return {
+            clickable: target === button || button.contains(target),
+            target: target?.tagName || null,
+            targetClass: target?.getAttribute("class") || null,
+            button: rect(button),
+            sidebar: rect(reviewSidebar),
+          };
+        });
+        expect(hitTest.clickable, JSON.stringify(hitTest)).toBe(true);
+      }
+      await closeConversation.click();
+      await launched.page.getByRole("button", { name: "待决定", exact: true }).click();
+      await expect(launched.page.getByRole("button", { name: "采用修改", exact: true })).toBeVisible();
+      if (scenario.adopt) {
+        await adoptReadyResult(launched.page);
+        await assertReviewAcceptPersistence({ page: launched.page, sourcePath: fixture.sourcePath,
+          original, expectedText: "source-only QA", versionPathPattern: /\.html$/u });
+      } else {
+        await launched.page.getByRole("button", { name: "不用这次", exact: true }).click();
+        await launched.page.getByRole("dialog", { name: /返回 AI 修改前（版本 \d+）？/u })
+          .getByRole("button", { name: "返回修改前版本" }).click();
+        await expect(launched.page.getByTestId("ai-review-workspace")).toHaveCount(0);
+        expect(readFileSync(fixture.sourcePath).equals(original)).toBe(true);
+        const project = await launched.page.evaluate(() => window.htmlAIProjects?.getActiveProject());
+        expect(readFileSync(project.sourcePath, "utf8")).not.toContain('document.body.style.backgroundColor');
+        await expect(launched.page.locator(".comment-card")).not.toHaveCount(0);
+      }
+    } finally {
+      await stopPageRoot(launched.electronApp, launched.isolatedUserData);
+      removeSourceFixture(fixture.sourceDirectory);
+    }
+  };
+}
+
+test("CSS and Script comment-only changes open Review without position markers", {
+  tag: ["@gate-smoke", "@smoke-review"],
+}, emptyReviewScenario({ script: false, adopt: true }));
+
+test("Script-only visual changes open Review without position markers", {
+  tag: ["@gate-smoke", "@smoke-review"],
+}, emptyReviewScenario({
+  script: true,
+  adopt: false,
+  darkSource: true,
+  longFileName: true,
+  narrow: true,
+  visualMatrix: true,
+}));
 
 test("a safe simple CSS selector creates one position-bound element change", {
   tag: ["@gate-smoke", "@smoke-review"],
@@ -2819,15 +3057,85 @@ test("a safe simple CSS selector creates one position-bound element change", {
     }
     await expect(afterFrame.locator('[data-pageroot-review-structure="style"]'))
       .toHaveCount(1);
+    const filters = launched.page.getByRole("group", { name: "变化审阅", exact: true });
+    await filters.getByRole("button", { name: "文字变化", exact: true }).click();
+    await expect(launched.page.getByTestId("review-empty-changes")).toBeVisible();
+    await expect(filters).toBeVisible();
+    await filters.getByRole("button", { name: "全部变化", exact: true }).click();
+    await expect(launched.page.getByTestId("review-empty-changes")).toHaveCount(0);
   } finally {
     await stopPageRoot(launched.electronApp, launched.isolatedUserData);
     removeSourceFixture(fixture.sourceDirectory);
   }
 });
 
+for (const scenario of ["confirmed", "mixed", "unverified"]) {
+  test(`Review observes only optional inline-style outlines: ${scenario}`, async ({}, testInfo) => {
+    test.setTimeout(120_000);
+    const fixture = createSourceFixture("optional-style-review.html", (source) => source.replace(
+      "  </main>",
+      '    <div data-review-observe-style style="color: rgb(20, 40, 60)">可选样式观察</div>\n  </main>',
+    ));
+    const launched = await launchPageRoot({ activeSourcePath: fixture.sourcePath });
+    try {
+      await installReviewObservationProbe(launched.page, { dropObservations: scenario === "unverified" });
+      const request = await addCommentAndSubmit(launched.page, launched.electronApp, fixture.sourcePath);
+      writeAiOutput(request.requestRoot, (base) => {
+        const styled = base.replace('style="color: rgb(20, 40, 60)"', 'style="color: rgb(180, 20, 30)"');
+        expect(styled).not.toBe(base);
+        return scenario === "mixed" ? styled.replace("可选样式观察", "文字与样式同时修改") : styled;
+      });
+      runOfficialFinalizer(request.requestRoot, request.changeRequest);
+      await expect(launched.page.getByTestId("ai-conversation-action-bar"))
+        .toContainText("修改已准备好，尚未采用", { timeout: 30_000 });
+      await launched.page.getByRole("button", { name: "查看修改" }).click();
+      await expect(launched.page.getByTestId("ai-review-workspace")).toBeVisible({ timeout: 30_000 });
+      const before = launched.page.frameLocator('iframe[title^="修改前"]');
+      const after = launched.page.frameLocator('iframe[title^="修改后"]');
+      const host = after.locator("[data-review-observe-style]");
+      await expect(host).toHaveAttribute("data-pageroot-review-structure", "style");
+      const stableId = await host.getAttribute("data-pageroot-id");
+      if (scenario === "mixed") {
+        await expectReviewProjectionWithoutObservations(launched.page);
+      } else {
+        await expect.poll(() => launched.page.evaluate(() => (
+          [...new Set(window.__reviewObservationProbe.observations.map((item) => item.side))].sort()
+        ))).toEqual(["after", "before"]);
+        const observations = await launched.page.evaluate(() => window.__reviewObservationProbe.observations);
+        for (const observation of observations) {
+          expect(observation.candidates).toEqual([{ stableId, positionSensitive: false, present: true }]);
+        }
+      }
+      if (scenario === "unverified") {
+        await expect.poll(() => launched.page.evaluate(() => window.__reviewObservationProbe.deadlines), { timeout: 8_000 })
+          .toBeGreaterThan(0);
+      }
+      const styleGroup = await host.evaluate((element) => {
+        const facts = JSON.parse(element.getAttribute("data-pageroot-review-projection-facts") || "[]");
+        const style = facts.find((fact) => fact.structureChange === "style");
+        return style ? `focus-${style.displayGroupId || `display-fact-${style.id}`}` : "";
+      });
+      expect(styleGroup).toBeTruthy();
+      await after.locator(`[data-pageroot-review-region-bar][data-pageroot-review-focus-group="${styleGroup}"]`)
+        .first().evaluate((bar) => bar.click());
+      for (const frame of [before, after]) {
+        await expect(frame.locator("html")).toHaveAttribute("data-pageroot-review-focus-group", styleGroup);
+        await expect(frame.locator("[data-pageroot-review-overlay-box]"))
+          .toHaveCount(scenario === "confirmed" ? 1 : 0);
+      }
+      await expect(launched.page.getByRole("button", { name: "采用修改", exact: true })).toBeEnabled();
+      await expect(launched.page.getByRole("button", { name: "不用这次", exact: true })).toBeEnabled();
+      await launched.page.screenshot({ path: testInfo.outputPath(`style-${scenario}-focus.png`), animations: "disabled" });
+    } finally {
+      await stopPageRoot(launched.electronApp, launched.isolatedUserData);
+      removeSourceFixture(fixture.sourceDirectory);
+    }
+  });
+}
+
 test("source Review preserves multi-host text evidence and hidden changes without visual confirmation", {
   tag: ["@gate-smoke", "@smoke-review"],
-}, async () => {
+}, async ({}, testInfo) => {
   test.setTimeout(120_000);
   const SECTION_ID = "pr1_aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa";
   const FIRST_ID = "pr1_bbbbbbbbbbbb4bbb8bbbbbbbbbbbbbbb";
@@ -2844,6 +3152,7 @@ test("source Review preserves multi-host text evidence and hidden changes withou
   ));
   const launched = await launchPageRoot({ activeSourcePath: fixture.sourcePath });
   try {
+    await installReviewObservationProbe(launched.page);
     const request = await addCommentAndSubmit(
       launched.page,
       launched.electronApp,
@@ -2881,6 +3190,8 @@ test("source Review preserves multi-host text evidence and hidden changes withou
     await expect(hiddenAfter.locator('[data-pageroot-review-text="added"]'))
       .toHaveAttribute("data-pageroot-review-confirmed", "true");
     await expect(launched.page.getByTestId("review-visual-status")).toHaveCount(0);
+    await expectReviewProjectionWithoutObservations(launched.page);
+    await launched.page.screenshot({ path: testInfo.outputPath("text-review-overview.png"), animations: "disabled" });
   } finally {
     await stopPageRoot(launched.electronApp, launched.isolatedUserData);
     removeSourceFixture(fixture.sourceDirectory);
@@ -3224,3 +3535,76 @@ test("two lost committed adoption replies stay pending and recover one decision 
     removeSourceFixture(fixture.sourceDirectory);
   }
 });
+
+
+for (const adopt of [true, false]) {
+  test(`annotation capacity fallback keeps formal Review and ${adopt ? "adoption" : "discard"}`, {
+    tag: ["@gate-smoke", "@smoke-review"],
+  }, async ({}, testInfo) => {
+    test.setTimeout(120_000);
+    const fixture = createSourceFixture("annotation-capacity-fallback.html");
+    const original = readFileSync(fixture.sourcePath);
+    const launched = await launchPageRoot({ activeSourcePath: fixture.sourcePath });
+    try {
+      await installReviewObservationProbe(launched.page);
+      const request = await addCommentAndSubmit(launched.page, launched.electronApp, fixture.sourcePath);
+      writeAiOutput(request.requestRoot, (base) => base.replace(ORIGINAL_TEXT, UPDATED_TEXT));
+      runOfficialFinalizer(request.requestRoot, request.changeRequest);
+      await expect(launched.page.getByTestId("ai-conversation-action-bar"))
+        .toContainText("修改已准备好，尚未采用", { timeout: 30_000 });
+      await launched.page.evaluate(() => {
+        // Supply 24 valid facts at the parser's next append. The production
+        // accumulator itself throws the real overflow class on its 25th fact.
+        // This is a controlled capacity fault, not a forged Error or Candidate.
+        const get = Element.prototype.getAttribute;
+        window.__annotationCapacityFault = 0;
+        Element.prototype.getAttribute = function(name) {
+          if (name === "data-pageroot-review-projection-facts" && this.ownerDocument !== document
+            && window.__annotationCapacityFault === 0) {
+            window.__annotationCapacityFault += 1;
+            Element.prototype.getAttribute = get;
+            return JSON.stringify(Array.from({ length: 24 }, (_, index) => ({
+              id: `capacity-${index}`, type: "structure", semanticOwnerId: `owner-${index}`,
+              geometryOwnerId: `geometry-${index}`, scope: "element", operation: "insert", tone: "added",
+            })));
+          }
+          return Reflect.apply(get, this, [name]);
+        };
+      });
+      await launched.page.getByRole("button", { name: "查看修改" }).click();
+      await expect(launched.page.getByTestId("ai-review-workspace")).toBeVisible({ timeout: 30_000 });
+      await expect(launched.page.getByTestId("review-empty-changes"))
+        .toHaveText("变化标注暂不可用，可直接查看前后页面。");
+      expect(await launched.page.evaluate(() => window.__annotationCapacityFault)).toBe(1);
+      const before = launched.page.frameLocator('iframe[title^="修改前"]');
+      const after = launched.page.frameLocator('iframe[title^="修改后"]');
+      await expect(before.locator("body")).toContainText(ORIGINAL_TEXT);
+      await expect(after.locator("body")).toContainText(UPDATED_TEXT);
+      for (const frame of [before, after]) {
+        await expect(frame.locator("[data-pageroot-review-marker], span[data-pageroot-review-text]"))
+          .toHaveCount(0);
+        await expect(frame.locator("html")).toHaveAttribute("data-pageroot-review-focus", "all");
+      }
+      await expectReviewProjectionWithoutObservations(launched.page);
+      await expect(launched.page.getByRole("button", { name: "采用修改", exact: true })).toBeEnabled();
+      await launched.page.screenshot({ path: testInfo.outputPath("annotation-fallback.png"), animations: "disabled" });
+      if (adopt) {
+        await adoptReadyResult(launched.page);
+        await assertReviewAcceptPersistence({ page: launched.page, sourcePath: fixture.sourcePath,
+          original, expectedText: UPDATED_TEXT, versionPathPattern: /\.html$/u });
+      } else {
+        await launched.page.getByRole("button", { name: "不用这次", exact: true }).click();
+        await launched.page.getByRole("dialog", { name: /返回 AI 修改前（版本 \d+）？/u })
+          .getByRole("button", { name: "返回修改前版本" }).click();
+        await expect(launched.page.getByTestId("ai-review-workspace")).toHaveCount(0);
+        expect(readFileSync(fixture.sourcePath).equals(original)).toBe(true);
+        const project = await launched.page.evaluate(() => window.htmlAIProjects?.getActiveProject());
+        expect(readFileSync(project.sourcePath, "utf8")).not.toContain(UPDATED_TEXT);
+        await expect(launched.page.locator(".comment-card")).not.toHaveCount(0);
+      }
+    } finally {
+      await stopPageRoot(launched.electronApp, launched.isolatedUserData);
+      removeSourceFixture(fixture.sourceDirectory);
+    }
+  });
+}

@@ -210,3 +210,19 @@ test("final-exit IPC unregister and close-abort registration include workbench t
   assert.match(windowIpc, /APP_CHANNELS\.externalOpenFailedReady/u);
   assert.match(projectIpc, /acknowledgeExternalOpen/u);
 });
+
+test("pending desktop activation recovery requires a persistent predecessor fence", async () => {
+  const mainProcess = await readFile(sourceUrl("../desktop/main.mjs"), "utf8");
+  assert.match(mainProcess, /activeEffectGeneration: 0/u);
+  assert.match(mainProcess, /predecessorEffect/u);
+  assert.match(mainProcess, /function sameActivationPredecessor\(state, receipt\)[\s\S]*?activeEffectGeneration[\s\S]*?predecessorGeneration[\s\S]*?predecessorEffect/u);
+  const replay = mainProcess.slice(mainProcess.indexOf("async function replayActivationReceipt"));
+  assert.match(
+    replay,
+    /receipt\.status === "pending"[\s\S]*?activePathIdentity === receipt\.previousSourcePath[\s\S]*?sameActivationPredecessor\(state, receipt\)/u,
+  );
+  assert.doesNotMatch(
+    replay,
+    /if \(receipt\.status === "pending" && activePathIdentity === receipt\.previousSourcePath\)/u,
+  );
+});

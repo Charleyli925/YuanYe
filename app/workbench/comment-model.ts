@@ -72,12 +72,11 @@ export function isExplicitGlobalCommentTarget(
   );
 }
 
-export function commentSourceAnchor(
-  comment: Pick<CommentItem, "target" | "sourceAnchor"> | null | undefined,
-): HtmlCanvasSelection | null {
-  return comment?.sourceAnchor
-    ?? commentAnchorForSelection(comment?.target)
-    ?? null;
+/** A disposable Canvas/card target; never write this projection back to a comment. */
+export function commentVisualTarget(comment: CommentItem): HtmlCanvasSelection {
+  return comment.visualHint
+    ? { ...comment.sourceAnchor, label: comment.visualHint.label, visualHint: comment.visualHint }
+    : comment.sourceAnchor;
 }
 
 export function canSaveCommentTarget(target: HtmlCanvasSelection): boolean {
@@ -144,30 +143,19 @@ export function normalizeGlobalCommentTargets(comments: CommentItem[]): {
 } {
   let changed = false;
   const normalized = comments.map((comment) => {
-    const sourceTarget = commentSourceAnchor(comment);
-    if (!sourceTarget || !isGlobalPageTarget(sourceTarget)) return comment;
+    const sourceTarget = comment.sourceAnchor;
+    if (!isGlobalPageTarget(sourceTarget)) return comment;
     const target = exactGlobalPageTarget(sourceTarget);
     if (
-      comment.target.tagName === target.tagName
-      && comment.target.label === target.label
-      && comment.target.text === target.text
-      && comment.target.resolution === target.resolution
-      && comment.sourceAnchor?.tagName === target.tagName
-      && comment.sourceAnchor?.label === target.label
-      && comment.sourceAnchor?.text === target.text
-      && comment.sourceAnchor?.resolution === target.resolution
+      sourceTarget.tagName === target.tagName
+      && sourceTarget.label === target.label
+      && sourceTarget.text === target.text
+      && sourceTarget.resolution === target.resolution
     ) return comment;
     changed = true;
-    const visualHint = comment.visualHint
-      || commentVisualHintForSelection(comment.target);
-    const visualTarget = visualHint
-      ? { ...independentCommentTarget(target, comment.commentId), label: visualHint.label, visualHint }
-      : independentCommentTarget(target, comment.commentId);
     return {
       ...comment,
-      target: visualTarget,
       sourceAnchor: independentCommentTarget(target, comment.commentId),
-      ...(visualHint ? { visualHint } : {}),
     };
   });
   return { comments: changed ? normalized : comments, changed };
@@ -196,6 +184,7 @@ export function persistedAttachment(
   attachment: CommentAttachment,
 ): CommentAttachment {
   return {
+    ...attachment,
     attachmentId: attachment.attachmentId,
     kind: attachment.kind,
     fileName: attachment.fileName,
@@ -246,6 +235,7 @@ export function attachmentFromRecord(
     || byteLength <= 0
   ) return null;
   return {
+    ...withoutFields(value, ["attachmentId", "kind", "fileName", "mediaType", "byteLength", "sha256", "relativePath", "requestRelativePath", "source"]),
     attachmentId,
     kind: value.kind === "image" ? "image" : "file",
     fileName,
@@ -412,18 +402,62 @@ export function persistedTargetRef(
   };
 }
 
+// Only unknown record extensions survive here; known legacy target fields are
+// discarded on ingress and regenerated from sourceAnchor on egress.
+const COMMENT_RECORD_EXTENSIONS = Symbol("comment-record-extensions");
+const TARGET_RECORD_FIELDS = [
+  "targetId", "id", "elementId", "expectedSourceSha256", "label", "level", "selector",
+  "textQuote", "textLocator", "sourceAnchor", "fingerprint", "resolution", "visualHint",
+];
+type CommentRecordExtensions = Partial<Record<"target" | "sourceAnchor", Record<string, unknown>>>;
+type CommentWithRecordExtensions = CommentItem & { [COMMENT_RECORD_EXTENSIONS]?: CommentRecordExtensions };
+
+function withoutFields(value: unknown, fields: readonly string[]): Record<string, unknown> {
+  if (!isRecord(value)) return {};
+  return Object.fromEntries(Object.entries(value).filter(([key]) => !fields.includes(key)));
+}
+
+function targetRecordExtensions(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) return {};
+  const extensions = withoutFields(value, TARGET_RECORD_FIELDS);
+  for (const [key, fields] of [
+    ["textLocator", ["quote", "startOffset", "endOffset", "affinity"]],
+    ["sourceAnchor", ["startOffset", "endOffset", "sourceSha256"]],
+    ["fingerprint", ["tagName", "stableAttributes", "ancestorFingerprint", "textPrefix", "textSuffix"]],
+  ] as const) {
+    const nested = withoutFields(value[key], fields);
+    if (Object.keys(nested).length) extensions[key] = nested;
+  }
+  return extensions;
+}
+
+function withTargetRecordExtensions(
+  target: PersistedTargetRef,
+  extensions: Record<string, unknown> = {},
+): PersistedTargetRef {
+  const result = { ...extensions, ...target };
+  for (const key of ["textLocator", "sourceAnchor", "fingerprint"] as const) {
+    // Removed locators/anchors stay removed; extensions cannot revive authority.
+    if (!target[key]) delete result[key];
+    else if (isRecord(extensions[key])) {
+      Object.assign(result, { [key]: { ...extensions[key], ...target[key] } });
+    }
+  }
+  return result;
+}
+
 export function persistedComment(comment: CommentItem) {
-  const sourceTarget = commentSourceAnchor(comment) || comment.target;
+  const sourceTarget = comment.sourceAnchor;
   const sourceAnchor = persistedTargetRef(sourceTarget);
-  const visualHint = comment.visualHint
-    || commentVisualHintForSelection(comment.target);
+  const visualHint = comment.visualHint;
+  const { [COMMENT_RECORD_EXTENSIONS]: extensions, ...fields } = comment as CommentWithRecordExtensions;
   return {
-    ...comment,
+    ...fields,
     ...(comment.attachments?.length
       ? { attachments: comment.attachments.map(persistedAttachment) }
       : {}),
-    target: sourceAnchor,
-    sourceAnchor,
+    target: withTargetRecordExtensions(sourceAnchor, extensions?.target),
+    sourceAnchor: withTargetRecordExtensions(sourceAnchor, extensions?.sourceAnchor),
     ...(visualHint ? { visualHint } : {}),
   };
 }
@@ -449,17 +483,25 @@ export function commentsFromRecords(raw: unknown): CommentItem[] {
       )
       ? value.sourceAnchor
       : value.target || value;
-    const sourceAnchor = selectionFromRecord(recordedSourceAnchor);
-    const visualHint = normalizeRuntimeVisualHint(value.visualHint);
+    const { visualHint: sourceVisualHint, ...sourceAnchor } = selectionFromRecord(recordedSourceAnchor);
+    const visualHint = normalizeRuntimeVisualHint(value.visualHint)
+      || normalizeRuntimeVisualHint(isRecord(value.target) ? value.target.visualHint : undefined)
+      || sourceVisualHint;
     const persistedSourceAnchor = independentCommentTarget(sourceAnchor, commentId);
-    const target = visualHint
-      ? { ...persistedSourceAnchor, label: visualHint.label, visualHint }
-      : persistedSourceAnchor;
+    const fields = withoutFields(value, [
+      "commentId", "createdAt", "updatedAt", "target", "sourceAnchor", "visualHint", "text",
+      "attachments", "basedOnVersionId", "requestId", "attemptId", "resultVersionId",
+      ...(recordedSourceAnchor === value ? TARGET_RECORD_FIELDS : []),
+    ]);
     return [{
+      ...fields,
+      [COMMENT_RECORD_EXTENSIONS]: {
+        target: targetRecordExtensions(value.target),
+        sourceAnchor: targetRecordExtensions(value.sourceAnchor),
+      },
       commentId,
       createdAt,
       updatedAt: String(value.updatedAt || createdAt),
-      target,
       sourceAnchor: persistedSourceAnchor,
       ...(visualHint ? { visualHint } : {}),
       text: String(value.text || ""),
@@ -483,7 +525,7 @@ export function commentsFromRecords(raw: unknown): CommentItem[] {
 export function uniqueTargets(comments: CommentItem[]): HtmlCanvasSelection[] {
   const seen = new Set<string>();
   return comments.flatMap((comment) => {
-    const target = commentSourceAnchor(comment) || comment.target;
+    const target = comment.sourceAnchor;
     if (seen.has(target.id)) return [];
     seen.add(target.id);
     return [target];

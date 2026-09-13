@@ -76,8 +76,10 @@ PageRoot edits local files and renders user-controlled HTML, so its default poli
   delivery interrupts an uncommitted close; after close commits it is stored
   only as the latest validated path in a private one-shot handoff, then passes
   the same mailbox validation again only after the next launch owns the
-  single-instance lock. Classification of that path is read-only until the user
-  confirms. The renderer receives only `requestId` and display facts; it cannot
+  single-instance lock. Classification itself is read-only; the existing open
+  intent lets ProjectWorkflow commit an ordinary import/continue using that
+  Prepared request. Deleting the original still requires explicit consent.
+  The renderer receives only `requestId` and display facts; it cannot
   submit a filesystem path, source key or trash target. Optional deletion of a
   newly imported original is a one-shot Main `shell.trashItem` after Canvas
   verification, and only when the file still hashes the same, is a regular
@@ -103,7 +105,13 @@ PageRoot edits local files and renders user-controlled HTML, so its default poli
 - Desktop Edit author runtime is a trusted-local authoring capability, not a
   hostile-page sandbox. Main re-reads the active source and requires exact
   HTML/SHA, Canvas generation, bounded supported scripts and contained resource
-  paths before creating a scoped `pageroot-edit-runtime:` session. The visible
+  paths before creating a scoped `pageroot-edit-runtime:` session. Renderer
+  Canvas observations additionally require the source-owner receipt
+  incarnation/sequence, origin, generation, exact HTML/SHA and complete
+  project/session context; the DocumentWorkflow is the only confirmer, and an
+  old or duplicate callback cannot certify a newer document. An authority
+  receipt always retires the physical frame, including for equal HTML bytes,
+  while local/history receipts retain the frame. The visible
   iframe parses the complete source with author-script placeholders inert,
   registers parser-authored source objects once, and then activates that closure
   in source order with the sandbox tokens required for in-place editing. Relative assets resolve only through
@@ -237,6 +245,15 @@ can recover its name. Equal bytes at an unlisted path never grant membership.
 Multiple visible links or conflicting member paths fail closed. Persisted
 `device`, `inode`, and `birthtimeMs` never authorize startup, open or writes.
 Physical comparisons use live observations within one operation only.
+
+Retiring an ordinary save journal requires current project/member, source Hash,
+state and previous-byte verification before existing recovery cleanup, followed
+by identity/source/state revalidation after required publication synchronization.
+Recovery removal must be durably synchronized before journal unlink. Unsupported
+sync or cleanup failure retains the journal whenever unlink has not happened;
+failure after unlink is an unconfirmed cleanup outcome, with recovery absence
+already durable. This optional collection never broadens save authority and does
+not collect identity migration, history or Promotion receipts.
 
 After pending transaction recovery, valid registered members gain anchors
 without changing HTML or Version records. Atomic anchor publication is the
@@ -478,7 +495,10 @@ popup, download, modal or host IPC capability. Parent-side capture also blocks
 anchor navigation and form submission, nested iframes receive an empty sandbox,
 and refresh/CSP meta directives are removed only from the disposable review copy
 so they cannot navigate the frame or suppress the trusted review bootstrap.
-Review facts come only from the two frozen HTML documents. The review renderer has no screenshot owner, runtime-capture IPC, PNG envelope, pixel parser or runtime binding. It reports precise text evidence and outermost element presence; movement, attributes, CSS, layout, wrapping and runtime drawing produce no Review fact.
+Review facts come only from the two frozen HTML documents. The review renderer has no screenshot owner, runtime-capture IPC, PNG envelope, pixel parser or runtime binding. Source facts include precise text, outermost presence, supported movement,
+authored attributes and mapped styles under ARCHITECTURE_CONTRACT.md. Runtime
+observation cannot invent source facts or grant adoption authority. A validated
+Candidate may have zero locatable facts and still enter the same Review.
 
 Comment location remains separately private. Each source-resolved local target
 may use an opaque initial-bootstrap binding: the element's `data-pageroot-id`,
@@ -492,8 +512,8 @@ from document bytes and later bootstrap reads. A unique source `id`, `data-*`,
 `name`, or `aria-label` is only a safe fallback; missing, ambiguous, replaced or
 disconnected targets omit the comment marker rather than rebinding by guess.
 This capability cannot discover or authorize additional Review facts. The user
-still invokes the existing fail-closed ready-version activation path through
-“直接打开” or the review confirmation “打开 AI 修改后”.
+still invokes the existing fail-closed Candidate adoption through “采用修改”
+and its confirmation; empty Review facts never bypass that boundary.
 
 Current Edit comments use a separate ADR 0061 identity boundary. On a complete
 managed Working Copy, a TargetRef resolves officially only through SourceIndex's
@@ -503,7 +523,12 @@ heuristics are not an official result and are not retained as a shadow path.
 Incomplete identity HTML cannot rebound across a hash change and cannot enable
 direct Canvas edit. Whole-page comments use the body's Stable ID.
 Selected-text locators contain source-backed decoded text offsets and
-never authorize persistence from preview DOM.
+never authorize persistence from preview DOM. Decoded comments carry only one
+writable `sourceAnchor`; `visualHint` and derived Canvas/card targets never replace
+it. The existing comment codec accepts legacy `target` only on record ingress
+and regenerates that compatibility field on egress. Preserved unknown record
+extensions cannot override current identity fields or revive a removed locator;
+known visual hints retain their bounded, DOM-free normalization.
 
 Edit-mode reveal actions use the same trust boundary. They accept only strict
 Tabs whose selected panel is proved by `aria-selected` plus `hidden`, native
@@ -583,6 +608,26 @@ installed provider/runtime and freezes canonical selection plus fingerprint in
 a one-use ticket; start compares that ticket to the durable Request selection.
 Malformed policies, cross-provider model ids, unknown providers and selection
 drift fail closed.
+
+For native HTTP execution, the selected preflight ticket also supplies immutable
+model-budget capability. A shared pure input policy applies to candidate
+estimates and actual serialized frozen messages, including identity-repair
+retries. Runtime rereads must match each policy file's frozen size and Hash
+before serialization. UTF-8/NUL/MIME checks and the HTTP total-byte cap do not
+replace Repository attachment, path or complete-HTML verification. Unknown
+custom-model capacity grants no invented token limits; it still obeys the byte
+cap. Qoder/Codex and clipboard retain their separate existing capabilities.
+
+### Legacy historical activation receipts
+
+Retiring the old activation command does not retire persisted v4 receipts.
+The compatibility continuation and confirmation routes validate registered
+project/document identity and the complete receipt before any Workspace recovery,
+registered-root repair or external-source coordination. Missing or mismatched
+receipts grant no write authority. Continuation only replays the existing original
+operation; confirmation changes its pending state once. Neither route may author
+another activation receipt or select a different active Working Copy. Existing
+state/snapshot/source integrity checks and Desktop managed-source fencing remain.
 
 ### Manual historical Version creation
 

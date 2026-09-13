@@ -42,7 +42,7 @@ function commentOn(sourceIndex, tagName, text, options = {}) {
   return {
     text,
     attachments: options.attachments || [],
-    target: selectionFor(target),
+    sourceAnchor: selectionFor(target),
   };
 }
 
@@ -193,7 +193,7 @@ test("a global comment has no place on the page and gets no marker", () => {
   const globalComment = {
     text: "整页再紧凑一点",
     attachments: [],
-    target: { id: "page", level: "module", selector: "body", label: "整页" },
+    sourceAnchor: { id: "page", level: "module", selector: "body", label: "整页" },
   };
   assert.deepEqual(previewCommentMarkerGroups(sourceIndex, [globalComment]), []);
 });

@@ -104,6 +104,37 @@ test("长期规则入口打开唯一规则标签并保留 HTML 画布", async ()
       "utf8",
     )).toContain("只修改首页标题");
 
+    await editor.focus();
+    await editor.press("End");
+    await editor.evaluate((element) => {
+      window.__rulesCompositionTextarea = element;
+      window.__rulesCompositionEvents = [];
+      for (const type of ["compositionstart", "compositionend"]) {
+        element.addEventListener(type, () => window.__rulesCompositionEvents.push(type));
+      }
+    });
+    const cdp = await launched.page.context().newCDPSession(launched.page);
+    await cdp.send("Input.imeSetComposition", { text: "zhongwen", selectionStart: 8, selectionEnd: 8 });
+    await cdp.send("Input.insertText", { text: "中文" });
+    await editor.pressSequentially("规则");
+    await expect(editor).toHaveValue("**只修改首页标题**中文规则");
+    expect(await editor.evaluate((element) => ({
+      sameElement: element === window.__rulesCompositionTextarea,
+      focused: document.activeElement === element,
+      caret: element.selectionStart,
+      end: element.selectionEnd,
+      length: element.value.length,
+      events: window.__rulesCompositionEvents,
+    }))).toEqual({
+      sameElement: true, focused: true, caret: "**只修改首页标题**中文规则".length, end: "**只修改首页标题**中文规则".length, length: "**只修改首页标题**中文规则".length,
+      events: ["compositionstart", "compositionend"],
+    });
+    await launched.page.keyboard.press("Meta+s");
+    await expect.poll(() => readFileSync(
+      path.join(path.dirname(managedSourcePath), "PROJECT.md"), "utf8",
+    )).toBe("**只修改首页标题**中文规则");
+    await cdp.detach();
+
     await rulesEntry.click();
     await expect(launched.page.getByRole("tab", { name: "长期规则", exact: true }))
       .toHaveCount(1);

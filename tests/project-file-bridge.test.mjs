@@ -1,3 +1,5 @@
+import { writeLegacyNoChangeOutcome } from "./helpers/legacy-v4-no-change.mjs";
+import { seedLegacyHistoryActivation } from "./helpers/legacy-history-activation.mjs";
 import assert from "node:assert/strict";
 import {
   access,
@@ -339,6 +341,7 @@ test("Bridge continues a historical Version through one durable Working Copy rec
     active = (await repository.promoteCandidate({
       target: active,
       candidateId: candidate.candidate.candidateId,
+      decisionOperationId: `promote_${candidate.candidate.candidateId}`,
     })).target;
     if (ordinal === 2) v2WorkingCopyPath = active.exactSourcePath;
   }
@@ -384,6 +387,15 @@ test("Bridge continues a historical Version through one durable Working Copy rec
     versionId: "ver_0002",
     operationId: "bridge_history_continue_v2_0001",
   };
+  const refused = await postJson(bridge, "/history-version/continue", request);
+  assert.equal(refused.response.status, 409, JSON.stringify(refused.body));
+  assert.equal(refused.body.error.code, "HISTORY_ACTIVATION_RECEIPT_MISMATCH");
+  await seedLegacyHistoryActivation({
+    target: active,
+    versionId: request.versionId,
+    operationId: request.operationId,
+    expectedActiveWorkingCopyId: "work_ver_0006",
+  });
   const continued = await postJson(bridge, "/history-version/continue", request);
   assert.equal(continued.response.status, 200, JSON.stringify(continued.body));
   assert.equal(continued.body.openTarget.workingCopyId, "work_ver_0002");
@@ -432,7 +444,7 @@ test("Bridge continues a historical Version through one durable Working Copy rec
     operationId: "bridge_history_stale_v3_0001",
   });
   assert.equal(stale.response.status, 409, JSON.stringify(stale.body));
-  assert.equal(stale.body.error.code, "HISTORY_ACTIVATION_PREDECESSOR_CONFLICT");
+  assert.equal(stale.body.error.code, "HISTORY_ACTIVATION_RECEIPT_MISMATCH");
 });
 
 test("project-file PROJECT.md remains available through the shared project-file inspector", async (t) => {
@@ -546,6 +558,7 @@ test("project-file Request becomes a Candidate on finalization and a Version onl
   });
   assert.equal(request.response.status, 201, JSON.stringify(request.body));
   assert.equal(request.body.activeRun.status, "processing");
+  assert.equal(request.body.activeRun.sourceWorkingCopyId, ensured.body.openTarget.workingCopyId);
   const changedAfterFreeze = "# 下一次任务的长期规则\n";
   const changedRules = await postJson(bridge, "/project-file", {
     sourcePath: ensured.body.sourcePath,
@@ -628,6 +641,7 @@ test("project-file Request becomes a Candidate on finalization and a Version onl
   );
   assert.equal(ready.response.status, 200, JSON.stringify(ready.body));
   assert.equal(ready.body.status, "ready-to-open");
+  assert.equal(ready.body.activeRun.sourceWorkingCopyId, ensured.body.openTarget.workingCopyId);
   assert.equal(ready.body.versionId, "ver_0002");
   assert.ok(["ready", "attention"].includes(ready.body.candidateAssessment.status));
   const readyAiTask = await bridge.requestJson(
@@ -675,6 +689,42 @@ test("project-file Request becomes a Candidate on finalization and a Version onl
   assert.equal(review.body.content, candidateHtml);
   assert.equal(review.body.candidate.status, "pending-review");
 
+  const adoptionIdentity = {
+    projectId: ensured.body.projectId,
+    documentId: ensured.body.documentId,
+    sourcePath: ensured.body.sourcePath,
+    requestId: request.body.requestId,
+    attemptId: request.body.attemptId,
+    versionId: "ver_0002",
+  };
+  const missingCandidate = await postJson(bridge, "/ready-version/activate", {
+    ...adoptionIdentity,
+    decisionOperationId: `promote_${ready.body.candidateId}`,
+  });
+  assert.equal(missingCandidate.response.status, 422, JSON.stringify(missingCandidate.body));
+  assert.equal(missingCandidate.body.error.code, "INVALID_CANDIDATE_ID");
+  const missingDecision = await postJson(bridge, "/ready-version/activate", {
+    ...adoptionIdentity,
+    candidateId: ready.body.candidateId,
+  });
+  assert.equal(missingDecision.response.status, 409, JSON.stringify(missingDecision.body));
+  assert.equal(missingDecision.body.error.code, "DECISION_IDENTITY_MISMATCH");
+  const wrongDecision = await postJson(bridge, "/ready-version/activate", {
+    ...adoptionIdentity,
+    candidateId: ready.body.candidateId,
+    decisionOperationId: "promote_candidate_wrong_identity_0001",
+  });
+  assert.equal(wrongDecision.response.status, 409, JSON.stringify(wrongDecision.body));
+  assert.equal(wrongDecision.body.error.code, "DECISION_IDENTITY_MISMATCH");
+  const afterRejectedAdoptions = JSON.parse(await readFile(
+    join(ensured.body.projectRoot, ".pageroot", "manifest.json"),
+    "utf8",
+  ));
+  assert.deepEqual(
+    afterRejectedAdoptions.versions.map((version) => version.versionId),
+    ["ver_0001"],
+  );
+
   const adopted = await postJson(bridge, "/ready-version/activate", {
     projectId: ensured.body.projectId,
     documentId: ensured.body.documentId,
@@ -682,9 +732,16 @@ test("project-file Request becomes a Candidate on finalization and a Version onl
     requestId: request.body.requestId,
     attemptId: request.body.attemptId,
     versionId: "ver_0002",
+    candidateId: ready.body.candidateId,
+    decisionOperationId: `promote_${ready.body.candidateId}`,
   });
   assert.equal(adopted.response.status, 200, JSON.stringify(adopted.body));
   assert.equal(adopted.body.versionId, "ver_0002");
+  assert.equal(adopted.body.openTarget.workingCopyId, "work_ver_0002");
+  const adoptedRequest = JSON.parse(await readFile(
+    join(controlRoot, "requests", request.body.requestId, "request.json"), "utf8",
+  ));
+  assert.equal(adoptedRequest.sourceWorkingCopyId, "work_ver_0001");
   assert.match(adopted.body.sourcePath, /candidate-V2\.html$/u);
   const afterAdoption = JSON.parse(await readFile(
     join(ensured.body.projectRoot, ".pageroot", "manifest.json"),
@@ -693,7 +750,8 @@ test("project-file Request becomes a Candidate on finalization and a Version onl
   assert.deepEqual(afterAdoption.versions.map((version) => version.versionId), ["ver_0001", "ver_0002"]);
 });
 
-test("Bridge reveals a sealed terminal AI task after no-change", async (t) => {
+for (const legacyTerminal of [false, true]) {
+test(`Bridge reopens identical output with its original lifecycle (legacy terminal: ${legacyTerminal})`, async (t) => {
   const environment = await createBridgeTestEnvironment(t, {
     prefix: "pageroot-project-file-no-change-ai-task-",
   });
@@ -742,11 +800,18 @@ test("Bridge reveals a sealed terminal AI task after no-change", async (t) => {
     attemptId: request.body.attemptId,
   });
 
+  const legacy = legacyTerminal ? await writeLegacyNoChangeOutcome({
+    projectRoot: ensured.body.projectRoot, requestId: request.body.requestId,
+  }) : null;
   const status = await bridge.requestJson(
     `/status?sourcePath=${encodeURIComponent(ensured.body.sourcePath)}&requestId=${encodeURIComponent(request.body.requestId)}&attemptId=${encodeURIComponent(request.body.attemptId)}`,
   );
   assert.equal(status.response.status, 200, JSON.stringify(status.body));
-  assert.equal(status.body.status, "no-change");
+  assert.equal(status.body.status, legacyTerminal ? "no-change" : "ready-to-open");
+  const replay = await bridge.requestJson(
+    `/status?sourcePath=${encodeURIComponent(ensured.body.sourcePath)}&requestId=${encodeURIComponent(request.body.requestId)}&attemptId=${encodeURIComponent(request.body.attemptId)}`,
+  );
+  assert.equal(replay.body.status, status.body.status);
   await bridge.stop();
   bridge = await environment.start({
     HTML_AI_PROJECT_FILES_ROOT: join(environment.root, "project-files"),
@@ -755,6 +820,27 @@ test("Bridge reveals a sealed terminal AI task after no-change", async (t) => {
     `/workspace?sourcePath=${encodeURIComponent(ensured.body.sourcePath)}`,
   );
   assert.equal(reopened.response.status, 200, JSON.stringify(reopened.body));
+  if (!legacyTerminal) {
+    assert.equal(reopened.body.activeRun.requestId, request.body.requestId);
+    assert.equal(reopened.body.activeRun.status, "ready-to-open");
+    const ready = await bridge.requestJson(
+      `/status?sourcePath=${encodeURIComponent(ensured.body.sourcePath)}&requestId=${encodeURIComponent(request.body.requestId)}&attemptId=${encodeURIComponent(request.body.attemptId)}`,
+    );
+    assert.equal(ready.body.status, "ready-to-open");
+    assert.equal(ready.body.versionId, "ver_0002");
+    const review = await bridge.requestJson(
+      `/version-file?sourcePath=${encodeURIComponent(ensured.body.sourcePath)}&versionId=ver_0002`,
+    );
+    assert.equal(review.body.content, original);
+    assert.equal(review.body.candidate.status, "pending-review");
+    const candidate = JSON.parse(await readFile(join(ensured.body.projectRoot, ".pageroot", "requests", request.body.requestId, "candidate.json"), "utf8"));
+    assert.equal(review.body.candidate.candidateId, candidate.candidateId);
+    const manifest = JSON.parse(await readFile(join(ensured.body.projectRoot, ".pageroot", "manifest.json"), "utf8"));
+    assert.equal(manifest.versions.length, 1);
+    assert.equal(await readFile(ensured.body.sourcePath, "utf8"), original);
+    return;
+  }
+  assert.deepEqual(await Promise.all(legacy.files.map((file) => readFile(file, "utf8"))), legacy.bytes);
   assert.equal(reopened.body.activeRun, null);
   assert.equal(reopened.body.runtimeState.activeRun, null);
   assert.equal(reopened.body.recentRunOutcome?.status, "no-change");
@@ -791,6 +877,7 @@ test("Bridge reveals a sealed terminal AI task after no-change", async (t) => {
   assert.equal(tamperRejected.response.status, 409, JSON.stringify(tamperRejected.body));
   assert.equal(tamperRejected.body.error.code, "REQUEST_RUNTIME_ANCHOR_MISMATCH");
 });
+}
 
 test("a finalized but unusable Candidate remains an error and never creates a Version", async (t) => {
   const environment = await createBridgeTestEnvironment(t, {

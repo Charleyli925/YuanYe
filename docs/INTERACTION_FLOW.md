@@ -93,10 +93,12 @@ stateDiagram-v2
     submitting --> processing: 冻结输入发布成功
     submitting --> editing: 准备失败或取消
     processing --> validating: 发现有效 completion
-    processing --> editing: 取消、失败或 no-change 终止
-    validating --> committing: 身份、Hash、变化校验通过
+    processing --> editing: 取消或失败
+    validating --> reviewing: 合法完整候选，包括同内容结果
+    reviewing --> committing: 用户明确采用
+    reviewing --> editing: 不用本次
     validating --> processing: output 尚未封存或 completion 暂不可用
-    validating --> editing: 校验失败、取消或 no-change
+    validating --> editing: 校验失败或取消
     committing --> ready: commit marker、源文件与画布一致
     ready --> editing: 成功提示结束
     committing --> awaiting_conflict_resolution: 源文件外部变化
@@ -250,20 +252,20 @@ SourcePatch、不写磁盘、不运行作者脚本，也不引入右键菜单、
 
 ## 4. 打开已有 HTML
 
-除首次启动时建立受管欢迎项目外，工作台不负责创建业务 HTML；用户打开已经由其他工具生成的本地 `.html` 文件。桌面打开先只读分类，再决定是否出现确认框，见 [首次打开导入确认](IMPORT_CONFIRMATION_PRD.md)。同一 canonical 外部路径只绑定一个项目：再次打开已导入原稿不会创建第二个项目。
+除首次启动时建立受管欢迎项目外，工作台不负责创建业务 HTML；用户打开已经由其他工具生成的本地 `.html` 文件。桌面打开先只读分类，再由 ProjectWorkflow 在同一次操作内自动导入或继续已有项目，见 [外部 HTML 打开合同](IMPORT_CONFIRMATION_PRD.md)。普通打开不依赖 React effect 再次提交；只有明确删除原稿保留确认。同一 canonical 外部路径只绑定一个项目：再次打开已导入原稿不会创建第二个项目。
 
 已导入项目的打开由 Repository 一次返回完整 `Project + Document + OpenTarget + HTML + Hash`
 信封；Desktop 不再为了同一次打开重复读取 Workspace 和 HTML。该信封通过路径与身份核对后即可作为
-只读首屏，随后 Workspace 水合只有在身份或 Hash 不一致时才重新读取源码。首次导入确认在受管工作稿
-耐久提交并发布后立即退场，让用户先看到新 HTML；画布核对、可选移入废纸篓和外部请求回执继续按原有
-失败关闭边界完成，失败时恢复同一确认而不静默接受不一致身份。
+只读首屏，随后 Workspace 水合只有在身份或 Hash 不一致时才重新读取源码。受管工作稿
+耐久提交并发布后即可显示新 HTML；同次导航仍等待画布核对、可选移入废纸篓和外部请求回执收口，
+不凭首份应用回执提前释放队列。失败保留同一请求的重试或取消出口，不静默接受不一致身份。
 
 在 macOS 或 QoderWork 的“打开方式”中选择 PageRoot 时，系统只接受绝对
 路径的 `.html` / `.htm` 文件，并在应用未启动或已运行时打开同一份当前源文件。
 它与“打开本地 HTML”共用安全项目切换边界和主进程完整打开队列：当前编辑、
 评论、附件和项目规则会先安全收口，无法收口时保留当前项目；本地选择、最近
 项目和外部文件在开始选择、读取或校验前便确定同一顺序。连续发来的外部打开
-请求按顺序处理，尚未开始的旧请求由最新请求取代；较慢的旧读取也不能反向覆盖
+请求按 FIFO 顺序处理，完成或取消的回执才释放队首；较慢的旧读取也不能反向覆盖
 最终显示、活动文件或最近项目。外部文件在主进程接受请求期间继续冻结已经安全
 收口的画布；若最后一道边界捕获到新的原生输入，则不发起外部接受，先按正常
 自动写回后再重试切换；进入延后状态只记录一次新的安全切换转换，已经观察到的
@@ -280,9 +282,9 @@ SourcePatch、不写磁盘、不运行作者脚本，也不引入右键菜单、
 全局左侧栏与开始页只提供“新建项目”，不再把“打开 HTML”表达为另一种并列文件管理模型。该动作的第一步仍是在系统文件选择器中选择一份本地 HTML，然后由现有导入流程建立 Registry 项目并进入编辑。用户在文件选择器取消时，当前项目与画布完全不变。浏览器预览路径的隐藏文件选择器必须在“新建项目”的同一次点击里打开（该点击本身即用户手势），包括编码错误后画布“重新选择”直接打开选择器的情形；不得先 drain 当前项目再请求选择器，工作台导航在空闲或仍在收口当前 HTML 时，都必须在同一次点击里先请求隐藏选择器，不得把这次点击排进微任务后再请求，否则 Chromium 会丢掉用户手势。编码错误后的“重新选择”直接点击隐藏选择器；没有 picker operationId 的受信任提交仍进入 accepted FIFO，不得因为上一次未完成的选择器命令而判为过期。内存中打开的 HTML 会记下内容 Hash，以便下一次选择能通过画布切换围栏。没有磁盘路径的内存 HTML 在 ProjectSession 里没有 projectId；导航收口仍须按这次应用回执的 epoch 完成，不得因此一直占着准入锁导致编码错误后的下一次打开排不进去。若当前编辑、评论、附件或项目规则还没有安全收口，系统只在用户确认会切换项目的动作之后，才沿用项目切换边界完成保存或阻止切换。系统文件选择器始终从受管项目根（“文稿 › PageRoot › 项目”）起步；该目录不可用时回退到“文稿”，不记忆上一次选择过的目录。
 
 1. 用户选择本地 HTML，或系统通过 Finder / Open With / Dock / 冷启动交付一份 HTML。
-2. 主进程只读检查该路径：有效 v4 项目文件、已绑定的外部原稿，或真正全新的外部 HTML。确认前不写入 active/recent，也不把外部 HTML 挂到画布。
-3. 有效 v4 Project 直接打开并恢复。已绑定的外部原路径显示“已经导入”确认，主操作“打开之前的项目”打开该项目当前活动的可编辑工作稿，不提供“查看初始版本 V1”。任何尚未绑定的 HTML（包括 v3 及更早项目状态、损坏的 v4 记录、同内容的另一路径和全新 HTML）显示首次导入确认；用户确认后才建立新的 v4 Project 与初始 V1。取消、Escape 或点按遮罩零副作用。冷启动时若上次打开的是待确认外部 HTML，工作台保持未绑定、不先打开欢迎页；用户确认后直接导入，无需围栏尚不存在的编辑画布。
-4. 导入默认复制，不移动、覆盖或改写用户选择的原始 HTML 字节。只有用户勾选「成功导入后，同意将原文件移至废纸篓。」并且新项目与新画布都已确认，才把该 HTML 移入废纸篓。v4 打开路径不迁移、不恢复、也不读取 v4 以前的项目状态。
+2. 主进程只读检查该路径：有效 v4 项目文件、已绑定的外部原稿，或真正全新的外部 HTML。分类不写入 active/recent，也不把外部 HTML 挂到画布；正式提交仍重新验证同一请求的路径、身份与 Hash。
+3. 有效 v4 Project 直接打开并恢复。已绑定外部原路径自动打开该项目当前活动的可编辑工作稿，不提供“查看初始版本 V1”。尚未绑定的 HTML 沿既有 v4 导入规则建立新项目和初始 V1。若提交时发现同一请求已被并发导入，只允许 C→B 自动续行一次：改为继续已有项目并清除删除同意；其他变化或再次重分类均停止，不递归。冷启动 epoch 0 不先打开欢迎页，也不围栏尚不存在的编辑画布。
+4. 导入默认复制，不移动、覆盖或改写用户选择的原始 HTML 字节。只有用户明确同意删除该次首次导入的原稿，并且新项目与新画布都已确认，才把该 HTML 移入废纸篓。v4 打开路径不迁移、不恢复、也不读取 v4 以前的项目状态。
 5. 对有效 v4 Project，通过 Registry 的登记根目录读取该项目自己的 `project.json`、`manifest.json` 与 `runtime-state.json`，再对照当前精确 HTML、latest committed Version 和运行时 Hash。
 6. 按项目状态恢复：editing 时可恢复 current 或精确历史查看；存在 active run 时强制显示该轮冻结 current 页面，并在 AI 对话侧栏说明正在等待 AI 返回；冲突时显示该候选对比，事务恢复时显示恢复进度。用户主动收起对话侧栏后可以只读浏览冻结页面，直到再次打开或切回该项目前都不自动弹回。
 
@@ -305,7 +307,10 @@ SourcePatch、不写磁盘、不运行作者脚本，也不引入右键菜单、
 完整性检查。后面的“先物化为完整 next HTML”描述产品结果，也表示生产路径
 对一次已接受编辑只执行一次修改。
 
-进入新 `canvasGeneration` 时，桌面端对当前已持久化 HTML 进行一次受限的
+进入新的 authority source receipt / `canvasGeneration` 时，即使 HTML 字节不变也必须换一张
+物理 iframe；local-edit/history receipt 继续复用当前 iframe。Canvas 只返回绑定完整
+receipt 的不可变渲染 observation，由 DocumentWorkflow 统一确认，避免异步旧回执改变来源。
+桌面端对当前已持久化 HTML 进行一次受限的
 Script 资源准备。可见 iframe 完成普通 load 后安装选择、原生编辑、评论和
 IME 交互；不再依赖真实像素、静默帧、宿主审计或运行态冻结。脚本在源码
 节点通过一次性注册口进入父编辑器私有 `WeakSet` 之后才执行；公开属性或
@@ -448,10 +453,10 @@ Source 逐节点对账；Script 执行状态迁移；为绝对无刷新建立双
 → 浏览器提供光标 / Selection / IME，Controller 接管所有实际文字变更
 → 用户输入、删除或选择文字
 → 约 700ms 或格式、Cmd+S、目标切换、关闭、发送边界
-→ 生成 replace-editable-island EditCommand
+→ 生成带 logical text + canonical `contentHtml` 的 `editableIslandTextOperation`（不预分配换行 ID）
 → SourceIndex + TargetResolver 锁定源码范围
-→ 岛内做最小安全规范化，SourcePatchEngine 生成精确 range patch 与 inverse patch
-→ 原生换行以裸 `<br>` 进入受管计划，由系统分配 fresh stable ID 后再形成 `setText`；调用方预置新 ID 失败关闭
+→ Kernel 在同一次 apply 中做岛内最小安全规范化并生成精确 range patch 与 inverse patch；无 ID 时透传受控 `randomUUID`，按 DOM 顺序分配 fresh stable ID
+→ 原生换行以裸 `<br>` 进入受管计划，再由 Kernel 封存为 `setText` 的 allocation evidence；调用方预置新 ID 仍失败关闭
 → 删除硬换行时一并退役该 `<br>` 的身份；非 `<br>` 的持久身份仍不得在岛内文字编辑中被改写或删除
 → 保存计划接受后，仅在 expected-mutation 边界把这些 ID 补到对应实时 `<br>`，保留 Selection 并继续当前编辑会话；ID 不新增 Runtime authority
 → 校验岛外字节完全不变，并重解析受影响区域
@@ -464,7 +469,7 @@ Source 逐节点对账；Script 执行状态迁移；为绝对无刷新建立双
 → 核对源 Hash
 → Repository 重新解析身份差异，与 semantic operation + identityDelta 交叉验证；SourcePatch kind 不授权身份变化
 → 结构操作使用 Canvas/Repository 共享的纯 plan replayer 重建整组 exact patches；删除、插入、替换、跨父移动及 comment-aware 同父 reorder 均禁止附带无关 patch
-→ 对 plain `setText`，Canvas/Repository 共用纯 planner，拒绝 void/raw-text target，并核对唯一 target-content patch 的范围、原字节、规范转义后字节和 kind；Repository 也从 original-forward 源码独立重建 `replaceTextRange`、`setAttribute`、普通/整段合并 `setStyle` 的完整 patch 数组；对 identified `setText` 岛内容及需要 wrapper 的 range-style，继续按目标内容范围或逻辑文字范围核对位置、数量、样式字节和新 ID，部分 range 不得省略 wrapper identity
+→ 对 plain `setText`，Canvas/Repository 共用纯 planner，拒绝 void/raw-text target，并核对唯一 target-content patch 的范围、原字节、规范转义后字节和 kind；Repository 也从 original-forward 源码独立重建 `replaceTextRange`、`setAttribute`、普通/整段合并 `setStyle` 的完整 patch 数组；对 identified `setText` 岛内容及需要 wrapper 的 range-style，继续按目标内容范围或逻辑文字范围核对位置、数量、样式字节和新 ID，部分 range 不得省略 wrapper identity；Canvas 不预规划 range，而是在发布前从同一次 Kernel materialization 的 patch 判断是否新增 wrapper，并执行既有 flex/grid 与局部填充拒绝
 → 临时文件写入、刷盘、原子替换
 → 重读校验
 → 封存新的 ID/tag/parent/order binding，仅用于之后的外部冲突检测
@@ -625,6 +630,8 @@ HTML，包括 Stable ID；不会改变项目、Version、评论、Registry、Rec
 每条新局部评论必须把持久结构拆成两个部分：`sourceElementId` 是唯一拥有保存、跨版本重绑和源码定位权限的 Stable ID；`visualHint` 只解释用户实际点到的运行时对象，包含受界限的 `kind`、用户可见标签、清洗后的可见文字摘要、宿主内相对路径和相对源码宿主归一化坐标。`visualHint` 不是 selector、身份或权限，不能保存 Runtime DOM、`outerHTML`、事件对象、脚本状态、截图或 Canvas 输出。选中文字时再保存源码宿主内 UTF-16 `textLocator`（quote、起止 offset、affinity）。`elementId` 是持久元素身份，`tagName` 只是显示证据。稳定 ID 存在时只按该 ID 解析：文字修改、兄弟插入、移动或 tag 变化后仍为 `exact`；ID 删除或非法才为 `orphaned`，不得回退 selector/fingerprint 猜测替代节点。没有 `elementId` 的局部目标正式结果也是 `orphaned`。整页评论持久化 body's `elementId`，`selector=body` 只是展示语义，不是定位权威。
 
 显式全局评论使用稳定的 `body` 语义目标；首次登记、自动保存和恢复后仍保持 `exact`，不依赖正文 SourceAnchor。兼容旧草稿或历史记录时，以 `selector=body + level=module` 且没有运行时 `visualHint` 识别整个页面并补齐运行时字段；即使旧记录没有 `tagName` 或曾被标成 `orphaned`，也由系统确定性标准化，不向用户显示“重新定位”。`body + visualHint` 始终保留可见对象的评论标题、marker/右栏位置、草稿 placeholder 和 `targets-plus-required-dependencies` AI 范围；视觉匹配失败时才把位置降级到源码宿主，不能把评论改写成全局评论。
+
+运行中的已保存评论只维护一份 `sourceAnchor`（包括可选 `textLocator`）和可选 `visualHint`；卡片、标记与 Canvas 需要的视觉目标由适配器派生。旧 `target` 仅由现有评论 codec 读入与输出兼容记录，不作为另一份可写目标。落盘及冻结格式保持兼容，不批量改写历史或未提交评论。
 
 每条普通评论拥有独立 `targetId`，同一源码宿主的多条评论共享 `sourceAnchor.elementId` 但不合并审计身份；同一宿主中的多个运行时表格或图表按完整 `visualHint` 区分。评论同时记录创建时 `basedOnVersionId`；当前画布只消费当前 Working Copy 评论，历史画布只消费所选不可变 Version 自己的评论，不承担跨 Version 迁移。安全源码锚点存在时，运行时目标的 `ambiguous` 视觉状态不阻断评论保存。用户从画布删除源码元素时，原位确认必须明确显示该元素及全部后代关联的评论数量；确认后，同一次稳定 ID 删除意图批量删除这些当前 Working Copy 评论、未保存草稿和草稿附件引用，并写入评论删除 tombstone，不能先把它们降级为 `orphaned`。若外部改写、旧记录或身份损坏仍使 `sourceAnchor` 变成 `ambiguous` / `orphaned`，评论文本、附件和 `visualHint` 继续保留，后台不得静默猜测新目标；卡片只标注“评论位置已丢失”，并建议删除后在正确位置重新评论。发送前若仍有不安全目标，入口切回编辑并高亮第一条失联评论，不提供重新定位流程，也不自动继续发送。
 
@@ -839,7 +846,7 @@ Agent 都只能按协议处理同一个指定 Request/Attempt。
 Conversation 写入。Bridge 的公开会话投影固定包含 `providerId`、`runtimeId`、会话状态与
 阶段、Agent 身份与时间、`visibleText`、截断标记、事件数和可恢复错误。Qoder ACP 与 Codex
 ACP 都只把 Agent 明确发送给用户的文本归一为 `visible-text`；推理、工具参数、文件内容、
-系统提示、异常堆栈和 finalizer 输出一律不进入侧栏。公开文本最多保留 64 KiB，截断必须明确标记。
+系统提示、异常堆栈和 finalizer 输出一律不进入侧栏。公开文本由同一消息累计来源保留，最多 65536 个 UTF-16 单元（含展示分隔与脱敏替换），消息块、复制和封存摘要同源；诊断事件上限不裁掉正文。真实截断必须明确标记。
 
 Renderer 通过一个可取消、单飞的递归轮询读取 Bridge 状态：初始核对与提交不确定态约 500ms，
 普通活跃阶段约 350ms，新公开文本后约 250ms；窗口隐藏时退避到约 1.4s。下一次轮询只在上一次
@@ -893,7 +900,7 @@ finalizer 通过后，Repository 封存 AI 原始输出 Hash，再以冻结 HTML
 
 ### 8.2 唯一完成信号
 
-finalizer 最后原子写入 `completion.json`。工作台发现它后进入 `validating`。
+finalizer 最后原子写入 `completion.json`，新的成功完成统一为 `status=completed`，包括与冻结输入逐字节相同的完整 HTML。工作台发现它后进入 `validating`；旧 completion 重放不改写原字节。
 “AI 已返回”只由这个完成信号或其后的生命周期状态点亮；完成信号出现前发生的错误显示“未检测到 AI 返回结果”，不能因为通用 `error` 状态而打勾。
 
 若用户已经结束本轮，官方 finalizer 在校验受控取消标记后返回 `status=cancelled`、`accepted=false`、`retryable=false`，不修改 output、不写 `completion.json`、不创建 Version。Prompt 必须要求 AI Agent 收到该结果后立即停止，不重试，也不改写到其他路径；这是一种正常取消终态，不是保存或路径故障。
@@ -935,8 +942,7 @@ finalizer 最后原子写入 `completion.json`。工作台发现它后进入 `va
 
 HTML 品牌与“关于源页”入口由全局左侧栏统一承担，设置页单独承担 Agent 状态、登录/安装恢复和软件更新；主工具栏不复制品牌、项目管理入口或保存状态。
 
-AI 候选通过检查并进入待打开状态后，正常连续性候选显示“审阅对比”和“直接打开”两个入口，
-默认突出“审阅对比”；连续性为 `attention` 时只显示“审阅对比”。审阅只读取冻结 HTML 与不可变候选，不切换项目当前源；候选就绪后可按完整 operation/Hash/comment 身份后台预热，未命中缓存时也先挂载同一安全传输合同的前后页面壳，再渐进补齐静态变化与评论事实。正式审阅页复用同一条工作台工具栏并移除所有 Demo 标记：工具栏中的“审阅”模式原位选中，只承载审阅视图与导航控件。所有“返回修改前 / 采纳修改”决定固定由 AI 会话侧栏底部持有；侧栏收起时顶栏 AI 入口显示“待决定”，但不复制决定按钮。HTML 品牌与“关于源页”入口由全局左侧栏统一承担，审阅画布不复制同形入口，也不提供另一条浮动工具栏或收起手柄。采纳会把项目当前源晋升到新的工作文件路径；浮层仍可见时，两页预览继续持有准备审阅时冻结的源路径与文件标题，不因中途路径切换重建。完整 Session 权威同步发布后立即拆除浮层并显示新 HTML，最终编辑 Canvas 核验与项目资料刷新在后台继续；浮层拆除是采纳过程中唯一一次视觉切换，后续核验失败只锁住已提交页面并提供恢复，不回退为旧审阅源。
+AI 候选通过检查后，用户通过“查看修改”进入同一审阅页面。审阅只读取冻结 HTML 与不可变候选，不切换项目当前源；明确点击后才分析，并等待完整文档就绪再打开。合法候选没有可定位事实时也能查看和决定：导航保持总览、focus 为空，不启动首处定位，不制造标记。工具栏原位说明“未定位到可标注的变化，可直接查看前后页面。”；只有核验后的 HTML Hash 相同才显示“前后 HTML 内容相同。”。两者均保留前后页面、页面动作与既有采用／不用本次流程。编辑与预览不显示禁用的审阅子控件；主工具栏高度、模式选择、AI入口与画布位置保持稳定。审阅内没有变化事实时隐藏无作用的变化筛选组，保留页面预览、滚动、缩放和原位说明。正式审阅页复用同一条工作台工具栏并移除所有 Demo 标记：工具栏中的“审阅”模式原位选中，只承载审阅视图与导航控件。所有“返回修改前 / 采纳修改”决定固定由 AI 会话侧栏底部持有；侧栏收起时顶栏 AI 入口显示“待决定”，但不复制决定按钮。HTML 品牌与“关于源页”入口由全局左侧栏统一承担，审阅画布不复制同形入口，也不提供另一条浮动工具栏或收起手柄。采纳会把项目当前源晋升到新的工作文件路径；浮层仍可见时，两页预览继续持有准备审阅时冻结的源路径与文件标题，不因中途路径切换重建。完整 Session 权威同步发布后立即拆除浮层并显示新 HTML，最终编辑 Canvas 核验与项目资料刷新在后台继续；浮层拆除是采纳过程中唯一一次视觉切换，后续核验失败只锁住已提交页面并提供恢复，不回退为旧审阅源。
 
 审阅比对覆盖整页作者内容：`<main>`（或页面唯一的内容包裹层）内部按现有规则逐层展开为区域，同时 `<body>` 直属的页脚、页头、导航等同级内容各自作为一个区域参与比对，顺序与文档顺序一致。单文件页面没有“站点装饰”可以跳过：页脚口径说明被改写同样是用户内容的变化，不得因为它在 `<main>` 之外而沉默消失。
 
@@ -951,9 +957,11 @@ AI 候选通过检查并进入待打开状态后，正常连续性候选显示�
 
 进入审阅的默认组合是 `双页 + 全部变化 + 同步滚动 + 100%`，变化聚焦上下文默认 25%，评论聚焦默认 15%。初始视觉状态是总览：`activeFocusGroupId = null`。总览保留精确字符点/删除线、页边位置提示与“变化 N 处”目录，不画边框、不生成遮罩，也不虚化页面。两页首次 ready 后可以尝试把第一处匹配变化作为导航目标并安全揭示、滚动一次，但不激活 focus；Runtime 必须回执当前 region 确有可见几何后才提交该导航目标，无法定位时顺序尝试下一处。首次定位未完成前，用户的滚轮、触摸、指针或键盘输入立即取消命令并接管；后续 frame ready、重绘或状态投影不得重复定位。短目标居中，接近一屏或更长的目标展示开头。没有可靠源码关系时，不把“首处变化关联评论 1.8 秒提示”纳入本轮合同，避免凭相近位置臆测关联；评论仍由常驻标记明确进入。用户显式选择目录位置或页边提示时才原子激活 group 与两侧 region。用户可自行切到“适应”，单双页共用同一个缩放轴。页面预览三个按钮使用紧凑的固有宽度。单双页都让文档视口尽量铺满 Canvas：除 pane 边框和双页分隔外只留极小间隙，不保留装饰性大留白。
 
-审阅工具不再占用 Canvas 内部空间，也没有展开/收起把手。它们与编辑/预览/审阅模式、项目、文件动作和 AI 入口同处第二层工具栏；进入审阅只改变控件可用性和选中态，不移动两页的位置、尺寸、滚动位置或聚焦测量。上下文可见度不在工具栏逐次调整，而由“设置 → 常规”的两个全局偏好保存。每个文档标签分别保存页面、筛选、聚焦、页内 Tab/折叠、双页滚动、画布横向位置与缩放；切回时必须先核对同一 Review session/document，再按页面状态 → 几何稳定 → 滚动/缩放顺序恢复，不能重播首次自动定位。不同标签的 session、group、region、筛选、缩放和迟到回调不得串用；Candidate 已采用、放弃、失效或身份变化时删除对应恢复对象，不能恢复旧 Review。
+审阅工具不再占用 Canvas 内部空间，也没有展开/收起把手。它们与编辑/预览/审阅模式、项目、文件动作和 AI 入口同处第二层工具栏；进入审阅时在常驻工具栏槽位挂载可用的审阅子控件，退出后移除；主工具栏高度和模式选择位置保持稳定，不因占位控件增减移动画布或改变聚焦测量。窄窗口中会话面板覆盖审阅画布右侧，不继承宽屏的 Grid 列定位，关闭控件必须保持在视口且不被目录头或页面内容拦截。上下文可见度不在工具栏逐次调整，而由“设置 → 常规”的两个全局偏好保存。每个文档标签分别保存页面、筛选、聚焦、页内 Tab/折叠、双页滚动、画布横向位置与缩放；切回时必须先核对同一 Review session/document，再按页面状态 → 几何稳定 → 滚动/缩放顺序恢复，不能重播首次自动定位。不同标签的 session、group、region、筛选、缩放和迟到回调不得串用；Candidate 已采用、放弃、失效或身份变化时删除对应恢复对象，不能恢复旧 Review。
 
-变化事实由分析器按 `text` 与 `structure` 记录，筛选只改变当前可见集合，不产生顺序计数或导航队列。页面上的变化标记是区域内明细事实和定位入口；没有匹配变化时保留筛选并显示空态。修改前页头保持中性标识，AI 修改后页头额外使用紫色顶边与极浅紫底，让横向滚动后仍能立刻分辨哪一侧是新版本。
+仅真实的单元素第 25 个不可合并 canonical fact 超限时，可选标注降级为“变化标注暂不可用，可直接查看前后页面。”。分析器重新解析原始两侧、清理临时标记并重配 panel/action，沿正式评论绑定与安全 bootstrap 构造同一 Review；不保留半标注 DOM，不声称内容相同。取消不发布或缓存；未知异常、序列化／传输预算和基础投影失败继续拒绝，采用仍重新核验身份、路径和 Hash。
+
+变化事实由分析器按 `text` 与 `structure` 记录，筛选只改变当前可见集合，不产生顺序计数或导航队列。页面上的变化标记是区域内明细事实和定位入口；已有变化但当前筛选没有匹配时保留筛选并显示空态；全部事实为空时不展示变化筛选组。修改前页头保持中性标识，AI 修改后页头额外使用紫色顶边与极浅紫底，让横向滚动后仍能立刻分辨哪一侧是新版本。
 
 框选与虚化只认一份 canonical change footprint，并遵守以下不变量：
 
@@ -1014,25 +1022,17 @@ AI 候选通过检查并进入待打开状态后，正常连续性候选显示�
 第 25 个不同 canonical fact，整个分析明确失败；解析端的事实和字节预算仍
 fail-closed，绝不把未访问或未投影部分当作未变化。
 
-### 8.4 no-change
+### 8.4 同内容结果与历史 no-change
 
-如果规范化比较 Hash 相同：
+新的合法完整 HTML 即使与冻结输入逐字节相同，也建立普通 Candidate，进入同一 Review，由用户明确选择采用或不用本次，不按相同 Hash 自动结束。采用确认沿用原确认框，说明：
 
-```text
-未识别到明确的页面变化
-本轮要求和诊断已保留
-[返回编辑]
-```
+> HTML 内容相同，采纳后仍会创建正式版本，并归档本轮已提交且未再修改的要求。
 
-系统：
+采用执行原 Promotion，创建一个正式 Version 与新 Working Copy；只归档本轮已提交且未再修改的要求，新增和再编辑要求保留。不用本次不增加版本，保留要求与本轮记录。
 
-- 不创建 V9。
-- 不创建下一正式 Version 或新的可见 Version Working Copy。
-- 释放候选号。
-- 保留 Request、Attempt、评论和诊断。
-- 解锁并回到 editing。
+历史 v4 中仍在 processing 的 Request，即使 completion 的原状态是 `no-change`，也在全部校验通过后进入普通 Candidate；completion 原字节不重写。已终态的历史 `no-change` 保持原语义：不建版、不复活活动 Request、保留评论和诊断，沿已封存的 `lastAiTask` 展示“上轮处理”。其 submission receipt 与 outbox 继续按原稳定事件 ID 重放，不重新执行，也不迁移历史记录。
 
-失败和 no-change 终态都只提供一个“返回编辑”动作，不自动打开第一条评论，也不把
+失败和历史 no-change 终态都只提供一个“返回编辑”动作，不自动打开第一条评论，也不把
 “修改要求”和“返回编辑”做成两个实际相同的按钮。返回编辑只退出处理视图；本轮 outcome
 继续保存在项目记录中，标题栏显示“上轮处理”，用户可在当前应用会话或重启后重新打开。
 新一轮 Request 正式冻结时才替换这个入口指向的上轮终态。
@@ -1082,9 +1082,9 @@ V1.8 已生成并打开
 
 - 冻结评论与 edit event 写入 Version 归档并与 Request/Attempt 关联。
 - 校验归档数量与 Hash。
-- 成功后才从“本轮要求”清空。
+- 成功后才从“本轮要求”移除本轮已提交且未再修改的要求；新增和再次编辑的要求保留。
 
-任何失败、取消、冲突、no-change 或重启都不能提前清空。
+任何失败、取消、冲突、历史 no-change 或重启都不能提前清空。
 
 ## 10. 外部冲突流程
 
@@ -1176,22 +1176,19 @@ Attempt。旧记录中的脚本结论不再改变状态或产生提示；归档�
 
 ### 11.4 历史版本保持只读
 
-历史卡片不提供“用此版本替换当前 HTML”“设为当前 HTML”或同义入口，也不写入不可变 Version 快照。进入精确历史视图后，横幅额外提供唯一的二级动作“基于此版本继续编辑”：
+历史卡片不提供“用此版本替换当前 HTML”“设为当前 HTML”或同义入口，也不写入不可变 Version 快照。精确历史视图的“编辑”沿用历史创建闭环：先确认创建下一正式版本，取消保持历史视图，成功后打开新 Working Copy。当前入口只调用 create、query 和 openCreatedHistoryVersion；未知创建结果只查询同一 operation，打开失败只重试打开已创建版本。
 
-1. 它只在项目空闲、当前 `viewMode=history` 且 `viewingVersionId` 与按钮 Version 完全相同的情况下可用；处理、保存、项目读取或历史切换期间禁用。
-2. Renderer 以当前项目完整身份和精确 Version ID 调用窄的 `/history-version/continue`；该路由不接受 HTML、Draft、Candidate 或任意路径覆盖字段。
-3. Repository 只激活 manifest 中该 Version 的唯一原有 Working Copy，先验证其完整 state、不可变 Version 快照、当前工作文件 Hash 与 Registry 登记根目录。缺失、重复、Hash 不符或状态不完整时原历史画布保持只读并显示可重试错误，不得从快照静默新建文件。
-4. Repository 原子写入 `desktop-pending` 回执；Desktop 以 `operationId + previousSourcePath + nextSourcePath + projectId + documentId + workingCopyId + versionId + Hash` 激活该 Working Copy，并只接受当前活动路径仍等于 `previousSourcePath` 的新操作。若首个响应已丢失但主进程已提交新活动路径，重放同一回执仍成功并返回同一 `workingCopyId`。
-5. Desktop 成功后 Bridge 确认同一回执，统一托管源切换才在一个无异步间隙的发布边界同步更新 Project、Document、Version、Draft、Comment Session，并让 Canvas 按新的 source Hash 重新确认。回执已提交后的 Bridge、Desktop、确认或 Canvas 故障进入“可安全重试”的未知态，绝不把已激活的 V2 伪造回 V6。
+旧版本已经写入的 `historyActivation` 回执继续支持重启与幂等确认。旧 `/history-version/continue` 只重放完整匹配的存量回执，不再激活另一份 Working Copy 或创建回执；不匹配请求在 Workspace 恢复、改名修复和外部源协调之前拒绝。重复点击即使带新 operation ID，也返回存量回执的原 operation ID；重复桌面确认返回 `confirmed: false`。通用 Desktop 托管源激活与会话 hydration 保留。
 
-例如最新正式版本为 V6 时，只读查看 V2 必须仍展示 V2 快照、不能跳到 V6。点击“基于此版本继续编辑”后打开原有 V2 Working Copy；之后从该工作文件采纳 Candidate 创建 V7 时，谱系为 `basedOnVersionId=V2`，而时间线前序仍为 `previousVersionId=V6`。
+例如旧项目最新正式版本为 V6、已激活的工作稿基于 V2 时，重启和读取仍保留 V2，不会跳到 V6。保存继续写该 V2 工作稿且不改变不可变快照；以后明确采纳 Candidate 创建 V7，谱系仍为 `basedOnVersionId=V2`、`previousVersionId=V6`。新“编辑”操作则按当前历史创建流程创建下一版本，不调用这个旧激活入口。
+
 ## 12. 项目切换
 
 点击“新建项目”选择 HTML，或从左侧项目栏、开始页的“继续编辑”与可操作待办进入已导入项目时，系统先只读分类目标 HTML。已导入项目随后才完成当前编辑 drain，再核对当前
 Document HTML、持久化 Hash 和编辑画布回报。用户在文件选择器取消时不 drain。内部错配会自动重读一次权威源
 HTML，并至多重建一次画布；成功后继续打开，不弹窗要求用户处理
 Hash。若这两个有界步骤仍无法形成一致状态，则保留并锁住原项目，且绝不打开
-一个与旧画布混合的新项目。未绑定的外部 HTML 在用户确认前不切换项目；确认后才走同一发布顺序。
+一个与旧画布混合的新项目。未绑定外部 HTML 的普通导入在同次打开命令中走相同切换与发布边界；文件选择器取消不提交，真实删除原稿仍须明确同意。
 
 新项目或 AI 生成版本的切换遵循同一发布顺序：先在后台准备并验证
 `project + document + sourcePath + version + html + sha256` 完整候选，再在无异步
@@ -1289,7 +1286,8 @@ A 项目 processing 时切换 B 项目：
 | output Hash 不符 | 协议错误 | 重新生成并 finalizer |
 | completion 后 output 变化 | 协议违规 | 新 Attempt |
 | completion 已验证后 Agent 进程收尾未确认 | 保留有效 Candidate 并继续审阅；不得改写成执行失败 | 保持进程围栏，后续执行按 Bridge 恢复规则处理 |
-| no-change | 不建版 | 修改要求后再提交 |
+| 新的合法同内容输出 | 进入同一 Review；明确采用才建版 | 采用或不用本次 |
+| 已终态历史 no-change | 保持原终态，不建版 | 修改要求后再提交 |
 | AI 失败或取消 | 不建版、不创建工作文件 | 修改要求后再提交 |
 
 Agent 设置与执行状态均原位收口：设置页只执行无副作用的
@@ -1305,7 +1303,8 @@ session 证明协议、Agent 身份、建会话与进程清理，只在 Bridge �
 Stemmio 状态压在其下。Agent 结束后，后续校验与 Candidate 事实再按发生顺序追加。停止操作仍固定在底部。
 审阅侧栏打开时，采用／不用本次只在侧栏行动区显示；侧栏关闭时顶栏提供对应决定入口。
 底部常驻“下一轮草稿”输入框，复用 ConversationSession / ConversationWorkflow 的文档草稿
-保存与切换/关闭 drain；退出核对的 preparing/ready 阶段同时锁定输入及草稿写命令，退出失败或取消后恢复，避免后续保存等待期间再输入而丢失。当前阶段仅记事，不发送、不修改冻结 Request、不自动采用 Candidate。
+保存与切换/关闭 drain；消息和草稿由侧栏直接订阅当前文档的会话事实，不经过工作台根的全量快照过滤；切换文档在新读取完成前不展示旧文档消息。退出核对的 preparing/ready 阶段同时锁定输入及草稿写命令，退出失败或取消后恢复，避免后续保存等待期间再输入而丢失。当前阶段仅记事，不发送、不修改冻结 Request、不自动采用 Candidate。
+这是未来产品内 Agent 对话的保留入口；当前不合并到评论，不增加不可用的聊天协议，未来启用发送也不得自动带上过去积累的草稿。
 HTTP runtime 请求 JSONL 内容流：每行仅包含 `type` 与 `text`，`progress` 是面向用户的简短说明，
 `html` 是完整候选的连续片段。模型应在开头及完成实际修改片段时返回说明，不能声称运行了
 未执行的工具或通过了 Stemmio 校验。Bridge 只在整条记录收齐并脱敏后发出 `visible-text`，
@@ -1336,14 +1335,14 @@ Request 仍为 `processing` 但同一 request/attempt 的受管 handoff 失败�
 4. A 项目处理中可以编辑 B 项目。
 5. 只写 output 并等待 30 秒，不建版。
 6. finalizer completion 有任一 ID 或 Hash 错误，不建版。
-7. no-change 不消耗候选号，评论保留。
+7. 新的合法同内容输出进入普通 Candidate，明确采用才消耗正式版本号；已终态历史 no-change 不复活，评论保留。
 8. 成功 V9 只在新可见 Version Working Copy、快照、画布三 Hash 相同且项目路径已切换后提示。
 9. 查看 V6 永远只读且打开精确路径。
 10. 用 V5 替换当前内容不建版；下一次有效 AI 返回仍按时间线成为 V9。
 11. 外部冲突重启后仍停留在同一候选和同一 Hash 对比。
 12. 每个事务边界崩溃后，不出现半提交状态。
 13. 连续两次 AI 成功后，原始 HTML 和第一份工作文件逐字节不变，项目当前路径指向第二份工作文件。
-14. no-change、失败和取消均不创建下一个可见 Version Working Copy。
+14. 已终态历史 no-change、失败、取消和不用本次均不创建下一个可见 Version Working Copy；新的同内容 Candidate 经明确采用后沿普通 Promotion 创建。
 15. 左侧版本列表无横向滚动，点击具体版本文件仍定位对应的可见 Version Working Copy；隐藏快照继续只读用于历史画布。
 16. 处理中查看 Request/Attempt/output 并产生普通 `.DS_Store`，仍保持 processing 且 finalizer 可正常完成；同名软链接和其他额外文件继续失败关闭。
 17. completion 出现前的失败不点亮“AI 已返回”；completion 出现后的校验失败保留已返回事实。
@@ -1353,7 +1352,7 @@ Request 仍为 `processing` 但同一 request/attempt 的受管 handoff 失败�
 20. 文字、样式、插入换行和同级下移落盘后，系统 Edit 菜单可在当前打开 HTML 内逐项按原始字节撤销/重做，最多 20 次；切换 HTML、关闭或重启后不继续旧栈。
 21. 评论正文和 `PROJECT.md` 获得焦点时，Edit > Undo 只恢复该输入框文字；评论/附件卡片状态与源 HTML 均不变化。
 22. Registry 有 A/B 且 Recent 只有 A 时，项目列表同时显示 A/B，A 仅因 Recent 排序优先；Recent 外的项目可安全打开，未登记 Recent 文件不能成为项目。
-23. V6 的历史 V2 继续编辑后，左侧版本列表与历史仍保留“基于 V2”“项目最新 V6”“当前编辑基础/有本地修改”事实；顶栏不显示保存状态，历史只读不改变当前编辑目标。
+23. 旧回执已经激活 V2、最新为 V6 的存量项目中，左侧版本列表与历史仍保留“基于 V2”“项目最新 V6”“当前编辑基础/有本地修改”事实；顶栏不显示保存状态，历史只读不改变当前编辑目标。
 24. Version Finder 定位可见 Working Copy，Candidate Finder 只打开 `AI任务/`；删除或篡改 AI任务 后，隐藏 Candidate 仍可审阅和 Promotion，P2 不创建 `附件与图片/`。
 25. 受支持的 parser-blocking、inline、defer、无 import module、DOMContentLoaded
     listener 与受控相对 `<base>` 页面在真实 Electron Edit iframe 中运行；不能等价
@@ -1361,7 +1360,7 @@ Request 仍为 `processing` 但同一 request/attempt 的受管 handoff 失败�
     拒绝。准备请求只保留有限近期重放记录，连续使用不会累计到必须重启应用。全过程
     不增加 freeze、probe、snapshot、双 iframe 或逐节点 Runtime 对账；所有保存、
     Version 与 AI 输入仍只含完整源码 HTML。
-26. 打开未绑定 HTML 先出现导入确认；取消后当前项目不变。勾选删除也必须等新画布确认后才把原稿移入废纸篓。再次打开同一原稿只出现“已经导入”确认，主操作打开之前的项目，不出现“查看初始版本 V1”。
+26. 普通打开未绑定 HTML 自动导入；再次打开同一原稿自动继续已有项目，不创建第二个项目。选择器取消不切换；删除原稿须明确同意且等新画布确认。失败/未知提交保留同一请求重试，ACK-only 重试不再次导入或应用项目，外部请求保持 FIFO。
 
 ### 工作台版本展示投影
 

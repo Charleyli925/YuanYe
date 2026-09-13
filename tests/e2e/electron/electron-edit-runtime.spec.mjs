@@ -1330,7 +1330,7 @@ test("same-parent Runtime reorder keeps one document and does not rerun its scri
 <html><head><title>Runtime</title></head><body>
   <div aria-hidden="true" style="height:600px"></div>
   <section>
-    <p id="first" data-native-case="runtime-first">甲</p>
+    <p id="first" data-native-case="runtime-first" data-ai-level="module">甲</p>
     <p id="second">乙</p>
     <p id="third">丙</p>
     <output id="runtime-order"></output>
@@ -1384,6 +1384,8 @@ test("same-parent Runtime reorder keeps one document and does not rerun its scri
     expect(moveDownBox.y + moveDownBox.height).toBeLessThanOrEqual(viewport.height);
     // Use the already-visible toolbar coordinate. locator.click() is allowed to
     // scroll an ancestor first and would replace the user's reading position.
+    await enablePipelineCounters(page);
+    await resetPipelineCounters(page);
     await page.mouse.click(
       moveDownBox.x + moveDownBox.width / 2,
       moveDownBox.y + moveDownBox.height / 2,
@@ -1399,12 +1401,40 @@ test("same-parent Runtime reorder keeps one document and does not rerun its scri
     ))).toBe(1);
     await expect(nextFrame.locator(
       `[data-pageroot-id="${stableId}"][data-html-canvas-selected]`,
-    )).toHaveCount(1);
+    )).toHaveAttribute("data-html-canvas-selected", "module");
     await expect.poll(() => reviewStage.evaluate((element) => element.scrollTop)).toBe(480);
     const workingCopyPath = await managedWorkingCopyPath(page, sourcePath);
     await expect.poll(() => readPublishedWorkingCopy(workingCopyPath, "utf8"))
       .toMatch(/id="second"[\s\S]*id="first"/u);
-    const moveRevision = await expectCheckpointPersisted(page, 0);
+    const firstMoveRevision = await expectCheckpointPersisted(page, 0);
+    expect((await readPipelineCounters(page)).fullPatchApplies).toBe(1);
+
+    // The direct semantic materialization has its own canonical subregion
+    // TargetRef. The Canvas must still retain this caller's module TargetRef,
+    // otherwise the first move marks the selection orphaned and disables a
+    // consecutive move until the user selects the element again.
+    await expect(moveDownButton).toBeEnabled();
+    const secondMoveDownBox = await moveDownButton.boundingBox();
+    expect(secondMoveDownBox).not.toBeNull();
+    await resetPipelineCounters(page);
+    await page.mouse.click(
+      secondMoveDownBox.x + secondMoveDownBox.width / 2,
+      secondMoveDownBox.y + secondMoveDownBox.height / 2,
+    );
+    await expect.poll(() => documentToken(page)).toBe(beforeDocument);
+    const twiceMovedFrame = await currentEditorFrame(page);
+    await expect(twiceMovedFrame.locator("#runtime-order")).toHaveText("丙甲乙");
+    await expect(twiceMovedFrame.locator("section > p").first()).toHaveAttribute("id", "second");
+    await expect(twiceMovedFrame.locator("section > p").nth(1)).toHaveAttribute("id", "third");
+    await expect(twiceMovedFrame.locator("section > p").nth(2)).toHaveAttribute("id", "first");
+    await expect(twiceMovedFrame.locator(
+      `[data-pageroot-id="${stableId}"][data-html-canvas-selected]`,
+    )).toHaveAttribute("data-html-canvas-selected", "module");
+    await expect(page.getByRole("button", { name: "上移", exact: true })).toBeEnabled();
+    await expect.poll(() => readPublishedWorkingCopy(workingCopyPath, "utf8"))
+      .toMatch(/id="second"[\s\S]*id="third"[\s\S]*id="first"/u);
+    const moveRevision = await expectCheckpointPersisted(page, firstMoveRevision);
+    expect((await readPipelineCounters(page)).fullPatchApplies).toBe(1);
 
     const beforeUndoDocument = await documentToken(page);
     await clickEditHistoryMenu(electronApp, page, "undo");
@@ -1414,12 +1444,12 @@ test("same-parent Runtime reorder keeps one document and does not rerun its scri
       window.__PAGEROOT_RUNTIME_REORDER_EXECUTIONS__ || 0
     ))).toBe(2);
     const undoFrame = await currentEditorFrame(page);
-    await expect(undoFrame.locator("#runtime-order")).toHaveText("丙甲乙");
-    await expect(undoFrame.locator("section > p").first()).toHaveAttribute("id", "third");
-    await expect(undoFrame.locator("section > p").nth(1)).toHaveAttribute("id", "first");
-    await expect(undoFrame.locator("section > p").nth(2)).toHaveAttribute("id", "second");
+    await expect(undoFrame.locator("#runtime-order")).toHaveText("乙丙甲");
+    await expect(undoFrame.locator("section > p").first()).toHaveAttribute("id", "second");
+    await expect(undoFrame.locator("section > p").nth(1)).toHaveAttribute("id", "third");
+    await expect(undoFrame.locator("section > p").nth(2)).toHaveAttribute("id", "first");
     expect((await readPublishedWorkingCopy(workingCopyPath, "utf8")))
-      .toMatch(/id="first"[\s\S]*id="second"/u);
+      .toMatch(/id="second"[\s\S]*id="first"[\s\S]*id="third"/u);
 
     const beforeRedoDocument = await documentToken(page);
     await clickEditHistoryMenu(electronApp, page, "redo");
@@ -1434,7 +1464,7 @@ test("same-parent Runtime reorder keeps one document and does not rerun its scri
     await expect(redoFrame.locator("section > p").nth(1)).toHaveAttribute("id", "third");
     await expect(redoFrame.locator("section > p").nth(2)).toHaveAttribute("id", "first");
     expect((await readPublishedWorkingCopy(workingCopyPath, "utf8")))
-      .toMatch(/id="second"[\s\S]*id="first"[\s\S]*id="third"/u);
+      .toMatch(/id="second"[\s\S]*id="third"[\s\S]*id="first"/u);
     expect(readFileSync(sourcePath, "utf8")).toBe(html);
     expect((await readPublishedWorkingCopy(workingCopyPath, "utf8"))).not.toContain("乙甲</output>");
     await reviewStage.evaluate((element) => {
@@ -1834,12 +1864,17 @@ test("Runtime text and style edits stay in one document across selection and sav
     const toolbar = editor.getByRole("toolbar");
     await expect(toolbar).toBeVisible();
     await toolbar.getByText("样式与间距", { exact: true }).click();
+    await enablePipelineCounters(page);
+    await resetPipelineCounters(page);
     await toolbar.getByLabel("内边距（像素）").fill("20");
     await expect.poll(() => readPublishedWorkingCopy(workingCopyPath, "utf8"))
       .toMatch(/padding-top:\s*20px/u);
+    expect((await readPipelineCounters(page)).fullPatchApplies).toBe(1);
+    await resetPipelineCounters(page);
     await toolbar.getByLabel("内边距（像素）").fill("22");
     await expect.poll(() => readPublishedWorkingCopy(workingCopyPath, "utf8"))
       .toMatch(/padding-top:\s*22px/u);
+    expect((await readPipelineCounters(page)).fullPatchApplies).toBe(1);
     await expect(first).toHaveCSS("padding-top", "22px");
     await expect(forgedFirst).toHaveCSS("padding-top", "0px");
 
@@ -1931,12 +1966,25 @@ test("Runtime range styling never grants a forged clone source authority", {
     const bold = toolbar
       .getByRole("button", { name: "加粗", exact: true });
     await expect(bold).toBeEnabled();
+    await enablePipelineCounters(page);
+    await resetPipelineCounters(page);
     await bold.click();
 
     await expect.poll(() => readPublishedWorkingCopy(workingCopyPath, "utf8"))
       .toMatch(/<span[^>]*font-weight:\s*700/iu);
+    expect((await readPipelineCounters(page)).fullPatchApplies).toBe(1);
     await expect(target.locator('span[style*="font-weight"]')).toHaveCount(1);
+    await expect(target.locator('span[style*="font-weight"]'))
+      .toHaveAttribute("data-pageroot-id", /^pr1_[0-9a-f]{32}$/u);
     await expect(forged.locator('span[style*="font-weight"]')).toHaveCount(0);
+    await expect(editor).toHaveAttribute(
+      "data-native-format-resume",
+      "source:requested:resumed",
+    );
+    await expect(target).toHaveAttribute("contenteditable", "true");
+    await expect.poll(() => target.evaluate((element) => (
+      element.ownerDocument.getSelection()?.toString() || ""
+    ))).toBe("甲");
     await expect.poll(() => documentToken(page)).toBe(beforeDocument);
     await expect(editor.locator('iframe[data-frame-role="runtime-candidate"]')).toHaveCount(0);
   });

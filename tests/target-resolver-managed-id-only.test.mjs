@@ -125,3 +125,33 @@ test("managed insertion points require a parent elementId", () => {
   assert.equal(orphaned.resolution, "orphaned");
   assert.equal(orphaned.reason, "managed-insertion-requires-parent-id");
 });
+
+
+test("insertion targets never guess a parent from an invalid or ambiguous Stable ID", () => {
+  const index = buildSourceIndex(MANAGED);
+  const parent = index.byPagerootId.get(ID_ALPHA);
+  const insertion = createInsertionPointTargetRef(index, { parentId: parent.nodeId });
+  for (const elementId of [undefined, null, "", false, 0, NaN, " ", "invalid-id"]) {
+    const result = resolveTargetRef(index, { ...insertion, elementId }, { surface: "edit" });
+    assert.equal(result.resolution, "orphaned", String(elementId));
+    assert.equal(result.target, null);
+  }
+  const missing = MANAGED.replace(ID_ALPHA, "pr1_8888888888884888a888888888888888");
+  const duplicate = MANAGED.replace(ID_BETA, ID_ALPHA);
+  for (const html of [missing, duplicate]) {
+    const result = resolveTargetRef(buildSourceIndex(html), insertion, { surface: "edit" });
+    assert.equal(result.resolution, "orphaned");
+    assert.equal(result.reason, "stable-parent-not-found");
+  }
+});
+
+test("a valid insertion parent still rebinds its child boundary after a source shift", () => {
+  const index = buildSourceIndex(MANAGED);
+  const parent = index.byPagerootId.get(ID_ALPHA);
+  const insertion = createInsertionPointTargetRef(index, { parentId: parent.nodeId });
+  const shifted = buildSourceIndex(`<!-- source shift -->${MANAGED}`);
+  const result = resolveTargetRef(shifted, insertion, { surface: "edit" });
+  assert.equal(result.resolution, "rebound");
+  assert.equal(result.target.parentId, shifted.byPagerootId.get(ID_ALPHA).nodeId);
+  assert.equal(result.target.offset, shifted.byPagerootId.get(ID_ALPHA).contentRange.endOffset);
+});

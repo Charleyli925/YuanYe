@@ -99,9 +99,11 @@ export function productErrorMessage(cause, fallback) {
   }
   const raw = cause instanceof Error
     ? cause.message
-    : typeof cause === "string"
-      ? cause
-      : "";
+    : cause && typeof cause === "object" && typeof cause.message === "string"
+      ? cause.message
+      : typeof cause === "string"
+        ? cause
+        : "";
   let message = raw
     .replace(IPC_ERROR_PREFIX, "")
     .replace(ERROR_CLASS_PREFIX, "")

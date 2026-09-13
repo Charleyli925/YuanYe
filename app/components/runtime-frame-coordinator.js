@@ -61,6 +61,39 @@ function sameIdentity(left, right) {
     && left.slotLease === right.slotLease;
 }
 
+export function runtimeCandidateAlreadyActive({
+  request,
+  runtimeFrame,
+  frameLoadGeneration,
+  snapshot,
+} = {}) {
+  const lastKnownGood = snapshot?.lastKnownGood;
+  if (request?.kind === "static-disabled") {
+    return Boolean(
+      lastKnownGood
+      && lastKnownGood.kind === "static-disabled"
+      && lastKnownGood.sourceRevision === request.sourceRevision,
+    );
+  }
+  if (
+    request?.kind !== "dynamic"
+    || !runtimeFrame
+    || runtimeFrame.settled !== true
+    || (runtimeFrame.activation !== "ready" && runtimeFrame.activation !== "partial")
+    || runtimeFrame.elementGeneration !== frameLoadGeneration
+    || !lastKnownGood
+  ) return false;
+  const activeSlotIdentity = snapshot.activeSlotId
+    ? snapshot.slots?.[snapshot.activeSlotId]?.identity
+    : null;
+  return Boolean(
+    lastKnownGood.kind === "dynamic"
+    && lastKnownGood.sourceRevision === request.sourceRevision
+    && sameIdentity(runtimeFrame.attempt, lastKnownGood)
+    && sameIdentity(runtimeFrame.attempt, activeSlotIdentity),
+  );
+}
+
 function frozenSlot(slot) {
   return Object.freeze({
     slotId: slot.slotId,

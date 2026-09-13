@@ -46,12 +46,12 @@ test("ADR 0066/0068 and the architecture contract keep source Review authoritati
     "side-specific `ReviewPresentation`",
     "panel key and a Stable-ID-bound `<details>` disclosure",
     "actual marker/evidence host, not the coarse section pair",
-    "One first change is active on entry",
-    "Other element changes retain the quiet page-edge revision bar",
+    "Entry starts in overview with null focus",
+    "Element changes retain quiet page-edge revision bars",
     "Same-parent topology names a concrete moved element only",
     "attaches `元素顺序调整` to the shared Stable-ID parent",
     "Review is a no-floating-notice surface",
-    "hides the AI conversation once",
+    "opens the existing AI conversation decision panel",
     "fixed to the right edge of the Before pane",
     "aggregate to `评2`/`评3`",
   ]) {
@@ -62,12 +62,12 @@ test("ADR 0066/0068 and the architecture contract keep source Review authoritati
     "private `ReviewDiagnostic` records",
     "cannot create `<html>` markers, mask holes, outline entries",
     "Equal bounded summaries cannot prove arbitrary CSS/Script behavior",
-    "Candidate with diagnostics but no position-bound change stays outside Review",
+    "Candidate with diagnostics but no position-bound change opens the same Review",
     "All text facts and only the active element change cut mask holes",
     "side-specific `ReviewPresentation`",
     "actual marker/evidence host",
     "renders no non-blocking visual status, scope card, candidate-attention notice or global Toast",
-    "hides the AI conversation once",
+    "opens the existing AI conversation decision panel",
   ]) {
     assert.ok(normalizedArchitecture.includes(required), `Architecture Contract lost boundary: ${required}`);
   }

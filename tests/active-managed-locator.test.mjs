@@ -5,10 +5,24 @@ import test from "node:test";
 import {
   activeManagedLocatorForActivatedPath,
   activeManagedLocatorFromOpenTarget,
+  createActiveManagedReconcileOperationId,
   normalizeActiveManagedLocator,
   rebaseActiveManagedLocator,
   sameManagedPath,
 } from "../desktop/active-managed-locator.mjs";
+
+test("managed reconcile operation IDs are explicit and validated", () => {
+  assert.equal(
+    createActiveManagedReconcileOperationId(
+      () => "12345678-90ab-cdef-1234-567890abcdef",
+    ),
+    "reconcile_1234567890abcdef1234567890abcdef",
+  );
+  assert.throws(
+    () => createActiveManagedReconcileOperationId(() => "not-a-uuid"),
+    /操作 ID 无效/u,
+  );
+});
 
 const LOCATOR = {
   projectId: "project_aaaaaaaaaaaaaaaa",

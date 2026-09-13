@@ -386,18 +386,6 @@ export function createBridgeClient({
     createVersionFromHistory: (body) => command("/history-version/create", body, "新版本的创建结果暂时无法确认。", DEFAULT_REQUEST_TIMEOUT_MS),
     queryHistoryCreation: (body) => command("/history-version/result", body, "暂时无法确认新版本的创建结果。"),
     confirmHistoryCreationOpened: (body) => command("/history-version/opened", body, "新版本打开确认暂时没有响应。"),
-    continueEditingHistoryVersion: (body) => command(
-      "/history-version/continue",
-      body,
-      "暂时无法基于这份历史版本继续编辑。",
-      DEFAULT_REQUEST_TIMEOUT_MS,
-    ),
-    confirmEditingHistoryVersion: (body) => command(
-      "/history-version/desktop-confirmed",
-      body,
-      "历史工作文件桌面激活确认暂时没有响应。",
-      DEFAULT_REQUEST_TIMEOUT_MS,
-    ),
     cancelActiveRun: (body) => command(
       "/active-run/cancel",
       body,

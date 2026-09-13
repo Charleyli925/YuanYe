@@ -7,6 +7,7 @@ import type { ReviewPresentationSnapshot } from "./review-state";
 type WorkbenchReviewSession = Readonly<{
   sessionId: string;
   documents: ReviewDocuments;
+  sourceContentEqual: boolean;
   sourcePath: string;
   beforeLabel: string;
   afterLabel: string;
@@ -78,6 +79,7 @@ export function WorkbenchReviewOverlay({
       afterLabel={session.afterLabel}
       sessionId={session.sessionId}
       documents={session.documents}
+      sourceContentEqual={session.sourceContentEqual}
       sourcePath={session.sourcePath || undefined}
       accepting={accepting}
       error={activeRunError}

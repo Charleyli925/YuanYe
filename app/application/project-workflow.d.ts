@@ -257,6 +257,8 @@ export class ProjectWorkflow {
     prepared: PreparedManagedSourceTransition;
     html: string;
     sourceSha256: string;
+    editRevision?: number;
+    lastPersistedRevision?: number;
     publishVersion?(): void;
     publishSessions?(context: ProjectContext): void;
   }): ProjectContext | null;
@@ -268,11 +270,14 @@ export class ProjectWorkflow {
     nextDocumentId: string;
     versionId: string;
     openTarget?: Omit<OpenTarget, "sessionEpoch"> | null;
+    operationId?: string | null;
   }): Promise<PreparedGeneratedSourceTransition>;
   commitGeneratedSourceTransition(input: {
     prepared: PreparedGeneratedSourceTransition;
     html: string;
     sourceSha256: string;
+    editRevision?: number;
+    lastPersistedRevision?: number;
     publishVersion(): void;
   }): ProjectContext | null;
   dispose(): void;

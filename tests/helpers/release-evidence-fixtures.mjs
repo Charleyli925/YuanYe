@@ -115,6 +115,7 @@ const BRIDGE_FILES = [
   "project-file-repository/path-safety.mjs",
   "project-file-repository/source-binding.mjs",
   "project-file-repository/submission.mjs",
+  "project-file-repository/save-retirement.mjs",
   "project-file-repository/registry.mjs",
   "project-file-repository/request-draft.mjs",
   "project-file-repository/request-attachments.mjs",
@@ -516,6 +517,11 @@ export async function createSyntheticAppBundle(t, {
     ),
     writeFixtureFile(
       productRoot,
+      "shared/agent-input-policy.mjs",
+      "export const HTTP_AGENT_INPUT_POLICY_REVISION = 'fixture';\n",
+    ),
+    writeFixtureFile(
+      productRoot,
       "shared/agent-vendor-key-url.mjs",
       "export const AGENT_VENDOR_KEY_VENDOR_IDS = Object.freeze([]);\nexport const publicAgentVendorKeyUrl = () => null;\n",
     ),
@@ -633,6 +639,7 @@ export async function createSyntheticAppBundle(t, {
       "agent-access-operation.mjs",
       "agent-login-url.mjs",
       "agent-auth-source.mjs",
+      "agent-input-policy.mjs",
       "openai-compatible-vendors.mjs",
       "supported-agent-models.mjs",
       "agent-feature-gates.mjs",

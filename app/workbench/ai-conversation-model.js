@@ -175,39 +175,6 @@ const RUN_PROGRESS_STATES = Object.freeze([
   "review-view",
 ]);
 
-const AGENT_STAGE_DEFINITIONS = Object.freeze([
-  Object.freeze({ key: "send", label: "正在发送任务" }),
-  Object.freeze({ key: "generate", label: "正在生成修改" }),
-  Object.freeze({ key: "validate", label: "正在校验 HTML" }),
-  Object.freeze({ key: "review", label: "正在准备审阅" }),
-]);
-
-export function sidebarAgentStageSteps({ state, phase } = {}) {
-  const currentState = String(state || "");
-  if (!RUN_PROGRESS_STATES.includes(currentState)) return Object.freeze([]);
-  if (["ready-to-open", "review-view"].includes(currentState)) {
-    return Object.freeze(AGENT_STAGE_DEFINITIONS.map((step) => Object.freeze({
-      ...step,
-      state: "completed",
-    })));
-  }
-  const value = String(phase || "");
-  const currentIndex = ["preparing-delivery", "launching", "starting", "starting-session", "sending-task", "request-sent"]
-    .includes(value) || currentState === "preparing-delivery"
-    ? 0
-    : ["receiving-response", "generation-started", "generating-modification", "reading-task", "running", "cancelling", "stopping"]
-      .includes(value)
-      ? 1
-      : ["response-received", "html-validation-completed", "validating-html", "awaiting-validation"]
-        .includes(value)
-        ? 2
-        : 3;
-  return Object.freeze(AGENT_STAGE_DEFINITIONS.map((step, index) => Object.freeze({
-    ...step,
-    state: index < currentIndex ? "completed" : index === currentIndex ? "current" : "pending",
-  })));
-}
-
 export function sidebarRunProgress({
   state,
   steps = [],
@@ -514,6 +481,22 @@ export function conversationReadyForDocument(conversation, projectId, documentId
     && conversation.context?.projectId === projectId
     && conversation.context?.documentId === documentId,
   );
+}
+
+/** Only the requested Document may supply the sidebar's local draft and history. */
+export function sidebarConversationPresentation(snapshot, context) {
+  const conversation = snapshot?.context?.projectId === context?.projectId
+    && snapshot?.context?.documentId === context?.documentId
+    && context?.projectId && context?.documentId ? snapshot : null;
+  return {
+    title: conversation?.title ?? "",
+    messages: conversation?.messages ?? [],
+    draftText: conversation?.draftText ?? "",
+    draftAvailable: context?.draftReadOnly !== true
+      && conversationReadyForDocument(conversation, context?.projectId, context?.documentId),
+    loading: !conversationLoadedForView(conversation),
+    turns: conversation?.conversation?.turns ?? [],
+  };
 }
 
 /**

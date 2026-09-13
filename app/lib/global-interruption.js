@@ -12,7 +12,6 @@ export const GLOBAL_INTERRUPTION_KINDS = Object.freeze([
   "open-in-browser-failed",
   "export-failed",
   "handoff-recopy",
-  "review-no-visible-change",
 ]);
 
 /**
@@ -66,6 +65,10 @@ export function globalInterruptionPresentation(interruption) {
         dismissMs: null,
         actionId: "retry-project-open",
         actionLabel: interruption.recent ? "重新选择位置" : "重新选择",
+        actionRequestId: typeof interruption.requestId === "string"
+          && interruption.requestId
+          ? interruption.requestId
+          : undefined,
         usageKey: "project-open-error",
       };
     case "attachment-rejected":
@@ -145,17 +148,6 @@ export function globalInterruptionPresentation(interruption) {
         actionId: null,
         actionLabel: null,
         usageKey: "handoff-recopied",
-      };
-    case "review-no-visible-change":
-      return {
-        kind: interruption.kind,
-        title: "未识别到明确的页面变化",
-        message: "没有找到能够定位到页面具体位置的内容、结构或视觉变化。",
-        tone: "success",
-        dismissMs: 8_000,
-        actionId: null,
-        actionLabel: null,
-        usageKey: "ready-version-no-visible-review-change",
       };
     default:
       return null;

@@ -1,6 +1,5 @@
 import {
-  commentSourceAnchor,
-  commentVisualHintForSelection,
+  commentVisualTarget,
   insertionLabel,
   selectionFromRecord,
 } from "./comment-model";
@@ -33,12 +32,7 @@ export function versionTitle(
   return versionEntryTitle({
     isInitial: version.source === "初始页面",
     comments: version.comments.map((comment) => {
-      const sourceTarget = commentSourceAnchor(comment) || comment.target;
-      const visualHint = comment.visualHint
-        || commentVisualHintForSelection(comment.target);
-      const displayTarget = visualHint
-        ? { ...sourceTarget, label: visualHint.label, visualHint }
-        : sourceTarget;
+      const displayTarget = commentVisualTarget(comment);
       return {
         label: insertionLabel(displayTarget),
         text: comment.text,

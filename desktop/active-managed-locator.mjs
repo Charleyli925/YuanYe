@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 
 const PROJECT_ID = /^project_[A-Za-z0-9_-]+$/u;
@@ -7,6 +8,14 @@ const VERSION_ID = /^ver_\d{4,}$/u;
 const SHA256 = /^sha256:[a-f0-9]{64}$/u;
 const HTML_EXTENSIONS = new Set([".html", ".htm"]);
 const MAX_PATH_LENGTH = 4096;
+
+export function createActiveManagedReconcileOperationId(uuid = randomUUID) {
+  const suffix = String(uuid()).replaceAll("-", "").toLowerCase();
+  if (!/^[a-f0-9]{32}$/u.test(suffix)) {
+    throw new TypeError("活动工作文件核对操作 ID 无效。");
+  }
+  return `reconcile_${suffix}`;
+}
 
 function assertHtmlPath(value, label) {
   if (

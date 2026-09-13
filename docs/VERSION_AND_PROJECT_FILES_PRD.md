@@ -361,26 +361,15 @@ V2 工作文件第一次建立时与 V2 正式快照逐字节一致。V2 正式�
 - 保存工作 HTML 时不得以无条件替换覆盖可见文件：系统先在私有恢复目录保留旧源字节，再以 no-replace 方式发布已验证的新字节。窗口期出现的外部写入必须保留并报告冲突；即使外部编辑器持有已停放旧 inode 的文件描述符并在发布后继续写入，清理前也必须复验并保留该恢复副本，不能删除。若进程已写入 `committed` 但私有恢复目录仍在，重开时也必须先做同一复验，不能跳过为已完成。崩溃恢复只能完成已安全停放的事务或恢复旧字节，不能猜测或删除外部文件。
 - `Cmd+S` 可立即触发同一保存机制，但不创建正式版本。
 
-### 8.3 从历史版本继续编辑
+### 8.3 从历史版本开始新迭代
 
-历史查看和继续编辑是两个动作：
+历史查看和编辑是两个动作。打开版本 2 时精确显示 V2 的不可变快照，保持只读且不替换当前 DocumentSession。工具栏“编辑”先确认创建下一正式版本；取消保持历史视图和原工作文件。确认后使用现行历史创建事务，由 create、query 和 openCreatedHistoryVersion 完成创建、结果核对和打开。创建结果未知时只查询同一 operation，已创建但打开失败时只重试打开，不分配第二个版本。
 
-1. 在版本历史中打开版本 2，先精确显示版本 2 的不可变快照，状态为只读。
-2. 用户点击“基于版本 2 继续编辑”后：
-   - 系统只接受 manifest 中 `versionId=V2` 且 `basedOnVersionId=V2` 的唯一原有 Working Copy；缺失、重复、状态/快照 Hash 不完整时失败关闭，不从快照临时重建或猜测另一份文件。
-   - 在切换前完整校验该 Working Copy state、可见工作文件、不可变 V2 快照、Registry 根目录和完整 OpenTarget 身份；成功后打开原有工作文件，不根据快照字节差异生成额外的用户状态徽标。
-   - Finder 定位该历史 Version 的可见工作文件时也执行同一受控重命名恢复：只在旧映射缺失、`workingCopyId` 不变且同根文件标识唯一时更新 manifest，不能因非活动文件路径陈旧而改为定位隐藏快照或猜测另一份 HTML。
-3. 后续编辑全部保存到 V2 工作文件，不覆盖正式 V2，也不创建新项目。
+Finder 定位历史 Version 的可见工作文件仍执行受控重命名恢复：只有稳定 `workingCopyId` 和同根唯一文件标识足以核对，才更新 manifest；不能改为定位隐藏快照或猜测另一份 HTML。
 
-该动作是窄的、可重试的“激活指定 Version 的 Working Copy”操作。Repository 先原子写入 V2 指针和 `desktop-pending` 回执；Bridge、桌面激活或确认响应在提交后丢失时，重放该回执的 `operationId` 与 Version 必须仍指向同一 `workingCopyId`，不得因为当前 Registry runtime 已经指向 V2 而拒绝重试，也不得伪造回滚到 V6。Desktop 对新操作只接受仍以原 `previousSourcePath` 为活动文件的前序，完成字节 Hash 校验后 Bridge 确认同一回执；随后才在一个无 `await` 的发布边界同步更新 `ProjectSession`、`DocumentSession`、`VersionSession`、`DraftSession` 与 `CommentSession`，再允许新 Canvas generation 接受回报。
+旧版本已经写入的 `historyActivation` 保持兼容：当前 Renderer 不再提供旧激活命令；旧 `/history-version/continue` 只能重放匹配的存量回执，不能创建回执或更换活动工作稿。项目、文档、Version、前序和目标 Working Copy 必须完整一致；缺失或不匹配时，在任何 Workspace 恢复、改名修复或外部源协调之前拒绝。重复点击返回原 operation ID；桌面确认只将原回执从 pending 改为 confirmed 一次，重复确认返回 `confirmed: false`。
 
-若项目最新正式版本已经是版本 6，界面必须同时显示：
-
-> 基于版本 2 的本地编辑 · 已保存
->
-> 项目最新正式版本：版本 6
-
-用户无需“恢复当前版本”，也不需要先创建分支。系统不能因为 V2 与某个较新版本 Hash 相同而跳转到较新文件。
+存量项目若最新正式版本为 V6、活动工作稿仍基于 V2，重启、打开和保存继续保留该 V2 工作稿，不因最新指针或相同 Hash 跳到 V6，也不改写不可变 V2 快照。以后明确采纳 Candidate 创建 V7，其谱系仍为 `basedOnVersionId=V2`、`previousVersionId=V6`。当前历史创建与 Promotion 成功时继续按各自既有事务清除旧激活回执；不批量迁移历史记录。
 
 ### 8.4 从 Finder 打开与受管 HTML 路径变化
 
@@ -391,6 +380,7 @@ V2 工作文件第一次建立时与 V2 正式快照逐字节一致。V2 正式�
 - 文件以新名称放回登记项目根目录时，只要受控身份线索能唯一确认，就静默重绑定、更新首选命名并继续保存；只有存在两个以上合理候选或身份线索冲突时才要求用户选择一次。
 - 文件在外部被修改后放回时，仍可恢复为原 Working Copy：PageRoot 内没有未保存修改时自动采用磁盘变化；两边都已修改时保留两份字节并进入真正的内容冲突处理，不得静默覆盖。
 - 文件留在项目外部并被再次打开时，系统重新执行有效 v4 Project 检查；未通过时立即按新外部来源建立新的 v4 V1，不回写、合并、重新关联或迁移原项目。单个 HTML 被移动到另一个项目根目录时同样不自动合并。
+- workspace 先恢复登记项目，再解析可见源，确保保存中暂时缺失的源和未收口的 Promotion 能恢复。解析后仅在项目 ID、文档 ID 和规范根路径完全一致时复用这次恢复；不同目标仍独立恢复，后续目标和元数据继续重新校验。
 - 打开隐藏不可变快照时，只允许历史只读查看。
 - PR 1 的受管工作 HTML 只位于登记项目根目录的可见顶层；不借本规则扩展任意嵌套 HTML 或多文件网站管理。
 - Hash 只校验内容和冲突，不能在多个路径间决定身份；无法唯一确认时保持未受管，直到用户明确操作需要一次选择。
@@ -447,6 +437,8 @@ P3 中当用户发送 AI 时：
 4. 建立稳定 `requestId`、`attemptId` 和 `candidateId`。
 5. 仅把清单中允许的冻结输入交给 AI。
 
+评论冻结沿用现有记录格式：唯一评论 codec 从运行态 `sourceAnchor` 输出兼容 `target` 与 `sourceAnchor`，保留可选文字定位、视觉说明、附件及未知扩展；这不是第二份运行状态。读取旧记录不批量重写 Draft、Request 或不可变历史。
+
 发送本身不改变正式版本号。提交该 Request 的项目在 AI 处理期间进入只读处理态，避免同一冻结输入出现并发歧义；用户可以继续切换和编辑其他项目。MVP 中一个项目同一时间最多只有一个活动 Request 或待处理候选，避免多个候选争用同一个下一版本号。
 
 ### 10.2 候选身份
@@ -464,6 +456,8 @@ AI 只能写入固定 Attempt 输出 `.pageroot/requests/<requestId>/attempts/<a
 
 > 候选版本 7 · 基于版本 2 · 待审阅
 
+新的成功 finalizer completion 统一为 `completed`。合法完整 HTML 即使与冻结输入逐字节相同，也建立普通 Candidate，进入同一审阅流程，由用户明确选择采纳或不用；Hash 相同不再自动结束本轮。既有 `completion.json` 重放保持原字节，仍在 processing 的历史 v4 `no-change` completion 经当前校验后也进入 Candidate。
+
 第一期的候选 HTML 与记录保存在 Request / Attempt 的隐藏路径中。PR 2B 的 `AI任务/<轮次>/` 只展示经校验后的派生副本，不能替代 Attempt 输出、Candidate 记录或 Promotion 输入：
 
 1. Repository 先重新验证 Registry 绑定、Project/Document、Request/Attempt、Candidate 身份与 Hash、`proposedVersionId`、`basedOnVersionId`、`previousVersionId` 和项目根真实路径，才把已验证字节交给派生写入器。
@@ -472,7 +466,7 @@ AI 只能写入固定 Attempt 输出 `.pageroot/requests/<requestId>/attempts/<a
 4. 删除、篡改或用用户文件/目录/软链接占用派生位置时绝不覆盖；同一连续收据的完整投影可重建，冲突或篡改则分配新的安全展示目录。隐藏 Candidate、审阅和 Promotion 不读取此副本。
 5. 产品 UI 的 Finder 命令只提交当前 `sourcePath`；Bridge 重新解析并验证后才返回位于已登记根的 `AI任务/<单一子目录>`。它不接受 Renderer 提供的 Request 路径，也不打开 `.pageroot/requests/...`。
 6. `<主干>-Vn-待审阅.html` 是当前已验证 Working Copy 命名的展示结果，不是 Candidate 身份。若 Finder 在 `PROMPT.md` 发布后把同根 Working Copy 重命名，下一次投影会更新这一展示名，并仅在安全目录可复用时复用；已有不同展示文件时分配新的安全目录，绝不因此拒绝隐藏 Candidate、审阅或 Promotion。
-7. `no-change` 或不可用输出的 `error` 只保留运行时封存的 `lastAiTask` 展示锚点，不恢复活动 Request。应用重启后必须先用该锚点校验精确 Request 记录，再把它投影为“上轮处理”，从而仍可定位该轮 `AI任务/`；锚点缺失或校验失败时不得扫描 Request 目录猜测终态。
+7. 已终态的历史 v4 `no-change` 或不可用输出的 `error` 只保留运行时封存的 `lastAiTask` 展示锚点，不恢复活动 Request。应用重启后必须先用该锚点校验精确 Request 记录，再把它投影为“上轮处理”，从而仍可定位该轮 `AI任务/`；锚点缺失或校验失败时不得扫描 Request 目录猜测终态。
 
 ### 10.3 用户审阅
 
@@ -484,6 +478,10 @@ AI 只能写入固定 Attempt 输出 `.pageroot/requests/<requestId>/attempts/<a
 - 在不改变正式历史的前提下重新发送新 Attempt。
 
 候选不能在 AI 返回时自动切换为正式当前文件，也不能覆盖 V2 工作文件。
+
+仅当可选标注遭遇真实的单元素 canonical fact 超限时，同一 Review 可重建无标注的前后页面，原位说明“变化标注暂不可用，可直接查看前后页面。”；评论、页面交互和明确采用／不用本次保持。该临时状态不落盘，不证明内容相同或要求已完成。取消丢弃结果；身份、Hash、路径、未知异常及安全投影／传输失败仍拒绝，采用校验不变。
+
+同内容候选使用同一 Review 和原采用确认框，明确说明：“HTML 内容相同，采纳后仍会创建正式版本，并归档本轮已提交且未再修改的要求。”明确采用才执行普通 Promotion；不用本次不新增 Version，保留要求。采纳只归档本轮冻结后未再修改的已提交要求，新增和再次编辑的要求继续保留。已终态历史 `no-change` 保持原终态、`lastAiTask`、submission receipt 与 outbox，不复活为 Candidate，也不批量迁移。
 
 ### 10.4 采纳候选
 
@@ -524,7 +522,7 @@ AI 只能写入固定 Attempt 输出 `.pageroot/requests/<requestId>/attempts/<a
 |---|---|---|
 | 首次导入 | `V1 · 已导入 PageRoot` | `在文件夹中打开` |
 | V1 本地修改 | `基于 V1 · 本地修改已保存` | `项目最新 V1` |
-| 打开历史快照 | `正在查看 V2 · 只读浏览` | `基于此版本继续编辑` |
+| 打开历史快照 | `正在查看 V2 · 只读浏览` | `编辑`（确认创建新版本） |
 | 编辑历史 V2 | `基于 V2 · 项目最新 V6 · 本地修改已保存` | `当前编辑基础 V2` |
 | AI 已返回 | `基于 V2 · 项目最新 V6 · 候选 V7 待审阅` | `审阅候选` |
 | 候选已采纳 | `基于 V2 · 项目最新 V7` | `在文件夹中打开` |
@@ -533,6 +531,7 @@ AI 只能写入固定 Attempt 输出 `.pageroot/requests/<requestId>/attempts/<a
 ### 11.2 项目和版本列表
 
 - Registry 决定项目列表成员资格；项目列表以 Registry 登记项目文件夹名为用户项目名，不显示内部 `projectId`。用户在配置项目目录内改名后，重新识别时同步更新列表名称，不联动 HTML 名称。
+- 项目列表的一次只读查询只扫描一次候选目录身份，并保留同一 `projectId` 的全部候选；各登记项仍分别校验完整 Project、Manifest 和 Runtime。隐藏目录、软链接和坏目录不能授予身份，重复有效项目身份仍隔离。列表不读取 HTML、不写回登记，不保留跨查询目录缓存；打开和保存重新核对当前路径、身份与内容。
 - Desktop Recent 只提供 `lastOpenedAt`、启动优先和排序；已登记但未进入 Recent 的项目仍显示，Recent 中未登记的外部 HTML 不显示成项目，清除 Recent 不移除项目。
 - 版本列表按正式 ordinal 排列，每行展示 `基于 Vn`、`前一正式版本 Vn`、`最新正式版本`、`当前编辑基础`、`有本地修改` 或 `当前只读浏览` 等适用的谱系/投影事实。
 - 当前存在本地编辑的历史版本显示圆点或“有本地修改”，不能伪装成新正式版本。
@@ -717,7 +716,7 @@ manifest 可记录平台文件标识（例如 device、inode、birthtime）作�
 
 ### 14.3 候选和采纳失败
 
-- AI 失败、取消、超时、返回无效 HTML、no-change 或用户拒绝，都不增加正式版本序号。
+- AI 失败、取消、超时、返回无效 HTML、用户拒绝或已终态的历史 `no-change`，都不增加正式版本序号。新的合法同内容 Candidate 只有在用户明确采纳后才增加正式版本序号。
 - 采纳时发现候选 Hash 改变，停止提交并要求重新审阅。
 - 采纳事务崩溃后，要么恢复为完整正式版本，要么回滚为仍待审阅候选，不能出现界面有 V7、快照却不存在。
 - 删除或篡改 `AI任务/` 中的派生 Prompt/Candidate，或用用户文件、目录、软链接占用其路径，不改变隐藏 Candidate、审阅或 Promotion；Finder 入口只会由收据安全重建原投影或分配新的展示目录。

@@ -136,7 +136,7 @@ test("duplicate Stable IDs fail closed in the production source index", () => {
   assert.equal(restored.pagerootIdentity.issues.some((issue) => issue.code === "PAGEROOT_ID_DUPLICATE_VALUE"), false);
 });
 
-test("canvas confirmation fails when working HTML was skipped before save", () => {
+test("canvas confirmation stays fenced when working HTML was skipped before save", () => {
   const html = "<main>one</main>";
   const digest = sha256(html);
   const session = new DocumentSession({
@@ -161,6 +161,19 @@ test("canvas confirmation fails when working HTML was skipped before save", () =
   assert.equal(session.confirmCanvas({
     generation: 1,
     renderedSha256: sha256(edited),
+  }), false);
+  const corrected = session.publishAuthority({
+    html: edited,
+    persistedSourceSha256: sha256(edited),
+    workingHtmlSha256: sha256(edited),
+    operationId: "seeded-fault-corrected-working-hash",
+  }).sourceReceipt;
+  assert.equal(session.confirmCanvas({
+    generation: corrected.canvasGeneration,
+    renderedSha256: sha256(edited),
+    workingHtmlSha256: sha256(edited),
+    renderedHtml: edited,
+    receipt: corrected,
   }), true);
 });
 

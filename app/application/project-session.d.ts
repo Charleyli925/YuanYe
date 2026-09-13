@@ -10,23 +10,39 @@ export type OpenTarget = Readonly<{
   sessionEpoch: number;
 }>;
 
-export type ProjectContext = {
+/** A location can exist before the first durable project registration. */
+export type ProjectLocator = Readonly<{
+  epoch: number;
+  sourcePath: string | null;
+}>;
+
+type RegisteredIdentity = Readonly<{
   epoch: number;
   projectId: string;
   documentId: string;
   sourcePath: string;
-} & Partial<OpenTarget>;
+}>;
 
-export type ProjectLocator = {
-  epoch: number;
-  sourcePath: string | null;
-};
+/** Registered source without a managed Version/Working Copy route. */
+export type RegisteredSourceContext = RegisteredIdentity & Readonly<{
+  [Key in Exclude<keyof OpenTarget, "projectId" | "documentId">]?: never;
+}>;
 
-export type ProjectSessionSnapshot = ProjectLocator & {
+/** Managed routes always carry the complete, validated OpenTarget tuple. */
+export type ManagedProjectContext = RegisteredIdentity & OpenTarget;
+export type ProjectContext = RegisteredSourceContext | ManagedProjectContext;
+
+/** Display snapshot only; use a validated context for registered operations. */
+export type ProjectSessionSnapshot = ProjectLocator & Readonly<{
   projectId: string;
   documentId: string;
   registered: boolean;
   openTarget?: OpenTarget;
+}>;
+
+/** Input is validated by ProjectSession; it is not an established context. */
+export type ProjectRegistrationInput = RegisteredIdentity & Partial<OpenTarget> & {
+  openTarget?: Omit<OpenTarget, "sessionEpoch"> | null;
 };
 
 export class ProjectSession {
@@ -34,7 +50,7 @@ export class ProjectSession {
     observer: ((snapshot: ProjectSessionSnapshot) => void) | null,
   ): void;
   openLocator(sourcePath: string | null): ProjectLocator;
-  register(value: ProjectContext): ProjectContext | null;
+  register(value: ProjectRegistrationInput): ProjectContext | null;
   transitionSource(value: {
     previousSourcePath?: string | null;
     sourcePath: string;

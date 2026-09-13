@@ -1,5 +1,16 @@
 import { projectAppliedEventToWorkbenchTabs } from "./workbench-tabs-session.js";
 
+const PREPARED_RETRY_PICKER_CODES = new Set([
+  "EXTERNAL_IMPORT_FAILED",
+  "EXTERNAL_OPEN_ACTION_INVALID",
+  "EXTERNAL_OPEN_ACTION_MISMATCH",
+  "EXTERNAL_OPEN_COMMIT_INVALID",
+  "EXTERNAL_OPEN_REQUEST_EXPIRED",
+  "EXTERNAL_OPEN_TARGET_MISSING",
+  "INVALID_PREPARED_OPEN_REQUEST",
+  "OPEN_INTENT_SOURCE_CHANGED",
+]);
+
 function rejected(code, reason, details = {}) {
   return Object.freeze({ status: "rejected", code, reason, ...details });
 }
@@ -282,15 +293,23 @@ export class WorkbenchNavigationWorkflow {
     }));
   }
 
-  retryOpen(input = {}) {
+  async retryOpen(input = {}) {
     const confirmation = this.#projectWorkflow.getSnapshot().openConfirmation;
-    return this.confirmOpen({
+    const outcome = await this.confirmOpen({
       ...input,
       action: confirmation?.classification === "new-external"
         ? "import-new"
         : "continue-current",
       deleteOriginal: confirmation?.deleteOriginal === true,
     });
+    if (
+      outcome?.status !== "stale"
+      && !(
+        outcome?.status === "rejected"
+        && PREPARED_RETRY_PICKER_CODES.has(String(outcome.code || ""))
+      )
+    ) return outcome;
+    return this.openProject({ kind: "local" });
   }
 
   resumeDeferredProjectApplication() {
@@ -444,6 +463,28 @@ export class WorkbenchNavigationWorkflow {
     return true;
   }
 
+  onPreparedOpenStarted({ transactionId: receivedTransactionId, requestId }) {
+    const active = this.#active;
+    if (!active || active.transactionId !== String(receivedTransactionId || "")) return false;
+    active.requestId = String(requestId || "");
+    active.preparedOpen = true;
+    active.continuation = null;
+    active.externalAuto = false;
+    this.#session.transition(active.transactionId, "opening");
+    return true;
+  }
+
+  onPreparedOpenSettled({ transactionId: receivedTransactionId, requestId, outcome }) {
+    const active = this.#active;
+    if (!active || active.transactionId !== String(receivedTransactionId || "")
+      || active.requestId !== String(requestId || "") || !active.preparedOpen
+      || active.intent.kind !== "external") return false;
+    // OS delivery is asynchronous. Its receipt must not release admission while
+    // this same Prepared Intent is still verifying Canvas, finalizing or ACKing.
+    this.#complete(active, this.#finishConfirmation(active, outcome));
+    return true;
+  }
+
   onTerminalFailure({ transactionId: receivedTransactionId, reason }) {
     const active = this.#active;
     if (!active || active.transactionId !== String(receivedTransactionId || "")) return false;
@@ -515,6 +556,7 @@ export class WorkbenchNavigationWorkflow {
       ...input,
       transactionId: active.transactionId,
     });
+    if (active.preparedOpen) return this.#finishConfirmation(active, outcome);
     if (outcome?.status !== "succeeded") {
       return this.#finishOpened(active, outcome, { deadlineMs: 15_000 });
     }
@@ -692,6 +734,10 @@ export class WorkbenchNavigationWorkflow {
       ...input,
       transactionId: active.transactionId,
     });
+    return this.#finishConfirmation(active, outcome);
+  }
+
+  #finishConfirmation(active, outcome) {
     if (outcome?.status !== "succeeded") {
       if (active.receipt && this.#controllerMatchesPrior(active.priorController)) {
         this.#tabs.restoreAuthority(active.priorTabs);
@@ -709,6 +755,12 @@ export class WorkbenchNavigationWorkflow {
       };
     }
     if (!active.receipt) {
+      // Retrying an acknowledged commit only releases the external mailbox;
+      // it does not apply the project a second time or produce a new receipt.
+      if (
+        outcome.value?.acknowledged === true
+        || outcome.value?.alreadyApplied === true
+      ) return { outcome };
       return { outcome: rejected(
         "WORKBENCH_NAVIGATION_RECEIPT_MISSING",
         "HTML 打开成功，但缺少应用回执。",

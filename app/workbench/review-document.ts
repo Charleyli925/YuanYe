@@ -3,6 +3,7 @@
 // source facts; comments and Frame identity are applied afterwards.
 import {
   appendTrustedReviewProjectionFact,
+  ReviewProjectionFactOverflowError,
   normalizeReviewFocusGroupPlans,
   reviewProjectionFactKey,
   serializeReviewProjectionFacts,
@@ -59,6 +60,7 @@ import type {
 } from "./review/review-visual-model.js";
 import type {
   ReviewChange,
+  ReviewAnnotationAvailability,
   ReviewChangeType,
   ReviewDiagnostic,
   ReviewDocumentBuildOptions,
@@ -99,6 +101,7 @@ export type {
 } from "./review/types";
 
 export type ReviewSourceFacts = {
+  annotationAvailability: ReviewAnnotationAvailability;
   annotatedBeforeHtml: string;
   annotatedAfterHtml: string;
   changes: ReviewChange[];
@@ -654,28 +657,6 @@ function hasPreannotatedStableDifference(pair: SectionPair): boolean {
   ));
 }
 
-export function pageSourceOnlyReviewDiagnostics(
-  beforeHtml: string,
-  afterHtml: string,
-): ReviewDiagnostic[] | null {
-  if (typeof DOMParser === "undefined" || beforeHtml === afterHtml) return null;
-  const visual = buildReviewVisualEvidence(beforeHtml, afterHtml, "source-only-check");
-  if (visual.binding.identity !== "supported" || visual.evidence.length) return null;
-  const parser = new DOMParser();
-  const beforeDocument = parser.parseFromString(beforeHtml, "text/html");
-  const afterDocument = parser.parseFromString(afterHtml, "text/html");
-  clearReservedReviewMarkup(beforeDocument);
-  clearReservedReviewMarkup(afterDocument);
-  const analysis = annotateStableSourceDifferences(beforeDocument, afterDocument);
-  if (beforeDocument.querySelector("[data-pageroot-review-structure]")
-    || afterDocument.querySelector("[data-pageroot-review-structure]")) return null;
-  const diagnostics = analysis.sourceKinds.map((kind) => ({
-    kind,
-    summary: kind === "css-source" ? "CSS 源码发生变化" : "Script 源码发生变化",
-  }));
-  return diagnostics.length ? diagnostics : null;
-}
-
 function emptySourceFacts(
   beforeHtml: string,
   afterHtml: string,
@@ -683,6 +664,7 @@ function emptySourceFacts(
   diagnostics: ReviewDiagnostic[] = [],
 ): ReviewSourceFacts {
   return {
+    annotationAvailability: "available",
     annotatedBeforeHtml: beforeHtml,
     annotatedAfterHtml: afterHtml,
     changes: [],
@@ -698,7 +680,7 @@ function sourceFactsFromDocuments(
   beforeDocument: Document,
   afterDocument: Document,
   visual: ReturnType<typeof buildReviewVisualEvidence>,
-  extras: Pick<ReviewSourceFacts, "changes" | "outline" | "focusGroups" | "diagnostics">,
+  extras: Pick<ReviewSourceFacts, "annotationAvailability" | "changes" | "outline" | "focusGroups" | "diagnostics">,
 ): ReviewSourceFacts {
   return {
     annotatedBeforeHtml: serializeReviewMarkup(beforeDocument),
@@ -709,14 +691,10 @@ function sourceFactsFromDocuments(
   };
 }
 
-function* buildReviewSourceFactSteps(
+function* prepareReviewSourcePairSteps(
   beforeHtml: string,
   afterHtml: string,
-): Generator<string, ReviewSourceFacts, void> {
-  const visual = buildReviewVisualEvidence(beforeHtml, afterHtml, "source-facts");
-  if (typeof DOMParser === "undefined") {
-    return emptySourceFacts(beforeHtml, afterHtml, visual);
-  }
+): Generator<string, { beforeDocument: Document; afterDocument: Document }, void> {
   const parser = new DOMParser();
   const beforeDocument = parser.parseFromString(beforeHtml, "text/html");
   const afterDocument = parser.parseFromString(afterHtml, "text/html");
@@ -727,6 +705,14 @@ function* buildReviewSourceFactSteps(
   yield "panels";
   annotateActionPairs(beforeDocument, afterDocument);
   yield "actions";
+  return { beforeDocument, afterDocument };
+}
+
+function* annotateReviewSourceFactSteps(
+  beforeDocument: Document,
+  afterDocument: Document,
+  visual: ReturnType<typeof buildReviewVisualEvidence>,
+): Generator<string, Pick<ReviewSourceFacts, "changes" | "outline" | "focusGroups" | "diagnostics">, void> {
   const stableSourceAnalysis = annotateStableSourceDifferences(beforeDocument, afterDocument);
   const ambiguousPersistentIds = new Set(stableSourceAnalysis.ambiguousPersistentIds);
   yield "stable-source";
@@ -741,12 +727,12 @@ function* buildReviewSourceFactSteps(
       kind,
       summary: kind === "css-source" ? "CSS 源码发生变化" : "Script 源码发生变化",
     }));
-    return sourceFactsFromDocuments(beforeDocument, afterDocument, visual, {
+    return {
       changes: [],
       outline: [],
       focusGroups: [],
       diagnostics,
-    });
+    };
   }
   // Freeze authored candidate regions and their pairing before moved-text
   // annotation inserts disposable review spans. The pre-pass may mutate text
@@ -843,11 +829,38 @@ function* buildReviewSourceFactSteps(
   const focusGroups = normalizeReviewFocusGroupPlans(
     reviewFocusGroupsForDocuments(beforeDocument, afterDocument),
   ) as ReviewFocusGroup[];
-  return sourceFactsFromDocuments(beforeDocument, afterDocument, visual, {
+  return {
     changes,
     outline,
     focusGroups,
     diagnostics,
+  };
+}
+
+function* buildReviewSourceFactSteps(
+  beforeHtml: string,
+  afterHtml: string,
+): Generator<string, ReviewSourceFacts, void> {
+  const visual = buildReviewVisualEvidence(beforeHtml, afterHtml, "source-facts");
+  if (typeof DOMParser === "undefined") return emptySourceFacts(beforeHtml, afterHtml, visual);
+  let pair = yield* prepareReviewSourcePairSteps(beforeHtml, afterHtml);
+  let annotations;
+  let annotationAvailability: ReviewAnnotationAvailability = "available";
+  try {
+    annotations = yield* annotateReviewSourceFactSteps(pair.beforeDocument, pair.afterDocument, visual);
+  } catch (cause) {
+    if (!(cause instanceof ReviewProjectionFactOverflowError)) throw cause;
+    // Yield before recovery so cancellation can discard the failed analysis.
+    // Never serialize the partially annotated DOM or reuse its inserted spans.
+    yield "annotation-unavailable";
+    pair = yield* prepareReviewSourcePairSteps(beforeHtml, afterHtml);
+    annotationAvailability = "unavailable";
+    annotations = { changes: [], outline: [], focusGroups: [], diagnostics: [] };
+  }
+  // Parsing, pairing and the formal serializer remain outside the annotation catch.
+  return sourceFactsFromDocuments(pair.beforeDocument, pair.afterDocument, visual, {
+    annotationAvailability,
+    ...annotations,
   });
 }
 
@@ -896,6 +909,7 @@ export function projectReviewDocuments(
   const comments = options.comments || [];
   if (typeof DOMParser === "undefined") {
     return {
+      annotationAvailability: facts.annotationAvailability,
       before: facts.annotatedBeforeHtml,
       after: facts.annotatedAfterHtml,
       bootstrapJavaScript: {
@@ -946,6 +960,7 @@ export function projectReviewDocuments(
     facts.focusGroups,
   );
   return {
+    annotationAvailability: facts.annotationAvailability,
     before: preparedBefore.html,
     after: preparedAfter.html,
     bootstrapJavaScript: {
@@ -992,89 +1007,6 @@ export function buildReviewDocuments(
   return step.value;
 }
 
-/**
- * Builds the minimum safe formal-review transport before semantic diffing.
- * It preserves the same authored-page sandbox/bootstrap contract as the full
- * review, but intentionally carries no change, comment or runtime facts.
- */
-export function buildReviewShellDocuments(
-  beforeHtml: string,
-  afterHtml: string,
-  options: ReviewDocumentBuildOptions,
-): ReviewDocuments {
-  const visual = buildReviewVisualEvidence(beforeHtml, afterHtml, options.sessionId);
-  const visualStableIds = (side: "before" | "after") => visual.evidence
-    .filter((evidence) => side === "before" ? evidence.beforePresent : evidence.afterPresent)
-    .map((evidence) => evidence.stableId);
-  if (typeof DOMParser === "undefined") {
-    return {
-      before: beforeHtml,
-      after: afterHtml,
-      bootstrapJavaScript: {
-        before: reviewBootstrap(options.sessionId, "before", [], visualStableIds("before")),
-        after: reviewBootstrap(options.sessionId, "after", [], visualStableIds("after")),
-      },
-      bootstrapFallbackJavaScript: {
-        before: reviewBootstrap(options.sessionId, "before", [], visualStableIds("before")),
-        after: reviewBootstrap(options.sessionId, "after", [], visualStableIds("after")),
-      },
-      changes: [],
-      outline: [],
-      focusGroups: [],
-      commentGroups: [],
-      commentTargets: [],
-      visualBinding: visual.binding,
-      visualEvidence: visual.evidence,
-      diagnostics: [],
-      ...(options.reviewImpact ? { reviewImpact: options.reviewImpact } : {}),
-    };
-  }
-  const parser = new DOMParser();
-  const beforeDocument = parser.parseFromString(beforeHtml, "text/html");
-  const afterDocument = parser.parseFromString(afterHtml, "text/html");
-  clearReservedReviewMarkup(beforeDocument);
-  clearReservedReviewMarkup(afterDocument);
-  const preparedBefore = prepareDocument(
-    beforeDocument,
-    "before",
-    options.sessionId,
-    options.sourcePath,
-    options.externalBootstrap,
-    [],
-    visualStableIds("before"),
-  );
-  const preparedAfter = prepareDocument(
-    afterDocument,
-    "after",
-    options.sessionId,
-    options.sourcePath,
-    options.externalBootstrap,
-    [],
-    visualStableIds("after"),
-  );
-  return {
-    before: preparedBefore.html,
-    after: preparedAfter.html,
-    bootstrapJavaScript: {
-      before: preparedBefore.bootstrapJavaScript,
-      after: preparedAfter.bootstrapJavaScript,
-    },
-    bootstrapFallbackJavaScript: {
-      before: preparedBefore.bootstrapFallbackJavaScript,
-      after: preparedAfter.bootstrapFallbackJavaScript,
-    },
-    changes: [],
-    outline: [],
-    focusGroups: [],
-    commentGroups: [],
-    commentTargets: [],
-    visualBinding: visual.binding,
-    visualEvidence: visual.evidence,
-    diagnostics: [],
-    ...(options.reviewImpact ? { reviewImpact: options.reviewImpact } : {}),
-  };
-}
-
 function yieldReviewAnalysisTask(): Promise<void> {
   return new Promise((resolve) => globalThis.setTimeout(resolve, 0));
 }
@@ -1105,6 +1037,7 @@ const REVIEW_ANALYSIS_PHASES = [
   "section-pairing",
   "semantic-row",
   "change-annotation",
+  "annotation-unavailable",
   "prepare-before",
   "prepare-after",
   "complete",

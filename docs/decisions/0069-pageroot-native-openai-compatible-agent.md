@@ -40,6 +40,24 @@ Register one product provider `pageroot` with runtime `http` and
 
 ## Consequences
 
+The current HTTP input policy is the pure `shared/agent-input-policy.mjs`, used
+by RunWorkflow and HTTP Runtime. Submission estimates reserve 256 KiB for
+unserialized task material; execution measures the final serialized messages,
+including retry feedback. Both use the same byte/token formula and selected
+ticket model capability. Complete-output estimates use frozen base HTML bytes;
+attachments increase input demand, not the expected HTML document size.
+Requested output headroom is limited by both the model output limit and context
+remaining after the measured input. Unknown model capability stays unknown and
+does not receive invented output limits; the 2 MiB HTTP input cap still applies.
+
+Text MIME/extension and UTF-8/NUL checks share the same policy. Empty attachments
+are unsupported, while empty rule files are legal; UTF-8 BOM content is
+preserved. Before serialization the Runtime checks each reread file's byte count
+and Hash against its verified frozen policy. The Request's independent 25 MiB
+attachment boundary, path checks and freeze writer remain unchanged. Qoder,
+Codex and clipboard do not inherit HTTP-only attachment restrictions. Policy
+revision participates in the existing capability/configuration snapshot.
+
 - A future Anthropic or non-HTTPS vendor is a new product/security decision.
 - `agent-native` remains unregistered.
 - Failed model output that is not complete HTML fails closed before finalizer

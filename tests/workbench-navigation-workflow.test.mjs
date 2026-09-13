@@ -218,6 +218,116 @@ function fixture({
   return { tabs, navigation, phases, calls, controller, projectWorkflow, workflow, publish, apply };
 }
 
+test("ACK-only retry completes without reapplying a project or requiring a new receipt", async () => {
+  const harness = fixture({ confirm: async ({ input }) => ({
+    status: "succeeded", value: { requestId: input.requestId, opened: true, acknowledged: true },
+  }) });
+  harness.projectWorkflow.confirmation = {
+    requestId: "already_committed",
+    classification: "new-external",
+    deleteOriginal: false,
+  };
+  const result = await harness.workflow.retryOpen({ requestId: "already_committed" });
+  assert.equal(result.status, "succeeded");
+  assert.equal(result.value.acknowledged, true);
+  assert.equal(harness.navigation.snapshot.phase, "idle");
+  assertAlignedNavigation(harness, A);
+  assert.deepEqual(harness.calls, ["confirm:already_committed"]);
+  harness.workflow.dispose();
+});
+
+for (const retryOutcome of [
+  { status: "stale", identity: { requestId: "expired_prepared" } },
+  {
+    status: "rejected",
+    code: "INVALID_PREPARED_OPEN_REQUEST",
+    reason: "prepared request is malformed",
+  },
+]) {
+  test(`Prepared retry falls back to the ordinary picker after ${retryOutcome.status}`, async () => {
+    const harness = fixture({
+      confirm: async () => retryOutcome,
+      open: async () => ({ status: "succeeded", value: { opened: false } }),
+    });
+    harness.projectWorkflow.confirmation = null;
+
+    const result = await harness.workflow.retryOpen({ requestId: "expired_prepared" });
+
+    assert.equal(result.status, "succeeded");
+    assert.equal(result.value.opened, false);
+    assert.deepEqual(harness.calls, [
+      "confirm:expired_prepared",
+      "open:local:",
+    ]);
+    harness.workflow.dispose();
+  });
+}
+
+test("ordinary Prepared local open waits for final settlement before releasing queued navigation", async () => {
+  let release;
+  const harness = fixture({ open: async ({ input, apply, workflow }) => {
+    if (input.kind === "registered") {
+      const applied = apply(C);
+      return { status: "succeeded", value: { opened: true, applicationId: applied.applicationId } };
+    }
+    workflow.onPreparedOpenStarted({ ...input, requestId: "prepared_local" });
+    apply(B);
+    await new Promise((resolve) => { release = resolve; });
+    return { status: "succeeded", value: { opened: true } };
+  } });
+  const first = harness.workflow.openProject({ kind: "local" });
+  await nextTurn();
+  const queued = harness.workflow.openProject({ kind: "registered", projectId: C.projectId });
+  await nextTurn();
+  assert.equal(harness.navigation.snapshot.phase, "applied");
+  assert.equal(harness.calls.some((call) => call.includes(C.projectId)), false);
+  assertAlignedNavigation(harness, B);
+  release();
+  assert.equal((await first).status, "succeeded");
+  assert.equal((await queued).status, "succeeded");
+  assertAlignedNavigation(harness, C);
+  harness.workflow.dispose();
+});
+
+for (const failure of [false, true]) {
+  test(`external Prepared settlement holds admission and retains its applied receipt: failure=${failure}`, async () => {
+    let settle;
+    let transactionId;
+    const harness = fixture({ acceptExternal: ({ input, apply, workflow }) => {
+      transactionId = input.transactionId;
+      queueMicrotask(() => {
+        workflow.onPreparedOpenStarted(input);
+        apply(B);
+        settle = () => workflow.onPreparedOpenSettled({
+          ...input,
+          outcome: failure
+            ? { status: "rejected", code: "EXTERNAL_OPEN_ACK_REJECTED", reason: "ACK pending" }
+            : { status: "succeeded", value: { opened: true } },
+        });
+      });
+      return { status: "succeeded", value: { requestId: input.requestId } };
+    } });
+    await harness.workflow.acceptExternalProject({ requestId: "prepared_external" });
+    await nextTurn();
+    let idle = false;
+    const closing = harness.workflow.prepareClose({ deadlineAt: 2_000 }).then((value) => { idle = value; });
+    await nextTurn();
+    assert.equal(idle, false);
+    assert.notEqual(harness.navigation.snapshot.phase, "idle");
+    assert.equal(harness.workflow.onPreparedOpenSettled({ transactionId: "stale", requestId: "prepared_external" }), false);
+    assertAlignedNavigation(harness, B);
+    assert.equal(settle(), true);
+    await closing;
+    assert.equal(idle, true);
+    const terminal = await harness.workflow.waitForTerminal(transactionId);
+    assert.equal(terminal.outcome.status, failure ? "rejected" : "succeeded");
+    assert.equal(terminal.receipt.projectId, B.projectId);
+    if (failure) assert.equal(terminal.outcome.committed, true);
+    assertAlignedNavigation(harness, B);
+    harness.workflow.dispose();
+  });
+}
+
 test("tab activation touches the target cache and captures only the prior document projection", async () => {
   const cacheCalls = [];
   const surfaceCache = {

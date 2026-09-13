@@ -212,6 +212,43 @@ test("external open mailbox holds its head until the renderer explicitly acknowl
   assert.deepEqual(mailbox.peek(), second);
 });
 
+test("external open mailbox replays only bounded exact ACK receipts without consuming the next head", async () => {
+  let nextId = 0;
+  const mailbox = createExternalFileOpenMailbox({
+    createRequestId: () => `external_${++nextId}`,
+    platform: "darwin",
+  });
+  const first = mailbox.publish("/Users/demo/first.html");
+  const second = mailbox.publish("/Users/demo/second.html");
+
+  await mailbox.begin(first.requestId, async () => ({ prepared: first.requestId }));
+  assert.deepEqual(mailbox.acknowledge(first.requestId), first);
+  await mailbox.begin(second.requestId, async () => ({ prepared: second.requestId }));
+
+  assert.deepEqual(
+    mailbox.acknowledge(first.requestId),
+    first,
+    "a lost ACK response must replay the exact completed authority",
+  );
+  assert.deepEqual(mailbox.peek(), second, "replaying A must not consume B");
+  assert.equal(mailbox.acknowledge("external_stale"), null);
+  assert.equal(mailbox.acknowledge(null), null);
+  assert.equal(mailbox.acknowledge({ requestId: second.requestId }), null);
+  assert.deepEqual(mailbox.peek(), second);
+  assert.deepEqual(mailbox.acknowledge(second.requestId), second);
+
+  for (let index = 0; index < 33; index += 1) {
+    const request = mailbox.publish(`/Users/demo/bounded-${index}.html`);
+    await mailbox.begin(request.requestId, async () => ({ prepared: request.requestId }));
+    assert.deepEqual(mailbox.acknowledge(request.requestId), request);
+  }
+  assert.equal(
+    mailbox.acknowledge(first.requestId),
+    null,
+    "an ACK older than the bounded receipt window must expire",
+  );
+});
+
 function createDeliveryHarness() {
   let nextId = 0;
   const mailbox = createExternalFileOpenMailbox({

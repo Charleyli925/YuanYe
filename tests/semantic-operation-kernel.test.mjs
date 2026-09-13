@@ -23,6 +23,12 @@ import {
 } from "../app/lib/source-patch-core.js";
 import { buildSourceIndex } from "../app/lib/source-index.js";
 import {
+  disableEditPipelineCounters,
+  enableEditPipelineCounters,
+  readEditPipelineCounters,
+  resetEditPipelineCounters,
+} from "../app/lib/edit-pipeline-counters.js";
+import {
   buildSourceTextMap,
   textRangeToSourceSegments,
 } from "../app/lib/source-text-map.js";
@@ -269,6 +275,40 @@ test("replays ordered line-break IDs allocated by an accepted Canvas text plan",
   assert.match(semantic.html, new RegExp(createdPagerootIds[1], "u"));
   assert.equal(semantic.html, mapped.html);
   assert.equal(semantic.sourceSha256, mapped.sourceSha256);
+});
+
+test("fresh editable-island text allocation seals ordered line-break IDs in one Kernel apply", () => {
+  const baseline = state();
+  const operationValue = operation(baseline, "sourceop_native_breaks_01", "setText", {
+    target: target(baseline, IDS.paragraph),
+    text: "Hello world\nline\nend",
+    contentHtml: `Hello <strong data-pageroot-id="${IDS.strong}">world</strong><br>line<br>end`,
+  });
+  const firstBreakId = "pr1_10000000000040008000000000000011";
+  const secondBreakId = "pr1_10000000000040008000000000000012";
+  enableEditPipelineCounters();
+  resetEditPipelineCounters();
+  try {
+    const result = applySemanticOperation(baseline, operationValue, {
+      randomUUID: uuidFactory(
+        "10000000-0000-4000-8000-000000000011",
+        "10000000-0000-4000-8000-000000000012",
+      ),
+    });
+    assert.equal(operationValue.createdPagerootIds, undefined);
+    assert.deepEqual(result.allocatedElementIds, [firstBreakId, secondBreakId]);
+    assert.deepEqual(result.identityDelta.addedElementIds, [firstBreakId, secondBreakId]);
+    const orderedIds = [...result.html.matchAll(
+      /<br data-pageroot-id="([^"]+)">/gu,
+    )].map((match) => match[1]);
+    assert.deepEqual(orderedIds, [firstBreakId, secondBreakId]);
+    assert.equal(readEditPipelineCounters().fullPatchApplies, 1);
+    const undo = applySemanticOperation(result.nextState, result.inverseOperation);
+    assert.equal(undo.html, baseline.html);
+    assert.equal(applySemanticOperation(undo.nextState, undo.inverseOperation).html, result.html);
+  } finally {
+    disableEditPipelineCounters();
+  }
 });
 
 test("allocates new identities for insert and replacement while preserving the replacement root", () => {

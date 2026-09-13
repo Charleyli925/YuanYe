@@ -20,7 +20,7 @@ async function loadPaintPlan() {
   );
 }
 
-const { buildReviewPaintPlan, EMPTY_REVIEW_PAINT_PLAN } = await loadPaintPlan();
+const { buildReviewPaintPlan, eligibleReviewVisualEvidence, EMPTY_REVIEW_PAINT_PLAN } = await loadPaintPlan();
 
 function focusGroup(policy, regions = {
   before: [{ id: "region-before-1", changeIds: ["change-1"], visualEvidenceStableIds: ["stable-1"] }],
@@ -158,4 +158,51 @@ test("mixed source evidence cannot prove a region-local style outline", () => {
   });
   assert.deepEqual(plan.before.contextMask, { regionId: "region-before-1" });
   assert.equal(plan.before.focusOutline, null);
+});
+
+
+test("observation candidates are the region/change intersection of pure style evidence", () => {
+  const evidence = [
+    { stableId: "style-used", kinds: ["style"] },
+    { stableId: "style-region-only", kinds: ["style"] },
+    { stableId: "style-change-only", kinds: ["style"] },
+    { stableId: "style-orphan", kinds: ["style"] },
+    { stableId: "mixed", kinds: ["style", "text"] },
+    { stableId: "move", kinds: ["moved"] },
+    { stableId: "attribute", kinds: ["attribute"] },
+  ];
+  const group = focusGroup("visual-change", {
+    before: [{ id: "before", changeIds: ["a"], visualEvidenceStableIds: ["style-used", "style-region-only", "mixed", "move", "attribute"] }],
+    after: [{ id: "after", changeIds: ["a"], visualEvidenceStableIds: ["style-used"] }],
+  });
+  const facts = [{ id: "a", evidenceStableIds: ["style-used", "style-change-only", "mixed", "move", "attribute"] }];
+  const result = eligibleReviewVisualEvidence({ focusGroups: [group], changes: facts, visualEvidence: evidence });
+  assert.deepEqual(result, [evidence[0]]);
+  assert.equal(result[0], evidence[0], "the plan reuses source evidence without creating new facts");
+});
+
+for (const [label, groups, evidence] of [
+  ["text", [focusGroup("never")], [{ stableId: "stable-1", kinds: ["text"] }]],
+  ["structure", [focusGroup("source-change")], [{ stableId: "stable-1", kinds: ["added"] }]],
+  ["large-container policy never", [focusGroup("never")], visualEvidence],
+  ["mixed style and text", [focusGroup("visual-change")], [{ stableId: "stable-1", kinds: ["style", "text"] }]],
+  ["mixed style and attributes", [focusGroup("visual-change")], [{ stableId: "stable-1", kinds: ["style", "attribute"] }]],
+  ["empty facts", [], visualEvidence],
+]) {
+  test(`${label} creates no optional-outline observation candidates`, () => {
+    assert.deepEqual(eligibleReviewVisualEvidence({ focusGroups: groups, changes, visualEvidence: evidence }), []);
+  });
+}
+
+test("a change in another region cannot authorize observation and a one-sided locality can", () => {
+  const group = focusGroup("visual-change", {
+    before: [{ id: "before", changeIds: ["change-2"], visualEvidenceStableIds: ["stable-1"] }],
+    after: [{ id: "after", changeIds: ["change-1"], visualEvidenceStableIds: ["stable-1"] }],
+  });
+  assert.deepEqual(eligibleReviewVisualEvidence({ focusGroups: [group], changes, visualEvidence }), [visualEvidence[0]]);
+  assert.deepEqual(eligibleReviewVisualEvidence({
+    focusGroups: [{ ...group, regions: { ...group.regions, after: [] } }],
+    changes,
+    visualEvidence,
+  }), []);
 });

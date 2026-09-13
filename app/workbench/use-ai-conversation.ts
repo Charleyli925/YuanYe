@@ -3,26 +3,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import type { AiConversationControllerCapability } from "../application/workspace-controller-capabilities.js";
-import type { ConversationSessionSnapshot } from "../application/conversation-session.js";
 import type { QoderAvailabilitySnapshot } from "../domain/qoder-availability.js";
-import type { ActiveRun } from "../domain/run-lifecycle.js";
-import type { RunHandoffState } from "../application/run-session.js";
-import {
-  conversationLoadedForView,
-  sidebarAgentStageSteps,
-  sidebarConversationGroups,
-  sidebarFailureRetryable,
-  sidebarStateFromRun,
-  type SidebarCatalogStatus,
-} from "./ai-conversation-model.js";
+import type { SidebarCatalogStatus } from "./ai-conversation-model.js";
 
-// Owns the AI conversation sidebar's lifecycle and the props it renders.
+// Owns the sidebar visibility and document lifecycle. Its outlet subscribes local facts.
 //
-// All React hooks live in this module, so mounting the sidebar adds a single
-// hook call to the Workbench and nothing to its hook budget. The hook holds no
-// durable state: it publishes intent to the WorkspaceController, which owns the
-// session and the only Bridge path. Historical messages remain readable, but
-// this surface creates modification Requests only.
+// This hook holds no conversation facts or durable state. It publishes intent
+// to the existing Controller; the local outlet reads messages and draft text.
+// This surface still creates modification Requests only.
 //
 // A conversation belongs to one Document. Opening the sidebar loads that
 // Document's conversation; leaving preview, hiding the sidebar, or switching
@@ -30,7 +18,6 @@ import {
 
 export type UseAiConversationOptions = {
   controllerRef: { current: AiConversationControllerCapability | null };
-  conversation: ConversationSessionSnapshot | null;
   qoderAvailability: QoderAvailabilitySnapshot | null;
   agentDisplayName?: string | null;
   executionDisplayName?: string | null;
@@ -54,9 +41,6 @@ export type UseAiConversationOptions = {
     label: string;
   }>[];
   selectedReasoningId?: string | null;
-  activeRun: ActiveRun | null;
-  activeHandoff?: RunHandoffState | null;
-  submissionPending?: boolean;
   reviewing?: boolean;
   commentComposerOpen?: boolean;
   draftReadOnly?: boolean;
@@ -85,7 +69,6 @@ export type UseAiConversationOptions = {
 
 export function useAiConversation({
   controllerRef,
-  conversation,
   qoderAvailability,
   agentDisplayName = null,
   executionDisplayName = null,
@@ -98,9 +81,6 @@ export function useAiConversation({
   selectedModelId = null,
   reasoningChoices = [],
   selectedReasoningId = null,
-  activeRun,
-  activeHandoff = null,
-  submissionPending = false,
   reviewing = false,
   commentComposerOpen = false,
   draftReadOnly = false,
@@ -178,40 +158,13 @@ export function useAiConversation({
     controllerRef.current?.updateConversationDraftText(text);
   }, [controllerRef]);
 
-  const state = useMemo(
-    () => sidebarStateFromRun({
-      activeRun,
-      activeHandoff,
-      submissionPending,
-      reviewing,
-    }),
-    [activeRun, activeHandoff, submissionPending, reviewing],
-  );
-
   const onCopyTask = useCallback(() => {
     onDeliverModification?.("clipboard");
   }, [onDeliverModification]);
 
-  // History labels are a read-only derivation. Only the sanitized boundaries
-  // reach the sidebar; turn/provider records remain owned by the conversation
-  // projection and are never renderer controls.
-  const historyGroups = useMemo(() => sidebarConversationGroups({
-    messages: conversation?.messages ?? [],
-    turns: conversation?.conversation?.turns ?? [],
-    activeRun,
-  }), [conversation, activeRun]);
-
   const sidebarProps = useMemo(() => ({
     documentKey: `${projectId}:${documentId}`,
-    state,
-    title: conversation?.title ?? "",
-    messages: conversation?.messages ?? [],
-    draftText: conversation?.draftText ?? "",
-    draftAvailable: !draftReadOnly && conversation?.status === "ready"
-      && conversation.context?.projectId === projectId
-      && conversation.context?.documentId === documentId,
     onDraftTextChange,
-    historyGroups,
     // The selected Agent's availability is the model catalog's readiness: one owner supplies
     // both, so the Composer can never claim ready while the Agent is not.
     catalogStatus: (qoderAvailability?.status ?? "unavailable") as SidebarCatalogStatus,
@@ -227,47 +180,14 @@ export function useAiConversation({
     selectedModelId,
     reasoningChoices,
     selectedReasoningId,
-    // The decision bar needs to name the version it is deciding about, and the
-    // assessment decides whether adopting without looking is offered at all.
-    candidateVersionLabel: activeRun?.candidateVersionLabel ?? null,
-    candidateStatus: activeRun?.candidateAssessment?.status ?? null,
-    failureMessage: activeRun?.error ?? null,
-    failureCode: activeHandoff?.errorCode || null,
-    failureRetryable: sidebarFailureRetryable(activeRun, activeHandoff),
-    failureRecoveryKind: activeHandoff?.recoveryKind || null,
     pendingCommentCount,
-    agentText: activeHandoff?.visibleText || "",
-    agentUpdates: activeHandoff?.visibleTextUpdates || [],
-    agentTextTruncated: activeHandoff?.textTruncated === true,
-    agentWorking: activeHandoff?.mode === "managed-agent"
-      && ["starting", "running", "cancelling"].includes(activeHandoff.status),
-    agentStartedAt: activeHandoff?.startedAt || null,
-    agentLastActivityAt: activeHandoff?.lastActivityAt || null,
-    agentReceivedBytes: activeHandoff?.receivedBytes || 0,
-    agentUpdatedAt: activeHandoff?.updatedAt || null,
-    runKey: activeRun
-      ? `${activeRun.requestId}:${activeRun.attemptId}`
-      : submissionPending ? `pending:${projectId}:${documentId}` : null,
-    runCommentCount: activeRun?.commentCount ?? pendingCommentCount,
     sourceFileName,
-    handoffStatus: activeHandoff?.status || null,
-    runSteps: sidebarAgentStageSteps({
-      state,
-      phase: activeHandoff?.phase || (submissionPending ? "preparing-delivery" : ""),
-    }),
-    // An explicit allowlist of settled loads (see conversationLoadedForView):
-    // the empty-state copy must never appear before the load settles, because
-    // the session drops draft writes until it has published a conversation.
-    loading: !conversationLoadedForView(conversation),
     onSend,
     onCopyTask,
     onAction: onDecision,
     onClose: hide,
     onOpenAgentSettings,
   }), [
-    state,
-    conversation,
-    historyGroups,
     qoderAvailability,
     agentDisplayName,
     executionDisplayName,
@@ -280,21 +200,18 @@ export function useAiConversation({
     selectedModelId,
     reasoningChoices,
     selectedReasoningId,
-    activeHandoff,
-    activeRun,
     projectId,
     documentId,
     sourceFileName,
-    submissionPending,
     pendingCommentCount,
     onSend,
     onDraftTextChange,
-    draftReadOnly,
     onCopyTask,
     onDecision,
     hide,
     onOpenAgentSettings,
   ]);
 
-  return { open, visible, toggle, reveal, hide, sidebarProps };
+  const context = useMemo(() => ({ projectId, documentId, draftReadOnly }), [projectId, documentId, draftReadOnly]);
+  return { open, visible, toggle, reveal, hide, sidebarProps, context };
 }

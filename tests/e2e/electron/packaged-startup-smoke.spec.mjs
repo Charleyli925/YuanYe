@@ -241,7 +241,7 @@ test("packaged app preserves identity and imports external HTML as V1 across sta
     await repository.createCandidate({ target: startupTarget, requestId: "req_packaged_restart_0001", candidateId,
       html: readFileSync(startupManagedSourcePath, "utf8").replace("<title ", "<title data-restart-proof=\"next\" "),
       expectedSourceSha256: startupTarget.sourceSha256 });
-    await repository.promoteCandidate({ target: startupTarget, candidateId });
+    await repository.promoteCandidate({ target: startupTarget, candidateId, decisionOperationId: `promote_${candidateId}` });
     const migratedMembers = [];
     for (const root of [path.dirname(startupManagedSourcePath), path.dirname(liveManagedSourcePath)]) {
       const file = path.join(root, ".pageroot", "manifest.json");

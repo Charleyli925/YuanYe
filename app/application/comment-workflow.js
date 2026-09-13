@@ -6,10 +6,11 @@ import { normalizeRuntimeVisualHint } from "../lib/runtime-comment-hint.js";
 
 function commentSourceTarget(target) {
   const sourceTarget = target?.commentAnchor || target || null;
-  if (sourceTarget && target?.textLocator && !sourceTarget.textLocator) {
-    return { ...sourceTarget, textLocator: target.textLocator };
-  }
-  return sourceTarget;
+  if (!sourceTarget) return null;
+  const { commentAnchor, visualHint, ...anchor } = sourceTarget;
+  void commentAnchor; void visualHint;
+  if (target?.textLocator && !anchor.textLocator) anchor.textLocator = target.textLocator;
+  return anchor;
 }
 
 function commentVisualHint(target) {
@@ -577,18 +578,14 @@ export class CommentWorkflow {
     }
     const nextTarget = {
       ...commentSourceTarget(target),
-      id: current.target.id,
+      id: current.sourceAnchor.id,
     };
     const visualHint = commentVisualHint(target);
-    const visualTarget = visualHint
-      ? { ...nextTarget, label: visualHint.label, visualHint }
-      : nextTarget;
     const nextComments = this.#commentSession.comments.map((comment) => (
       comment.commentId === commentId
         ? (() => {
             const nextComment = {
               ...comment,
-              target: visualTarget,
               sourceAnchor: nextTarget,
               updatedAt: safeDate(this.#clock.now()),
             };
@@ -670,14 +667,10 @@ export class CommentWorkflow {
       nextCommentId,
     );
     const visualHint = commentVisualHint(currentTarget);
-    const visualTarget = visualHint
-      ? { ...commentTarget, label: visualHint.label, visualHint }
-      : commentTarget;
     const comment = {
       commentId: nextCommentId,
       createdAt: now,
       updatedAt: now,
-      target: visualTarget,
       sourceAnchor: commentTarget,
       ...(visualHint ? { visualHint } : {}),
       text,
@@ -793,9 +786,9 @@ export class CommentWorkflow {
       return succeeded({ deleted: [], composerDiscarded: false, attachments: [] });
     }
     const targetWasRemoved = (target) => removedElementIds.has(
-      String(commentSourceTarget(target?.sourceAnchor || target?.target || target)?.elementId || ""),
+      String(commentSourceTarget(target)?.elementId || ""),
     );
-    const deleted = this.#commentSession.comments.filter(targetWasRemoved);
+    const deleted = this.#commentSession.comments.filter((comment) => targetWasRemoved(comment.sourceAnchor));
     const deletedIds = new Set(deleted.map((comment) => comment.commentId));
     const composerDiscarded = Boolean(
       this.#commentSession.composerTarget
@@ -1052,6 +1045,7 @@ export class CommentWorkflow {
     if (!currentContext) {
       return {
         comments: frozenItems(serverComments),
+        deletedCommentIds: [],
         changeEvents: frozenItems(serverEvents),
         composerDraft: "",
         composerCommentId: null,
@@ -1079,6 +1073,7 @@ export class CommentWorkflow {
       this.#recoveryOperationId = null;
       return {
         comments: frozenItems(serverComments),
+        deletedCommentIds: [],
         changeEvents: frozenItems(serverEvents),
         composerDraft: "",
         composerCommentId: null,
@@ -1119,9 +1114,6 @@ export class CommentWorkflow {
       changeEvents: serverEvents,
       deletedCommentIds: serverDeletedCommentIds,
     });
-    this.#commentSession.replaceDeletedCommentIds(
-      operationAlreadyApplied ? [] : rebased.deletedCommentIds,
-    );
     this.#recoveryOperationId = operationAlreadyApplied ? null : operationId;
     const commentEdit = this.#codecs.isRecord(latest.commentEdit)
       && /^comment_[A-Za-z0-9_-]+$/.test(String(latest.commentEdit.commentId || ""))
@@ -1137,6 +1129,7 @@ export class CommentWorkflow {
       : null;
     return {
       comments: rebased.comments,
+      deletedCommentIds: operationAlreadyApplied ? [] : rebased.deletedCommentIds,
       changeEvents: rebased.changeEvents,
       composerDraft: typeof latest.composerDraft === "string"
         ? latest.composerDraft

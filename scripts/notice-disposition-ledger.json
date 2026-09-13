@@ -130,15 +130,6 @@
       "siteIds": [
         "handoff-recopy"
       ]
-    },
-    {
-      "id": "review-no-visible-change",
-      "owner": "review",
-      "reason": "审阅对比后没有可定位变化时，对话仍显示可审阅；若不说明，用户无法判断点击是否生效",
-      "removalCondition": "在现有审阅入口上显示无变化结果，且不新增卡片红字",
-      "siteIds": [
-        "review-no-visible-change"
-      ]
     }
   ],
   "sites": [
@@ -284,19 +275,6 @@
       "reason": "剪贴板动作无其他可感知结果",
       "allowlistId": "handoff-recopy",
       "fingerprint": "N5|本轮要求已复制 / 复制没有成功|handoff-recopied|inform-in-place"
-    },
-    {
-      "id": "review-no-visible-change",
-      "class": "N5",
-      "owner": "review",
-      "file": "app/workbench.tsx",
-      "title": "这次没有产生有效变化",
-      "dedupeKey": "ready-version-no-visible-review-change",
-      "disposition": "background-result",
-      "wave": "PR-E",
-      "reason": "审阅未打开，对话仍显示可审阅",
-      "allowlistId": "review-no-visible-change",
-      "fingerprint": "N5|这次没有产生有效变化|ready-version-no-visible-review-change|background-result"
     }
   ]
 }

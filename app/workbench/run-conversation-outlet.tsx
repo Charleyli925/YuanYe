@@ -1,22 +1,26 @@
 "use client";
 
-import { memo, useSyncExternalStore } from "react";
+import { memo, useMemo, useSyncExternalStore } from "react";
 
-import type { RunControllerCapability } from "../application/workspace-controller-capabilities.js";
+import type { RunControllerCapability, ConversationReaderCapability } from "../application/workspace-controller-capabilities.js";
 import { deriveRunProgressPresentation } from "../domain/run-lifecycle.js";
 import AiConversationSidebar, {
   type AiConversationSidebarProps,
 } from "./AiConversationSidebar";
-import { sidebarStateFromRun } from "./ai-conversation-model.js";
+import { sidebarConversationPresentation, sidebarConversationGroups, sidebarStateFromRun } from "./ai-conversation-model.js";
 
 export const RunConversationOutlet = memo(function RunConversationOutlet({
   capability,
+  conversationCapability,
+  conversationContext,
   sidebarProps,
   reviewing,
   deliveryMode,
 }: {
   capability: RunControllerCapability;
-  sidebarProps: AiConversationSidebarProps;
+  conversationCapability: ConversationReaderCapability;
+  conversationContext: Readonly<{ projectId: string; documentId: string; draftReadOnly: boolean }>;
+  sidebarProps: Omit<AiConversationSidebarProps, "state" | "title" | "messages">;
   reviewing: boolean;
   deliveryMode: "managed-agent" | "clipboard";
 }) {
@@ -25,6 +29,16 @@ export const RunConversationOutlet = memo(function RunConversationOutlet({
     capability.getSnapshot,
     capability.getSnapshot,
   );
+  const loadedConversation = useSyncExternalStore(
+    conversationCapability.subscribe,
+    conversationCapability.getSnapshot,
+    conversationCapability.getSnapshot,
+  );
+  // A document switch can render before the parent's load effect runs. Never
+  // present the previous document's draft or messages during that interval.
+  const conversation = useMemo(() => sidebarConversationPresentation(
+    loadedConversation, conversationContext,
+  ), [loadedConversation, conversationContext]);
   const runSession = snapshot.session;
   const activeRun = runSession?.activeRun ?? null;
   const activeHandoff = runSession?.activeHandoff ?? null;
@@ -46,10 +60,22 @@ export const RunConversationOutlet = memo(function RunConversationOutlet({
     currentHandoff || "idle",
   );
 
+  const historyGroups = useMemo(() => sidebarConversationGroups({
+    messages: conversation.messages,
+    turns: conversation.turns,
+    activeRun,
+  }), [conversation, activeRun]);
+
   return (
     <AiConversationSidebar
       key={sidebarProps.documentKey}
       {...sidebarProps}
+      title={conversation.title}
+      messages={conversation.messages}
+      draftText={conversation.draftText}
+      draftAvailable={conversation.draftAvailable}
+      loading={conversation.loading}
+      historyGroups={historyGroups}
       state={state}
       runStatus={activeRun?.status ?? null}
       candidateVersionLabel={activeRun?.candidateVersionLabel ?? null}

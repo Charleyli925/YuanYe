@@ -63,6 +63,7 @@ import {
 } from "./review-state";
 import {
   buildReviewPaintPlan,
+  eligibleReviewVisualEvidence,
   EMPTY_REVIEW_PAINT_PLAN,
   type ReviewPaintPlan,
 } from "./review-paint-plan";
@@ -91,14 +92,11 @@ type ReviewCommentLayout = {
   viewportTop: number;
   global: boolean;
 };
-type ReviewVisualPhase = "analyzing" | "complete" | "unverified" | "unsupported";
 type ReviewVisualResolution = {
   documents: ReviewDocuments;
   reloadRevision: number;
   generation: number;
-  phase: ReviewVisualPhase;
   verdicts: Record<string, ReviewVisualVerdict>;
-  unverifiedCount: number;
 };
 
 function initialVisualResolution(
@@ -106,18 +104,11 @@ function initialVisualResolution(
   reloadRevision: number,
   generation: number,
 ): ReviewVisualResolution {
-  const unsupported = documents.visualBinding.identity === "unsupported";
   return {
     documents,
     reloadRevision,
     generation,
-    phase: unsupported
-      ? "unsupported"
-      : documents.visualEvidence.length
-        ? "analyzing"
-        : "complete",
     verdicts: {},
-    unverifiedCount: unsupported ? documents.changes.length : 0,
   };
 }
 
@@ -474,6 +465,7 @@ export default function AiReviewWorkspace({
   afterLabel,
   sessionId,
   documents,
+  sourceContentEqual = false,
   sourcePath,
   accepting,
   error,
@@ -496,6 +488,7 @@ export default function AiReviewWorkspace({
   afterLabel: string;
   sessionId: string;
   documents: ReviewDocuments;
+  sourceContentEqual?: boolean;
   sourcePath?: string;
   accepting: boolean;
   error?: string;
@@ -641,6 +634,11 @@ export default function AiReviewWorkspace({
   const reviewFrameLoadCountsRef = useRef(new WeakMap<HTMLIFrameElement, number>());
   const reviewVisualTimeoutRef = useRef<number | null>(null);
   const activeCommentKeysRef = useRef(new Set<string>());
+  const observableVisualEvidence = useMemo(() => (
+    documents.visualBinding.identity === "supported"
+      ? eligibleReviewVisualEvidence(documents)
+      : []
+  ), [documents]);
   const [visualResolution, setVisualResolution] = useState<ReviewVisualResolution>(() => (
     initialVisualResolution(documents, reloadRevision, 0)
   ));
@@ -837,19 +835,17 @@ export default function AiReviewWorkspace({
       reviewVisualTimeoutRef.current = null;
     }
     setVisualResolution(initialVisualResolution(documents, reloadRevision, generation));
-    if (documents.visualBinding.identity === "supported" && documents.visualEvidence.length) {
+    if (observableVisualEvidence.length) {
       reviewVisualTimeoutRef.current = window.setTimeout(() => {
         if (reviewVisualGenerationRef.current !== generation) return;
-        const verdicts = Object.fromEntries(documents.visualEvidence.map((evidence) => (
+        const verdicts = Object.fromEntries(observableVisualEvidence.map((evidence) => (
           [evidence.stableId, "unverified" as const]
         )));
         setVisualResolution({
           documents,
           reloadRevision,
           generation,
-          phase: "unverified",
           verdicts,
-          unverifiedCount: documents.visualEvidence.length,
         });
       }, 4_000);
     }
@@ -860,24 +856,24 @@ export default function AiReviewWorkspace({
       }
       closeReviewVisualChannels();
     };
-  }, [closeReviewVisualChannels, documents, reloadRevision, sessionId]);
+  }, [closeReviewVisualChannels, documents, observableVisualEvidence, reloadRevision, sessionId]);
 
   const observeReviewVisualSide = useCallback((side: ReviewSide) => {
     const port = reviewVisualPortsRef.current[side];
-    if (!port) return;
+    if (!port || !observableVisualEvidence.length) return;
     port.postMessage({
       type: "observe",
       sessionId,
       side,
       sourceHash: documents.visualBinding.sourceHash[side],
       generation: reviewVisualGenerationRef.current,
-      candidates: documents.visualEvidence.map((evidence) => ({
+      candidates: observableVisualEvidence.map((evidence) => ({
         stableId: evidence.stableId,
-        positionSensitive: evidence.kinds.includes("moved"),
+        positionSensitive: false,
         present: side === "before" ? evidence.beforePresent : evidence.afterPresent,
       })),
     });
-  }, [documents, sessionId]);
+  }, [documents, observableVisualEvidence, sessionId]);
 
   const requestReviewVisualFrame = useCallback((side: ReviewSide, frame: HTMLIFrameElement) => {
     if (reviewVisualPortsRef.current[side] || reviewVisualChallengesRef.current[side]?.frame === frame
@@ -1101,18 +1097,17 @@ export default function AiReviewWorkspace({
     reviewVisualObservationsRef.current = {};
     setVisualResolution(initialVisualResolution(documents, reloadRevision, generation));
     if (reviewVisualTimeoutRef.current !== null) window.clearTimeout(reviewVisualTimeoutRef.current);
-    if (documents.visualBinding.identity === "supported" && documents.visualEvidence.length) {
+    reviewVisualTimeoutRef.current = null;
+    if (observableVisualEvidence.length) {
       reviewVisualTimeoutRef.current = window.setTimeout(() => {
         if (reviewVisualGenerationRef.current !== generation) return;
         setVisualResolution({
           documents,
           reloadRevision,
           generation,
-          phase: "unverified",
-          verdicts: Object.fromEntries(documents.visualEvidence.map((evidence) => (
+          verdicts: Object.fromEntries(observableVisualEvidence.map((evidence) => (
             [evidence.stableId, "unverified" as const]
           ))),
-          unverifiedCount: documents.visualEvidence.length,
         });
       }, 4_000);
     }
@@ -1156,6 +1151,7 @@ export default function AiReviewWorkspace({
   }, [
     closeReviewCommentChannel,
     documents,
+    observableVisualEvidence,
     observeReviewVisualSide,
     prepareReviewCommentFrame,
     reloadRevision,
@@ -1707,11 +1703,14 @@ export default function AiReviewWorkspace({
         reviewVisualPortsRef.current[visualSide] = port;
         port.onmessage = (portEvent) => {
           const payload = portEvent.data;
-          if (!payload || payload.type !== "observations" || !Array.isArray(payload.observations)) return;
+          if (!observableVisualEvidence.length
+            || !payload || payload.type !== "observations" || !Array.isArray(payload.observations)) return;
+          const requestedIds = new Set(observableVisualEvidence.map((evidence) => evidence.stableId));
           const observations = new Map<string, ReviewVisualObservation>();
           payload.observations.forEach((value: unknown) => {
             const observation = value as ReviewVisualObservation;
-            if (observation?.side === visualSide && typeof observation.stableId === "string") {
+            if (observation?.side === visualSide
+              && requestedIds.has(observation.stableId)) {
               observations.set(observation.stableId, observation);
             }
           });
@@ -1720,7 +1719,7 @@ export default function AiReviewWorkspace({
           const after = reviewVisualObservationsRef.current.after;
           if (!before || !after) return;
           const generation = reviewVisualGenerationRef.current;
-          const verdicts = Object.fromEntries(documents.visualEvidence.map((evidence) => (
+          const verdicts = Object.fromEntries(observableVisualEvidence.map((evidence) => (
             [evidence.stableId, reviewVisualVerdict(
               evidence,
               before.get(evidence.stableId),
@@ -1729,9 +1728,6 @@ export default function AiReviewWorkspace({
               generation,
             )]
           )));
-          const unverifiedCount = Object.values(verdicts).filter((verdict) => (
-            verdict === "unverified"
-          )).length;
           if (reviewVisualTimeoutRef.current !== null) {
             window.clearTimeout(reviewVisualTimeoutRef.current);
             reviewVisualTimeoutRef.current = null;
@@ -1740,9 +1736,7 @@ export default function AiReviewWorkspace({
             documents,
             reloadRevision,
             generation,
-            phase: unverifiedCount ? "unverified" : "complete",
             verdicts,
-            unverifiedCount,
           });
         };
         port.postMessage({
@@ -1765,7 +1759,7 @@ export default function AiReviewWorkspace({
           active: true,
           stableIds: activeStableIds,
         });
-        if (documents.visualBinding.identity === "supported" && documents.visualEvidence.length) {
+        if (observableVisualEvidence.length) {
           observeReviewVisualSide(visualSide);
         }
         return;
@@ -1957,6 +1951,7 @@ export default function AiReviewWorkspace({
     documents,
     finishPagePresentation,
     focusHorizontalFootprint,
+    observableVisualEvidence,
     observeReviewVisualSide,
     prepareReviewCommentFrame,
     publishReviewPresentation,
@@ -2278,6 +2273,7 @@ export default function AiReviewWorkspace({
       {embedded && toolbarHost ? createPortal((
         <>
           <ReviewToolbarControls
+            hasChanges={reviewChanges.length > 0}
             pageView={canvasView}
             changeFilter={filter}
             scrollMode={scrollMode}
@@ -2435,7 +2431,7 @@ export default function AiReviewWorkspace({
 
           <div className={styles.canvasReviewBody}>
             <header className={styles.reviewDirectoryHeader}>
-              <details ref={reviewDirectoryRef} className={styles.reviewDirectory}>
+              {reviewDirectoryItems.length ? <details ref={reviewDirectoryRef} className={styles.reviewDirectory}>
                 <summary
                   ref={reviewDirectorySummaryRef}
                   aria-label={`变化目录，共 ${reviewDirectoryItems.length} 处`}
@@ -2502,7 +2498,17 @@ export default function AiReviewWorkspace({
                     );
                   })}
                 </div>
-              </details>
+              </details> : (
+                <span className={styles.reviewEmpty} data-testid="review-empty-changes">
+                  {documents.annotationAvailability === "unavailable"
+                    ? "变化标注暂不可用，可直接查看前后页面。"
+                    : sourceContentEqual
+                    ? "前后 HTML 内容相同。"
+                    : filter !== "all" && reviewChanges.length
+                      ? "此筛选下没有可定位的变化。"
+                      : "未定位到可标注的变化，可直接查看前后页面。"}
+                </span>
+              )}
             </header>
             <div className={styles.canvasGrid} data-view={canvasView}>
               <ReviewDocumentPane
@@ -2596,7 +2602,9 @@ export default function AiReviewWorkspace({
                     <button type="button" onClick={onRevealAiTask}>AI 返回的 HTML 已自动保留，点击在文件夹中打开。</button>
                   </>
                 : <>
-                    <span>确认后将采纳 AI 修改后的{afterLabel}为正式版本。</span>
+                    <span>{sourceContentEqual
+                      ? "HTML 内容相同，采纳后仍会创建正式版本，并归档本轮已提交且未再修改的要求。"
+                      : `确认后将采纳 AI 修改后的${afterLabel}为正式版本。`}</span>
                     <span>修改前的 {beforeLabel} 与本轮记录仍会保留，可在历史记录中查看。</span>
                   </>}
             </div>

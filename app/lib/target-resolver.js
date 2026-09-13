@@ -304,37 +304,6 @@ function resolved(targetRef, resolution, target, candidates, reason) {
   };
 }
 
-function insertionParentCandidates(index, targetRef) {
-  const targetFingerprint = targetRef.fingerprint ?? {};
-  if (!targetFingerprint.tagName) return [];
-  const parentFingerprint = {
-    ...targetFingerprint,
-    textPrefix: undefined,
-    textSuffix: undefined,
-  };
-  const parentCandidates = index.elements.filter((element) => {
-    if (parentFingerprint.tagName && element.tagName !== parentFingerprint.tagName) return false;
-    for (const [name, value] of Object.entries(parentFingerprint.stableAttributes ?? {})) {
-      if (element.stableAttributes[name] !== value) return false;
-    }
-    const targetAncestors = parentFingerprint.ancestorFingerprint ?? [];
-    const candidateAncestors = element.fingerprint?.ancestorFingerprint ?? [];
-    if (
-      targetAncestors.length > 0
-      && ancestorMatches(targetAncestors, candidateAncestors) !== targetAncestors.length
-    ) {
-      return false;
-    }
-    return true;
-  });
-  if (!targetRef.selector || isPositionalSelector(targetRef.selector)) {
-    return parentCandidates;
-  }
-  return parentCandidates.filter(
-    (element) => simpleSelectorMatches(element, targetRef.selector),
-  );
-}
-
 function insertionBoundaries(index, parent) {
   return new Set([
     parent.contentRange.startOffset,
@@ -363,54 +332,26 @@ function resolveInsertionPoint(index, targetRef) {
     );
   }
 
-  if (targetRef.elementId && !isValidPagerootElementId(targetRef.elementId)) {
-    return resolved(targetRef, "orphaned", null, [], "stable-parent-id-invalid");
-  }
-  const stableParent = targetRef.elementId
-    ? index.byPagerootId.get(targetRef.elementId) ?? null
-    : null;
-  if (targetRef.elementId && !stableParent) {
+  const parent = index.byPagerootId.get(targetRef.elementId) ?? null;
+  if (!parent) {
     return resolved(targetRef, "orphaned", null, [], "stable-parent-not-found");
   }
-  const parentCandidates = stableParent
-    ? [stableParent]
-    : insertionParentCandidates(index, targetRef);
-  const isExactSource = anchor.sourceSha256 === index.sourceSha256;
-  if (isExactSource) {
-    const exactParents = parentCandidates.filter((parent) => (
-      anchor.startOffset >= parent.contentRange.startOffset
+  if (anchor.sourceSha256 === index.sourceSha256) {
+    const exactBoundary = anchor.startOffset >= parent.contentRange.startOffset
       && anchor.startOffset <= parent.contentRange.endOffset
       && insertionBoundaries(index, parent).has(anchor.startOffset)
       && (
         !targetRef.selector
         || !isPositionalSelector(targetRef.selector)
         || simpleSelectorMatches(parent, targetRef.selector)
-      )
-    ));
-    if (exactParents.length === 1) {
+      );
+    if (exactBoundary) {
       return resolved(
         targetRef,
         "exact",
-        {
-          type: "insertion-point",
-          offset: anchor.startOffset,
-          parentId: exactParents[0].nodeId,
-        },
+        { type: "insertion-point", offset: anchor.startOffset, parentId: parent.nodeId },
         [],
         "source-anchor-and-parent-match",
-      );
-    }
-    if (exactParents.length > 1) {
-      return resolved(
-        targetRef,
-        "ambiguous",
-        null,
-        exactParents.map((element) => ({
-          nodeId: element.nodeId,
-          label: element.label,
-          range: element.range,
-        })),
-        "exact-parent-ambiguous",
       );
     }
     return resolved(
@@ -421,22 +362,6 @@ function resolveInsertionPoint(index, targetRef) {
       "exact-anchor-not-a-parent-child-boundary",
     );
   }
-
-  if (parentCandidates.length > 1) {
-    return resolved(
-      targetRef,
-      "ambiguous",
-      null,
-      parentCandidates.map((element) => ({
-        nodeId: element.nodeId,
-        label: element.label,
-        range: element.range,
-      })),
-      "parent-ambiguous",
-    );
-  }
-  const parent = parentCandidates[0];
-  if (!parent) return resolved(targetRef, "orphaned", null, [], "parent-not-found");
 
   const targetFingerprint = targetRef.fingerprint ?? {};
   const prefix = targetFingerprint.textPrefix ?? "";
@@ -517,13 +442,14 @@ function resolveByStableElementId(index, targetRef) {
 
 function resolveManagedOfficialTargetRef(index, targetRef) {
   if (targetRef.level === "insertion-point") {
-    if (targetRef.elementId === undefined) {
+    if (!isValidPagerootElementId(targetRef.elementId)) {
       return resolved(
         targetRef,
         "orphaned",
         null,
         [],
-        "managed-insertion-requires-parent-id",
+        targetRef.elementId === undefined
+          ? "managed-insertion-requires-parent-id" : "stable-parent-id-invalid",
       );
     }
     return resolveInsertionPoint(index, targetRef);

@@ -1,6 +1,6 @@
 # Architecture Decision Records
 
-<!-- adr-history-max: 0071 -->
+<!-- adr-history-max: 0072 -->
 <!-- adr-history-gaps: 0020 -->
 
 This is the default reading path for decisions that still constrain PageRoot.
@@ -66,6 +66,7 @@ reused. The four collisions found in the first curation pass were assigned
 | 0070 | [Working Copy identity survives filesystem observation changes](0070-durable-working-copy-binding.md) | Living |
 
 | 0071 | [Stemmio trusted modification loop](0071-stemmio-trusted-modification-loop.md) | Accepted contract; implementation tracked separately |
+| 0072 | [Source receipts fence Canvas authority](0072-source-receipts-fence-canvas-authority.md) | Accepted contract |
 
 ## Reading guide
 

@@ -1,3 +1,4 @@
+import { seedLegacyHistoryActivation } from "../../helpers/legacy-history-activation.mjs";
 import { expect, test } from "@playwright/test";
 import { loadedDiskFrame as loadedStaticDiskFrame } from "./helpers/pageroot-app-fixture.mjs";
 import {
@@ -462,10 +463,10 @@ test("Electron sidebar opens an imported historical version in the existing proj
     let target = imported.target;
     for (const [ordinal, title] of Array.from({ length: 7 }, (_, index) => [index + 2, `sidebar history V${index + 2}`])) {
       if (ordinal === 3) {
-        const continued = await repository.activateVersionWorkingCopy({
+        const continued = await repository.replayHistoryVersionActivation(await seedLegacyHistoryActivation({
           target, versionId: "ver_0001", operationId: "e2e_sidebar_branch_v1_0001",
           expectedActiveWorkingCopyId: "work_ver_0002",
-        });
+        }));
         await repository.confirmVersionWorkingCopyActivation({
           target, operationId: continued.historyActivation.operationId,
           previousWorkingCopyId: "work_ver_0002", activatedWorkingCopyId: "work_ver_0001", versionId: "ver_0001",
@@ -482,6 +483,7 @@ test("Electron sidebar opens an imported historical version in the existing proj
       const promoted = await repository.promoteCandidate({
         target,
         candidateId: candidate.candidate.candidateId,
+        decisionOperationId: `promote_${candidate.candidate.candidateId}`,
       });
       expect(promoted.promoted).toBe(true);
       target = promoted.target;
@@ -653,7 +655,14 @@ test("Electron sidebar opens an imported historical version in the existing proj
     await setTextSelection(createdFrame, "list-item", 0, 3);
     await launched.page.keyboard.insertText("HISTORY_V9_SAVED");
     await launched.page.keyboard.press(keyShortcut("S"));
-    await expect.poll(() => readFileSync(createdPath, "utf8")).toContain("HISTORY_V9_SAVED");
+    await expect.poll(() => {
+      try {
+        return readFileSync(createdPath, "utf8");
+      } catch (cause) {
+        if (cause?.code === "ENOENT") return null;
+        throw cause;
+      }
+    }).toContain("HISTORY_V9_SAVED");
     expect((await repository.readVersionFile({ target, versionId: "ver_0003" })).content).toBe(historicalBytes.content);
     expect(readFileSync(target.exactSourcePath, "utf8")).toBe(protectedWorkingBytes);
     await launched.page.screenshot({ path: test.info().outputPath("history-created-v9.png") });
@@ -710,6 +719,7 @@ test("Electron sidebar keeps multiple project lists expanded without switching i
           const promoted = await repository.promoteCandidate({
             target,
             candidateId: candidate.candidate.candidateId,
+            decisionOperationId: `promote_${candidate.candidate.candidateId}`,
           });
           expect(promoted.promoted).toBe(true);
           target = promoted.target;
@@ -813,7 +823,7 @@ for (const recoveryCase of ["pending", "rename", "superseded"]) {
         const candidate = await repository.createCandidate({ target, requestId: `req_restart_${ordinal}`,
           candidateId: `candidate_restart_${ordinal}_0001`, html: identityPreservingCandidateHtml(target, `Restart V${ordinal}`),
           expectedSourceSha256: target.sourceSha256 });
-        target = (await repository.promoteCandidate({ target, candidateId: candidate.candidate.candidateId })).target;
+        target = (await repository.promoteCandidate({ target, candidateId: candidate.candidate.candidateId, decisionOperationId: `promote_${candidate.candidate.candidateId}` })).target;
       }
       app = await launchPageRoot({ isolatedUserData: userData, activeSourcePath: target.exactSourcePath });
       await waitForProjectReady(app.page);
@@ -854,7 +864,7 @@ for (const recoveryCase of ["pending", "rename", "superseded"]) {
         const candidate = await repository.createCandidate({ target: current, requestId: "req_restart_next",
           candidateId: "candidate_restart_next_0001", html: identityPreservingCandidateHtml(current, "Restart V10"),
           expectedSourceSha256: current.sourceSha256 });
-        const next = await repository.promoteCandidate({ target: current, candidateId: candidate.candidate.candidateId });
+        const next = await repository.promoteCandidate({ target: current, candidateId: candidate.candidate.candidateId, decisionOperationId: `promote_${candidate.candidate.candidateId}` });
         expectedPath = next.target.exactSourcePath;
         expect((await repository.queryHistoryCreation({ target: next.target, operationId })).recoveryState).toBe("superseded");
       }

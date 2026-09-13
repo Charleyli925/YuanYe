@@ -5,6 +5,7 @@ export type CommentSessionSnapshot<
   TTarget = unknown,
   TEditSession = unknown,
 > = {
+  /** Decoded comments have one writable sourceAnchor; legacy target belongs to the codec only. */
   comments: TComment[];
   changeEvents: TEvent[];
   deletedCommentIds: string[];

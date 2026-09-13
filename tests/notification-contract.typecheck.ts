@@ -17,6 +17,18 @@ const attachmentRejected: GlobalInterruption = {
   target: { kind: "composer", commentId: "comment-1" },
 };
 
+const retryPreparedOpen: GlobalInterruption = {
+  kind: "project-open-failed",
+  detail: "这次打开没有完成。",
+  requestId: "opaque-prepared-request",
+};
+
+const forbiddenProjectOpenPath: GlobalInterruption = {
+  kind: "project-open-failed",
+  // @ts-expect-error retry state carries an opaque requestId, never path authority
+  sourcePath: "/private/source.html",
+};
+
 // @ts-expect-error unknown kinds are not part of the closed interruption catalog
 const invented: GlobalInterruption = { kind: "made-up-toast" };
 
@@ -27,4 +39,12 @@ const freeFormTitle: GlobalInterruption = {
   title: "anything",
 };
 
-void [recopy, exportFailed, attachmentRejected, invented, freeFormTitle];
+void [
+  recopy,
+  exportFailed,
+  attachmentRejected,
+  retryPreparedOpen,
+  forbiddenProjectOpenPath,
+  invented,
+  freeFormTitle,
+];

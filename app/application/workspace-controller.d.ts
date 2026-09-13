@@ -13,7 +13,9 @@ import type { DocumentWorkflowCodecs } from "./document-workflow-codecs.js";
 import type { CommentSession } from "./comment-session.js";
 import type { ConversationSession } from "./conversation-session.js";
 import type {
+  DocumentCanvasRenderObservation,
   DocumentSession,
+  DocumentSourceReceipt,
   PersistedBoundaryResult,
 } from "./document-session.js";
 import type { DraftSession } from "./draft-session.js";
@@ -86,6 +88,8 @@ export type {
   ReviewPreparationControllerCapability,
   RunSubmissionControllerCapability,
   WorkspaceControllerSnapshot,
+  WorkspaceShellSnapshot,
+  WorkspaceShellCommentSnapshot,
   WorkspaceSnapshotReader,
 } from "./workspace-controller-capabilities.js";
 
@@ -165,6 +169,7 @@ export type CanvasAuthorityPort = Readonly<{
 
 export type ProjectSourceActivationPort = Readonly<{
   activateManagedWorkingCopy(input: Readonly<{
+    operationId?: string | null;
     previousSourcePath: string;
     nextSourcePath: string;
     expectedSha256: string;
@@ -385,6 +390,9 @@ export function createRuntimeWorkspaceController(
 // production renderer must use createRuntimeWorkspaceController instead.
 export class WorkspaceController {
   constructor(options: WorkspaceControllerConstruction);
+  readonly shell: import("./workspace-controller-capabilities.js").WorkspaceShellCapability;
+  readonly conversation: import("./workspace-controller-capabilities.js").ConversationReaderCapability;
+  readonly projectRules: import("./workspace-controller-capabilities.js").ProjectRulesReaderCapability;
   readonly comments: import("./workspace-controller-capabilities.js").CommentControllerCapability;
   readonly projectCatalog: import("./workspace-controller-capabilities.js").ProjectCatalogControllerCapability;
   readonly runs: import("./workspace-controller-capabilities.js").RunControllerCapability;
@@ -495,10 +503,7 @@ export class WorkspaceController {
     deleteOriginal?: boolean;
   }): ProjectWorkflowOutcome;
   retryExternalOpen(input?: { requestId?: string }): Promise<WorkbenchNavigationOutcome>;
-  acknowledgeEditCanvas(input?: {
-    generation?: number;
-    renderedSha256?: string | null;
-  }): boolean;
+  acknowledgeEditCanvas(input?: DocumentCanvasRenderObservation): boolean;
   retryCanvasVerification(input?: {
     context?: ProjectContext;
   }): Promise<DocumentWorkflowOutcome>;
@@ -706,8 +711,6 @@ export class WorkspaceController {
   createVersionFromHistory(input: { operationId: string; context?: ProjectContext | null }): Promise<VersionWorkflowOutcome>;
   openCreatedHistoryVersion(input: { operationId: string; context?: ProjectContext | null }): Promise<VersionWorkflowOutcome>;
   queryHistoryCreation(input: { operationId: string; context?: ProjectContext | null }): Promise<VersionWorkflowOutcome>;
-  /** @deprecated Legacy activation protocol only; no product UI callers. */
-  continueEditingHistoryVersion(input?: Record<string, unknown>): Promise<VersionWorkflowOutcome>;
   ensureRegistered(
     input?: RegistrationInput,
   ): Promise<CommandOutcome<ProjectContext>>;
@@ -715,6 +718,7 @@ export class WorkspaceController {
   enqueueDocumentEdit(input: Record<string, unknown>): DocumentWorkflowOutcome<{
     revision: number;
     queued: boolean;
+    receipt: DocumentSourceReceipt | null;
   }>;
   flushDocument(input?: { throughRevision?: number }): Promise<DocumentWorkflowOutcome<{
     revision: number;

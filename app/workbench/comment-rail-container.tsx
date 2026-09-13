@@ -25,9 +25,9 @@ import {
 } from "../lib/comment-virtualization.js";
 import {
   canSaveCommentTarget,
-  commentSourceAnchor,
   commentEditSessionHasChanges,
   commentVisualHintForSelection,
+  commentVisualTarget,
   isExplicitGlobalCommentTarget,
 } from "./comment-model";
 import {
@@ -101,12 +101,6 @@ function draftScope(target: HtmlCanvasSelection | null): string {
   return "页面内容";
 }
 
-function commentLayoutTarget(comment: CommentItem): HtmlCanvasSelection {
-  const sourceTarget = commentSourceAnchor(comment) || comment.target;
-  const visualHint = comment.visualHint
-    || commentVisualHintForSelection(comment.target);
-  return visualHint ? { ...sourceTarget, visualHint } : sourceTarget;
-}
 
 function sourceTargetForSelection(target: HtmlCanvasSelection): HtmlCanvasSelection {
   return target.commentAnchor ?? target;
@@ -191,7 +185,7 @@ export const CommentRailContainer = memo(function CommentRailContainer({
   );
   const expectedCommentLayoutTargetIds = useMemo(() => [...new Set([
     ...context.visibleCommentItems.map((comment) => (
-      (commentSourceAnchor(comment) || comment.target).id
+      comment.sourceAnchor.id
     )),
     ...(
       (hasCommentDraft || composerOpen) && draftTarget
@@ -241,7 +235,7 @@ export const CommentRailContainer = memo(function CommentRailContainer({
   ), [targetLayouts]);
   const otherTabCommentItems = useMemo(() => context.visibleCommentItems.filter(
     (comment) => {
-      const sourceTarget = commentSourceAnchor(comment) || comment.target;
+      const sourceTarget = comment.sourceAnchor;
       const layout = targetLayouts[sourceTarget.id];
       return Boolean(
         sourceTarget.tagName !== "body"
@@ -268,7 +262,7 @@ export const CommentRailContainer = memo(function CommentRailContainer({
       else grouped.set(key, { key, label, entries: [entry] });
     };
     for (const comment of otherTabCommentItems) {
-      const target = commentLayoutTarget(comment);
+      const target = commentVisualTarget(comment);
       const layout = targetLayouts[target.id];
       appendEntry(
         layout?.tabGroupKey || target.id,
@@ -355,7 +349,7 @@ export const CommentRailContainer = memo(function CommentRailContainer({
   const commentRailTargetTops = useMemo(() => {
     if (!commentLayoutReady) return {};
     const targets = [
-      ...railCommentItems.map(commentLayoutTarget),
+      ...railCommentItems.map(commentVisualTarget),
       ...(
         (composerInCurrentTab || hasCollapsedCommentDraft) && draftTarget
           ? [
@@ -400,7 +394,7 @@ export const CommentRailContainer = memo(function CommentRailContainer({
     if (!commentLayoutReady) return [];
     return railCommentItems
       .flatMap((comment, index) => {
-        const target = commentLayoutTarget(comment);
+        const target = commentVisualTarget(comment);
         const targetTop = isExplicitGlobalCommentTarget(target)
           ? commentRailMinimumTop
           : commentRailTargetTops[target.id];
@@ -422,7 +416,7 @@ export const CommentRailContainer = memo(function CommentRailContainer({
   }, [commentLayoutReady, commentRailMinimumTop, commentRailTargetTops, railCommentItems]);
   const commentMeasurementKeys = useMemo(() => Object.fromEntries(
     sortedVisibleCommentItems.map((comment) => {
-      const target = commentLayoutTarget(comment);
+      const target = commentVisualTarget(comment);
       const layout = targetLayouts[target.id];
       const resolution = layout?.resolution ?? target.resolution;
       return [comment.commentId, commentMeasurementKey(comment.commentId, {
@@ -487,19 +481,19 @@ export const CommentRailContainer = memo(function CommentRailContainer({
       const measurementKey = commentMeasurementKeys[comment.commentId];
       return {
         key: comment.commentId,
-        targetTop: isExplicitGlobalCommentTarget(commentLayoutTarget(comment))
+        targetTop: isExplicitGlobalCommentTarget(commentVisualTarget(comment))
           ? commentRailMinimumTop
-          : commentRailTargetTops[commentLayoutTarget(comment).id],
+          : commentRailTargetTops[commentVisualTarget(comment).id],
         height: commentCardHeights[measurementKey]
           || 104
             + textLines * 19
             + imageRows * 78
             + fileCount * 48
-            + (!isLocatable(comment.target) && context.viewMode === "current" ? 70 : 0)
+            + (!isLocatable(comment.sourceAnchor) && context.viewMode === "current" ? 70 : 0)
             + (editingCommentId === comment.commentId ? 92 : 0)
             + (pendingDeleteCommentId === comment.commentId ? 46 : 0),
         order: index + 1,
-        scopeRank: isExplicitGlobalCommentTarget(commentLayoutTarget(comment)) ? 0 : 1,
+        scopeRank: isExplicitGlobalCommentTarget(commentVisualTarget(comment)) ? 0 : 1,
       };
     });
     const draftTargetTop = draftTarget && isExplicitGlobalCommentTarget(draftTarget)

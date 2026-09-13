@@ -8,9 +8,10 @@
         "^app/application/comment(?:-workflow|-session|-workflow-codecs)?",
         "^app/application/comment/",
         "^app/lib/runtime-comment-hint",
-        "^app/workbench/comment-(?:rail|canvas)",
+        "^app/workbench/comment-(?:rail|canvas|model|relink)",
         "^tests/comment-",
-        "^tests/runtime-comment-hint"
+        "^tests/runtime-comment-hint",
+        "^app/lib/target-resolver"
       ],
       "entryInterfaces": [
         "app/application/comment-workflow.d.ts",
@@ -28,6 +29,7 @@
         "app/application/comment-workflow.js",
         "app/application/comment-session.js",
         "app/application/comment/commit-plan.js",
+        "app/workbench/comment-model.ts",
         "app/lib/target-resolver.js",
         "app/lib/comment-text-locator.js",
         "app/lib/runtime-comment-hint.js",
@@ -39,13 +41,14 @@
       ],
       "focusedTests": [
         "tests/comment-workflow.test.mjs",
+        "tests/workspace-ingress.test.mjs",
         "tests/comment-commit-plan.test.mjs",
         "tests/comment-session.test.mjs",
         "tests/comment-canvas-port.test.mjs",
         "tests/comment-text-locator.test.mjs",
         "tests/runtime-comment-hint.test.mjs",
         "tests/canvas-target-rebind.test.mjs",
-        "tests/workbench-render-snapshot.test.mjs"
+        "tests/workspace-controller.test.mjs"
       ],
       "requiredDocs": [
         "docs/ARCHITECTURE_MAP.md",
@@ -95,7 +98,8 @@
       "focusedTests": [
         "tests/document-workflow.test.mjs",
         "tests/document-save-plan.test.mjs",
-        "tests/document-session.test.mjs"
+        "tests/document-session.test.mjs",
+        "tests/project-workflow.test.mjs"
       ],
       "requiredDocs": [
         "docs/ARCHITECTURE_MAP.md",
@@ -153,7 +157,6 @@
         "tests/project-workflow.test.mjs",
         "tests/project-plan.test.mjs",
         "tests/project-session.test.mjs",
-        "tests/workbench-render-snapshot.test.mjs",
         "tests/workspace-controller.test.mjs"
       ],
       "requiredDocs": [
@@ -182,12 +185,15 @@
         "^schemas/semantic-operation",
         "^tests/semantic-operation-kernel",
         "^tests/source-structure-edit",
-        "^tests/edit-pipeline-"
+        "^tests/edit-pipeline-",
+        "^app/components/html-canvas-source-commands",
+        "^tests/html-canvas-source-commands"
       ],
       "entryInterfaces": [
         "schemas/semantic-operation.v1.schema.json",
         "app/lib/source-structure-edit.d.ts",
-        "app/components/html-canvas-structure-commands.ts"
+        "app/components/html-canvas-structure-commands.ts",
+        "app/components/html-canvas-source-commands.d.ts"
       ],
       "owners": [
         "SemanticOperationKernel"
@@ -197,9 +203,11 @@
         "app/lib/source-structure-edit.js",
         "app/lib/source-patch-engine.js",
         "app/lib/source-index.js",
-        "app/components/html-canvas-structure-commands.ts"
+        "app/components/html-canvas-structure-commands.ts",
+        "app/components/html-canvas-source-commands.js"
       ],
       "focusedTests": [
+        "tests/html-canvas-source-commands.test.mjs",
         "tests/semantic-operation-kernel.test.mjs",
         "tests/source-structure-edit.test.mjs",
         "tests/source-patch-engine.test.mjs",
@@ -338,8 +346,13 @@
         "^app/workbench/AiReviewWorkspace",
         "^app/workbench/run-conversation-outlet",
         "^app/workbench/AiConversationSidebar",
+        "^bridge/conversation-repository\\.mjs$",
+        "^bridge/project-file-repository/submission\\.mjs$",
+        "^shared/conversation\\.mjs$",
         "^tests/run-",
-        "^tests/version-"
+        "^tests/version-",
+        "^app/workbench/review-(?:analysis|document)",
+        "^bridge/project-file-(?:finalizer|repository)\\.mjs$"
       ],
       "entryInterfaces": [
         "app/application/run-workflow.d.ts",
@@ -357,7 +370,8 @@
         "VersionSession",
         "VersionWorkflow",
         "WorkspaceController runs capability",
-        "RunConversationOutlet"
+        "RunConversationOutlet",
+        "ProjectFileRepository"
       ],
       "implementationFiles": [
         "app/application/run-workflow.js",
@@ -365,7 +379,14 @@
         "app/application/run/submit-plan.js",
         "app/application/version/review-plan.js",
         "app/workbench/run-conversation-outlet.tsx",
-        "app/workbench/AiConversationSidebar.tsx"
+        "app/workbench/AiConversationSidebar.tsx",
+        "app/workbench/review-analysis.ts",
+        "app/workbench/review-document.ts",
+        "bridge/project-file-finalizer.mjs",
+        "bridge/project-file-repository.mjs",
+        "bridge/conversation-repository.mjs",
+        "bridge/project-file-repository/submission.mjs",
+        "shared/conversation.mjs"
       ],
       "focusedTests": [
         "tests/run-workflow.test.mjs",
@@ -373,13 +394,22 @@
         "tests/run-submit-plan.test.mjs",
         "tests/version-review-plan.test.mjs",
         "tests/ai-conversation-sidebar.test.mjs",
-        "tests/workbench-render-snapshot.test.mjs",
-        "tests/workspace-controller.test.mjs"
+        "tests/submission-noop-write.test.mjs",
+        "tests/conversation-repository.test.mjs",
+        "tests/workspace-controller.test.mjs",
+        "tests/project-file-finalizer.test.mjs",
+        "tests/project-file-bridge.test.mjs",
+        "tests/project-candidate-promotion.test.mjs",
+        "tests/submission-receipt.test.mjs"
       ],
       "requiredDocs": [
         "docs/ARCHITECTURE_MAP.md",
         "docs/CHANGE_REQUEST_PROTOCOL.md",
-        "docs/INTERACTION_FLOW.md"
+        "docs/INTERACTION_FLOW.md",
+        "docs/VERSION_AND_PROJECT_FILES_PRD.md",
+        "docs/ARCHITECTURE_CONTRACT.md",
+        "docs/STATE_OWNERSHIP.md",
+        "docs/SECURITY_MODEL.md"
       ],
       "requiredDocSections": [
         {
@@ -388,6 +418,15 @@
             "## 7. 发给 AI 与交接",
             "## 8. 内部 AI 处理与完成",
             "## 9. 新 Version 提交与打开"
+          ]
+        },
+        {
+          "path": "docs/VERSION_AND_PROJECT_FILES_PRD.md",
+          "headings": [
+            "### 10.2 候选身份",
+            "### 10.3 用户审阅",
+            "### 10.4 采纳候选",
+            "### 14.3 候选和采纳失败"
           ]
         }
       ]
@@ -440,6 +479,7 @@
       "id": "agent-runtime",
       "patterns": [
         "^bridge/agent/",
+        "^shared/agent-input-policy\\.mjs$",
         "^desktop/ipc/agent-ipc",
         "^tests/agent-"
       ],
@@ -449,16 +489,24 @@
       ],
       "owners": [
         "AgentRuntimeCoordinator",
-        "ACP runtime"
+        "ACP runtime",
+        "HTTP runtime"
       ],
       "implementationFiles": [
         "bridge/agent/agent-runtime-coordinator.mjs",
+        "shared/agent-input-policy.mjs",
+        "app/application/run-workflow.js",
+        "bridge/agent/runtimes/http-runtime.mjs",
+        "bridge/agent/providers/openai-compatible-provider.mjs",
         "bridge/agent/runtimes/acp-runtime.mjs",
         "bridge/agent/hosts/execution-host.mjs",
         "desktop/ipc/agent-ipc.mjs"
       ],
       "focusedTests": [
         "tests/agent-runtime-coordinator.test.mjs",
+        "tests/agent-input-policy.test.mjs",
+        "tests/openai-compatible-agent.test.mjs",
+        "tests/run-workflow.test.mjs",
         "tests/agent-provider-contract.test.mjs",
         "tests/agent-bridge-service.test.mjs",
         "tests/agent-bridge-workspace.test.mjs"

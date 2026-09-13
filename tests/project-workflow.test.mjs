@@ -18,6 +18,7 @@ import {
   projectAppliedEventToWorkbenchTabs,
 } from "../app/application/workbench-tabs-session.js";
 import { stopBridgeOrNotifyCloseAborted } from "../desktop/close-recovery.mjs";
+import { createExternalFileOpenMailbox } from "../desktop/external-file-open.mjs";
 
 const OLD_PATH = "/tmp/project-workflow-old.html";
 const RENAMED_PATH = "/tmp/project-workflow-renamed.html";
@@ -154,6 +155,16 @@ async function waitFor(predicate, message = "condition did not settle") {
   throw new Error(message);
 }
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((nextResolve, nextReject) => {
+    resolve = nextResolve;
+    reject = nextReject;
+  });
+  return { promise, resolve, reject };
+}
+
 function createHarness({
   getCatalogRevision,
   bridge = {},
@@ -166,6 +177,8 @@ function createHarness({
   documentWorkflowFactory = null,
   initialProject = true,
   openTarget = null,
+  publication = null,
+  sameSourcePath = (left, right) => Boolean(left && right && left === right),
 } = {}) {
   const projectSession = new ProjectSession();
   const locator = initialProject ? projectSession.openLocator(OLD_PATH) : null;
@@ -343,6 +356,40 @@ function createHarness({
     requestFrame: (callback) => callback(),
     ...canvas,
   };
+  // Project tests fake persistence, but leave decisions execute the real owner.
+  const boundaryOwner = new DocumentWorkflow({
+    bridgeClient: { autosave: async () => ({}), resolveConflict: async () => ({}), ...client },
+    ensureRegistered: async () => succeeded(projectSession.context),
+    projectSession, documentSession, commentSession, versionSession,
+    sourceHistorySession: new SourceHistorySession(),
+    codecs: {
+      isRecord, sameSourcePath: (left, right) => left === right,
+      persistedChangeEvent: (value) => value,
+      recoveryIdentityFromRecord: (value) => value,
+      sourceHistoryOperationsFromRecord: (value) => value,
+      changesFromRecords: (value) => value,
+      historyTextSelectionFromRecord: (value) => value,
+      selectionFromRecord: (value) => value,
+      rebindTargetsPreservingGlobal: (_html, targets) => targets,
+      rebindTargetsAcrossHistoryPreservingGlobal: (_before, _after, targets) => targets,
+      canLocateTarget: () => true,
+      appendDirectEditEvent: (value) => value,
+      auditEventKey: (value) => value,
+      removeAcknowledgedAuditEvents: (value) => value,
+      errorMessage: (cause, fallback) => cause?.message || fallback,
+    },
+    ports: { hash: { sha256: async (html) => sha256(html) }, canvas: canvasPort },
+    clock: { now: Date.now },
+  });
+  Object.defineProperty(boundaryOwner, "hasHistoryAction", {
+    get: () => defaultDocumentWorkflow.hasHistoryAction,
+  });
+  boundaryOwner.verifiedProtectionEvidence = (input) => (
+    defaultDocumentWorkflow.verifiedProtectionEvidence?.(input) || null
+  );
+  for (const name of ["inspectLeaveReadiness", "captureLeaveBoundary", "verifyLeaveBoundary"]) {
+    defaultDocumentWorkflow[name] ??= boundaryOwner[name].bind(boundaryOwner);
+  }
   const documentWorkflow = typeof documentWorkflowFactory === "function"
     ? documentWorkflowFactory({
         client,
@@ -394,6 +441,7 @@ function createHarness({
     recoverDraft({ serverComments, serverEvents }) {
       return {
         comments: serverComments,
+        deletedCommentIds: [],
         changeEvents: serverEvents,
         composerDraft: "",
         composerCommentId: null,
@@ -402,6 +450,16 @@ function createHarness({
         commentEdit: null,
       };
     },
+  };
+  const projectRulesWorkflow = {
+    drainCount: 0,
+    resetForProjectTransition() {},
+    inspect: () => ({ state: "resolved" }),
+    async drain() {
+      this.drainCount += 1;
+      return true;
+    },
+    ...rulesWorkflow,
   };
   const workflow = new ProjectWorkflow({
     getCatalogRevision,
@@ -414,23 +472,14 @@ function createHarness({
     versionSession,
     commentWorkflow,
     runSession,
-    projectRulesWorkflow: {
-      drainCount: 0,
-      resetForProjectTransition() {},
-      inspect: () => ({ state: "resolved" }),
-      async drain() {
-        this.drainCount += 1;
-        return true;
-      },
-      ...rulesWorkflow,
-    },
+    projectRulesWorkflow,
     externalFileOpenSession: new ExternalFileOpenSession(),
     projectApplicationSession: new ProjectApplicationSession(),
     documentWorkflow,
     drainCoordinator: new DrainCoordinator(),
     codecs: {
       isRecord,
-      sameSourcePath: (left, right) => Boolean(left && right && left === right),
+      sameSourcePath,
       versionsFromWorkspace: (payload) => Array.isArray(payload.versions)
         ? payload.versions
         : [],
@@ -455,6 +504,7 @@ function createHarness({
       projectOpen: openPort,
       viewState,
       recentRuns,
+      ...(publication ? { publication } : {}),
       ...(navigation ? { navigation } : {}),
     },
     policies: {
@@ -508,6 +558,7 @@ function createHarness({
     runSession,
     documentWorkflow,
     commentWorkflow,
+    projectRulesWorkflow,
     canvasPort,
     oldContext,
     get unlockCount() {
@@ -1142,6 +1193,347 @@ test("production split workspace commits Core without a second source read and f
   assert.ok(harness.events.some((event) => event.type === "project-hydrated"));
 });
 
+test("hydration publishes the final server revision in one authority receipt", async (t) => {
+  const serverRevision = 7;
+  const harness = createHarness({
+    bridge: {
+      async workspace(sourcePath) {
+        return {
+          ...workspacePayload(sourcePath, OLD_HTML),
+          runtimeState: {
+            editRevision: serverRevision,
+            lastPersistedRevision: serverRevision,
+            draft: draftAuthority(),
+          },
+        };
+      },
+    },
+  });
+  t.after(() => harness.workflow.dispose());
+  const oldReceipt = harness.documentSession.sourceReceipt;
+
+  const outcome = await harness.workflow.refreshWorkspace({
+    sourcePath: OLD_PATH,
+    epoch: harness.projectSession.epoch,
+  });
+
+  assert.equal(outcome.status, "succeeded", JSON.stringify(outcome));
+  assert.equal(harness.documentSession.html, OLD_HTML);
+  assert.equal(harness.documentSession.editRevision, serverRevision);
+  assert.equal(harness.documentSession.lastPersistedRevision, serverRevision);
+  assert.equal(
+    harness.documentSession.sourceReceipt.editRevision,
+    harness.documentSession.editRevision,
+  );
+  assert.equal(harness.documentSession.sourceReceipt.editRevision, serverRevision);
+  assert.equal(harness.documentSession.sourceReceipt.origin, "authority");
+  assert.notEqual(harness.documentSession.sourceReceipt.sequence, oldReceipt.sequence);
+  assert.equal(harness.documentSession.confirmCanvas({
+    generation: harness.documentSession.canvasGeneration,
+    renderedSha256: sha256(OLD_HTML),
+    workingHtmlSha256: sha256(OLD_HTML),
+    renderedHtml: OLD_HTML,
+    receipt: oldReceipt,
+  }), false);
+});
+
+test("a reload continuation rehydrates supplemental state without a second authority receipt", async (t) => {
+  const harness = createHarness({
+    openTarget: {
+      ...managedOpenTarget(`/private${OLD_PATH}`),
+      projectRootPath: "/private/var/project-root",
+    },
+    sameSourcePath: (left, right) => {
+      const normalize = (value) => String(value || "").replace(
+        /^\/private(?=\/(?:tmp|var)(?:\/|$))/u,
+        "",
+      );
+      return Boolean(left && right && normalize(left) === normalize(right));
+    },
+    bridge: {
+      async workspace(sourcePath) {
+        return {
+          ...workspacePayload(sourcePath, OLD_HTML),
+          projectId: "project_old",
+          documentId: "document_old",
+          openTarget: {
+            ...managedOpenTarget(sourcePath),
+            projectRootPath: "/var/project-root",
+          },
+        };
+      },
+    },
+  });
+  t.after(() => harness.workflow.dispose());
+  const authorityReceipt = harness.documentSession.publishAuthority({
+    html: OLD_HTML,
+    persistedSourceSha256: sha256(OLD_HTML),
+    workingHtmlSha256: sha256(OLD_HTML),
+    editRevision: harness.documentSession.editRevision,
+    lastPersistedRevision: harness.documentSession.lastPersistedRevision,
+    context: harness.oldContext,
+    operationId: "authority-reload-continuation",
+  }).sourceReceipt;
+  assert.equal(harness.documentSession.confirmCanvas({
+    generation: authorityReceipt.canvasGeneration,
+    renderedSha256: sha256(OLD_HTML),
+    workingHtmlSha256: sha256(OLD_HTML),
+    renderedHtml: OLD_HTML,
+    receipt: authorityReceipt,
+  }), true);
+  const beforeSequence = authorityReceipt.sequence;
+  const beforeGeneration = authorityReceipt.canvasGeneration;
+
+  const outcome = await harness.workflow.refreshWorkspace({
+    sourcePath: OLD_PATH,
+    epoch: harness.projectSession.epoch,
+    authorityReceiptContinuation: authorityReceipt,
+  });
+
+  assert.equal(outcome.status, "succeeded", JSON.stringify(outcome));
+  assert.equal(harness.documentSession.sourceReceipt, authorityReceipt);
+  assert.equal(harness.documentSession.sourceReceipt.sequence, beforeSequence);
+  assert.equal(harness.documentSession.canvasGeneration, beforeGeneration);
+  assert.equal(harness.documentSession.canvasAuthority.status, "verified");
+});
+
+test("a reload continuation with no managed OpenTarget publishes a fresh authority receipt", async (t) => {
+  const harness = createHarness({
+    bridge: {
+      async workspace(sourcePath) {
+        return {
+          ...workspacePayload(sourcePath, OLD_HTML),
+          projectId: "project_old",
+          documentId: "document_old",
+        };
+      },
+    },
+  });
+  t.after(() => harness.workflow.dispose());
+  const authorityReceipt = harness.documentSession.publishAuthority({
+    html: OLD_HTML,
+    persistedSourceSha256: sha256(OLD_HTML),
+    workingHtmlSha256: sha256(OLD_HTML),
+    context: harness.oldContext,
+    operationId: "authority-reload-incomplete-target",
+  }).sourceReceipt;
+  assert.equal(harness.documentSession.confirmCanvas({
+    generation: authorityReceipt.canvasGeneration,
+    renderedSha256: sha256(OLD_HTML),
+    workingHtmlSha256: sha256(OLD_HTML),
+    renderedHtml: OLD_HTML,
+    receipt: authorityReceipt,
+  }), true);
+
+  const outcome = await harness.workflow.refreshWorkspace({
+    sourcePath: OLD_PATH,
+    epoch: harness.projectSession.epoch,
+    authorityReceiptContinuation: authorityReceipt,
+  });
+
+  assert.equal(outcome.status, "succeeded", JSON.stringify(outcome));
+  assert.notEqual(harness.documentSession.sourceReceipt.sequence, authorityReceipt.sequence);
+  assert.equal(harness.documentSession.sourceReceipt.origin, "authority");
+});
+
+test("a reload continuation rejects stale receipt tuple mutations", async () => {
+  const mutations = [
+    ["source hash", (receipt) => ({
+      ...receipt,
+      sourceSha256: sha256(A_HTML),
+    })],
+    ["real path", (receipt) => ({
+      ...receipt,
+      context: {
+        ...receipt.context,
+        exactSourcePath: "/tmp/project-workflow-other.html",
+      },
+    })],
+    ["project identity", (receipt) => ({
+      ...receipt,
+      context: {
+        ...receipt.context,
+        projectId: "project_other",
+      },
+    })],
+    ["document identity", (receipt) => ({
+      ...receipt,
+      context: {
+        ...receipt.context,
+        documentId: "document_other",
+      },
+    })],
+    ["project root missing", (receipt) => ({
+      ...receipt,
+      context: Object.fromEntries(
+        Object.entries(receipt.context).filter(([key]) => key !== "projectRootPath"),
+      ),
+    })],
+    ["project root changed", (receipt) => ({
+      ...receipt,
+      context: {
+        ...receipt.context,
+        projectRootPath: "/tmp/project-workflow-other-root",
+      },
+    })],
+    ["target kind missing", (receipt) => ({
+      ...receipt,
+      context: Object.fromEntries(
+        Object.entries(receipt.context).filter(([key]) => key !== "targetKind"),
+      ),
+    })],
+    ["target kind changed", (receipt) => ({
+      ...receipt,
+      context: {
+        ...receipt.context,
+        targetKind: "version",
+      },
+    })],
+    ["version target missing version", (receipt) => ({
+      ...receipt,
+      context: Object.fromEntries(
+        Object.entries({
+          ...receipt.context,
+          targetKind: "version",
+        }).filter(([key]) => key !== "versionId"),
+      ),
+    })],
+    ["working copy missing", (receipt) => ({
+      ...receipt,
+      context: Object.fromEntries(
+        Object.entries(receipt.context).filter(([key]) => key !== "workingCopyId"),
+      ),
+    })],
+    ["working copy changed", (receipt) => ({
+      ...receipt,
+      context: {
+        ...receipt.context,
+        workingCopyId: "work_other",
+      },
+    })],
+    ["version changed", (receipt) => ({
+      ...receipt,
+      context: {
+        ...receipt.context,
+        versionId: "version_other",
+      },
+    })],
+    ["exact path missing", (receipt) => ({
+      ...receipt,
+      context: Object.fromEntries(
+        Object.entries(receipt.context).filter(([key]) => key !== "exactSourcePath"),
+      ),
+    })],
+    ["source hash missing", (receipt) => ({
+      ...receipt,
+      context: Object.fromEntries(
+        Object.entries(receipt.context).filter(([key]) => key !== "sourceSha256"),
+      ),
+    })],
+    ["session epoch missing", (receipt) => ({
+      ...receipt,
+      context: Object.fromEntries(
+        Object.entries(receipt.context).filter(([key]) => key !== "sessionEpoch"),
+      ),
+    })],
+    ["session epoch changed", (receipt) => ({
+      ...receipt,
+      context: {
+        ...receipt.context,
+        sessionEpoch: receipt.context.sessionEpoch + 1,
+      },
+    })],
+  ];
+  for (const [label, mutate] of mutations) {
+    const harness = createHarness({
+      openTarget: managedOpenTarget(OLD_PATH),
+      bridge: {
+        async workspace(sourcePath) {
+          return {
+            ...workspacePayload(sourcePath, OLD_HTML),
+            projectId: "project_old",
+            documentId: "document_old",
+          };
+        },
+      },
+    });
+    const authorityReceipt = harness.documentSession.publishAuthority({
+      html: OLD_HTML,
+      persistedSourceSha256: sha256(OLD_HTML),
+      workingHtmlSha256: sha256(OLD_HTML),
+      context: harness.oldContext,
+      operationId: `authority-reload-${label}`,
+    }).sourceReceipt;
+    assert.equal(harness.documentSession.confirmCanvas({
+      generation: authorityReceipt.canvasGeneration,
+      renderedSha256: sha256(OLD_HTML),
+      workingHtmlSha256: sha256(OLD_HTML),
+      renderedHtml: OLD_HTML,
+      receipt: authorityReceipt,
+    }), true);
+    const beforeGeneration = authorityReceipt.canvasGeneration;
+
+    const outcome = await harness.workflow.refreshWorkspace({
+      sourcePath: OLD_PATH,
+      epoch: harness.projectSession.epoch,
+      authorityReceiptContinuation: mutate(authorityReceipt),
+    });
+
+    assert.equal(outcome.status, "succeeded", `${label}: ${JSON.stringify(outcome)}`);
+    assert.notEqual(
+      harness.documentSession.sourceReceipt.sequence,
+      authorityReceipt.sequence,
+      `${label} continuation must publish a fresh authority receipt`,
+    );
+    assert.ok(
+      harness.documentSession.canvasGeneration > beforeGeneration,
+      `${label} continuation must advance Canvas generation`,
+    );
+    harness.workflow.dispose();
+  }
+});
+
+test("a reload continuation with a changed managed identity publishes a new authority receipt", async (t) => {
+  const harness = createHarness({
+    bridge: {
+      async workspace(sourcePath) {
+        return {
+          ...workspacePayload(sourcePath, OLD_HTML),
+          projectId: "project_rebound",
+          documentId: "document_rebound",
+        };
+      },
+    },
+  });
+  t.after(() => harness.workflow.dispose());
+  const authorityReceipt = harness.documentSession.publishAuthority({
+    html: OLD_HTML,
+    persistedSourceSha256: sha256(OLD_HTML),
+    workingHtmlSha256: sha256(OLD_HTML),
+    context: harness.oldContext,
+    operationId: "authority-reload-identity-mismatch",
+  }).sourceReceipt;
+  assert.equal(harness.documentSession.confirmCanvas({
+    generation: authorityReceipt.canvasGeneration,
+    renderedSha256: sha256(OLD_HTML),
+    workingHtmlSha256: sha256(OLD_HTML),
+    renderedHtml: OLD_HTML,
+    receipt: authorityReceipt,
+  }), true);
+
+  const outcome = await harness.workflow.refreshWorkspace({
+    sourcePath: OLD_PATH,
+    epoch: harness.projectSession.epoch,
+    authorityReceiptContinuation: authorityReceipt,
+  });
+
+  assert.equal(outcome.status, "succeeded", JSON.stringify(outcome));
+  assert.notEqual(harness.documentSession.sourceReceipt.sequence, authorityReceipt.sequence);
+  assert.equal(harness.documentSession.sourceReceipt.origin, "authority");
+  assert.equal(harness.documentSession.sourceReceipt.projectId, "project_rebound");
+  assert.equal(harness.documentSession.canvasGeneration, authorityReceipt.canvasGeneration + 1);
+});
+
 test("Supplemental failure never rolls back committed Core HTML", async (t) => {
   const harness = createHarness({
     bridge: {
@@ -1541,6 +1933,7 @@ test("a v4 Working Copy transition uses the exact managed desktop activation", a
       async activateManagedWorkingCopy(input) {
         calls.push(input);
         return {
+          operationId: input.operationId,
           sourcePath: B_PATH,
           sha256: sha256(B_HTML),
           html: B_HTML,
@@ -1561,6 +1954,7 @@ test("a v4 Working Copy transition uses the exact managed desktop activation", a
     nextDocumentId: "document_old",
     versionId: "ver_0002",
     openTarget: managedTarget,
+    operationId: "generated_transition_001",
   });
 
   assert.equal(prepared.updatesCurrentProject, true);
@@ -1574,7 +1968,78 @@ test("a v4 Working Copy transition uses the exact managed desktop activation", a
     workingCopyId: "work_ver_0002",
     versionId: "ver_0002",
     projectRootPath: "/tmp/PageRoot/项目/managed",
+    operationId: "generated_transition_001",
   }]);
+});
+
+test("managed desktop activation preserves a definite rejection", async (t) => {
+  const rejection = Object.freeze({
+    code: "MANAGED_WORKING_COPY_OPEN_FAILED",
+    message: "新版本文件暂时无法打开。",
+  });
+  const harness = createHarness({
+    projectOpen: {
+      async activateManagedWorkingCopy() {
+        throw rejection;
+      },
+    },
+  });
+  t.after(() => harness.workflow.dispose());
+
+  await assert.rejects(
+    () => harness.workflow.prepareManagedSourceTransition({
+      previousSourcePath: OLD_PATH,
+      nextSourcePath: B_PATH,
+      expectedSha256: sha256(B_HTML),
+      nextProjectId: "project_old",
+      nextDocumentId: "document_old",
+      versionId: "ver_0002",
+      openTarget: {
+        ...managedOpenTarget(B_PATH),
+        workingCopyId: "work_ver_0002",
+        versionId: "ver_0002",
+        sourceSha256: sha256(B_HTML),
+      },
+      operationId: "generated_transition_rejected_001",
+    }),
+    (cause) => cause === rejection,
+  );
+});
+
+test("managed desktop activation classifies a lost transport result as unknown", async (t) => {
+  const harness = createHarness({
+    projectOpen: {
+      async activateManagedWorkingCopy() {
+        throw Object.assign(new Error("response lost"), {
+          code: "PROJECT_SERVICE_UNAVAILABLE",
+        });
+      },
+    },
+  });
+  t.after(() => harness.workflow.dispose());
+
+  await assert.rejects(
+    () => harness.workflow.prepareManagedSourceTransition({
+      previousSourcePath: OLD_PATH,
+      nextSourcePath: B_PATH,
+      expectedSha256: sha256(B_HTML),
+      nextProjectId: "project_old",
+      nextDocumentId: "document_old",
+      versionId: "ver_0002",
+      openTarget: {
+        ...managedOpenTarget(B_PATH),
+        workingCopyId: "work_ver_0002",
+        versionId: "ver_0002",
+        sourceSha256: sha256(B_HTML),
+      },
+      operationId: "generated_transition_unknown_001",
+    }),
+    (cause) => (
+      cause?.code === "SOURCE_LOCATOR_RECONCILE_UNKNOWN"
+      && cause?.projectOutcome === "unknown"
+      && cause?.operationId === "generated_transition_unknown_001"
+    ),
+  );
 });
 
 test("v4 exposes no relocation workflow that can retarget a moved project", (t) => {
@@ -1582,6 +2047,112 @@ test("v4 exposes no relocation workflow that can retarget a moved project", (t) 
   t.after(() => harness.workflow.dispose());
   assert.equal("relocateCurrentProject" in harness.workflow, false);
   assert.equal("rebindRelocatedOpenTarget" in harness.documentWorkflow, false);
+});
+
+test("generated compatibility requires an explicit Version OpenTarget route", async (t) => {
+  const generatedCalls = [];
+  const harness = createHarness({
+    projectOpen: {
+      async activateGeneratedVersion(input) {
+        generatedCalls.push(input);
+        return {
+          operationId: input.operationId,
+          sourcePath: B_PATH,
+          sha256: sha256(B_HTML),
+          html: B_HTML,
+        };
+      },
+    },
+  });
+  t.after(() => harness.workflow.dispose());
+  await assert.rejects(
+    () => harness.workflow.prepareManagedSourceTransition({
+      previousSourcePath: OLD_PATH,
+      nextSourcePath: B_PATH,
+      expectedSha256: sha256(B_HTML),
+      nextProjectId: "project_old",
+      nextDocumentId: "document_old",
+      versionId: "ver_0002",
+      openTarget: null,
+      operationId: "generated_route_missing_001",
+    }),
+  );
+  assert.equal(generatedCalls.length, 0);
+
+  const explicitVersionTarget = {
+    projectId: "project_old",
+    documentId: "document_old",
+    projectRootPath: "/tmp/project-root",
+    targetKind: "version",
+    versionId: "ver_0002",
+    exactSourcePath: B_PATH,
+    sourceSha256: sha256(B_HTML),
+  };
+  const prepared = await harness.workflow.prepareManagedSourceTransition({
+    previousSourcePath: OLD_PATH,
+    nextSourcePath: B_PATH,
+    expectedSha256: sha256(B_HTML),
+    nextProjectId: "project_old",
+    nextDocumentId: "document_old",
+    versionId: "ver_0002",
+    openTarget: explicitVersionTarget,
+    operationId: "generated_route_explicit_001",
+  });
+  assert.equal(generatedCalls.length, 1);
+  assert.equal(prepared.activatedProject?.operationId, "generated_route_explicit_001");
+});
+
+test("same-path Version preparation rejects missing or mismatched OpenTarget before publication", async (t) => {
+  const desktopCalls = [];
+  const harness = createHarness({
+    projectOpen: {
+      async activateManagedWorkingCopy(input) {
+        desktopCalls.push(input);
+        return { operationId: input.operationId, sourcePath: OLD_PATH, sha256: sha256(OLD_HTML), html: OLD_HTML };
+      },
+      async activateGeneratedVersion(input) {
+        desktopCalls.push(input);
+        return { operationId: input.operationId, sourcePath: OLD_PATH, sha256: sha256(OLD_HTML), html: OLD_HTML };
+      },
+    },
+  });
+  t.after(() => harness.workflow.dispose());
+  const beforeProject = harness.projectSession.context;
+  const beforeDocument = harness.documentSession.snapshot;
+  const beforeVersion = harness.versionSession.snapshot;
+  const beforeComments = harness.commentSession.snapshot;
+  const input = {
+    previousSourcePath: OLD_PATH,
+    nextSourcePath: OLD_PATH,
+    expectedSha256: sha256(OLD_HTML),
+    nextProjectId: "project_old",
+    nextDocumentId: "document_old",
+    versionId: "ver_0001",
+    operationId: "same_path_target_fence_001",
+  };
+  await assert.rejects(
+    () => harness.workflow.prepareManagedSourceTransition({ ...input, openTarget: null }),
+  );
+  await assert.rejects(
+    () => harness.workflow.prepareManagedSourceTransition({
+      ...input,
+      expectedSha256: "",
+      operationId: "same_path_target_fence_003",
+      openTarget: managedOpenTarget(OLD_PATH),
+    }),
+  );
+  await assert.rejects(
+    () => harness.workflow.prepareManagedSourceTransition({
+      ...input,
+      operationId: "same_path_target_fence_002",
+      openTarget: { ...managedOpenTarget(OLD_PATH), documentId: "document_other" },
+    }),
+  );
+  assert.equal(desktopCalls.length, 0);
+  assert.deepEqual(harness.projectSession.context, beforeProject);
+  assert.deepEqual(harness.documentSession.snapshot, beforeDocument);
+  assert.deepEqual(harness.versionSession.snapshot, beforeVersion);
+  assert.deepEqual(harness.commentSession.snapshot, beforeComments);
 });
 
 test("project application requires the synchronous navigation receipt before presentation", async (t) => {
@@ -2205,7 +2776,7 @@ test("confirmed external open retries only its failed ack and never commits twic
       },
       async ackExternal(requestId) {
         ackCount += 1;
-        if (ackCount <= 2) throw new Error("ack unavailable");
+        if (ackCount <= 4) throw new Error("ack unavailable");
         return { acknowledged: true, requestId };
       },
     },
@@ -2215,20 +2786,148 @@ test("confirmed external open retries only its failed ack and never commits twic
     requestId: "external_confirm_ack",
     sourcePath: A_PATH,
   });
-  await waitFor(() => harness.workflow.getSnapshot().openConfirmation?.requestId === "external_confirm_ack");
-  const first = await harness.workflow.confirmExternalOpen({
-    requestId: "external_confirm_ack",
-    action: "import-new",
-  });
-  assert.equal(first.code, "EXTERNAL_OPEN_ACK_REJECTED");
+  await waitFor(() => harness.events.some((event) => (
+    event.type === "project-open-prepared-settled" && event.outcome.code === "EXTERNAL_OPEN_ACK_REJECTED"
+  )));
   assert.equal(commitCount, 1);
   assert.equal(harness.workflow.getSnapshot().externalOpen.status, "awaiting-confirmation");
+  const committedEpoch = harness.projectSession.epoch;
+  assert.equal(await harness.workflow.retryExternalOpen({
+    requestId: "external_confirm_ack",
+  }), null);
+  assert.equal(commitCount, 1);
+  assert.equal(harness.projectSession.epoch, committedEpoch);
+  assert.equal(harness.workflow.getSnapshot().openConfirmation.requestId, "external_confirm_ack");
+  assert.equal(harness.events.filter((event) => (
+    event.type === "external-open-ack-failed"
+    && event.requestId === "external_confirm_ack"
+    && event.confirmation === true
+  )).length, 2);
   const retried = await harness.workflow.retryExternalOpen({ requestId: "external_confirm_ack" });
   assert.equal(retried.status, "succeeded");
+  assert.equal(retried.value.acknowledged, true);
   assert.equal(commitCount, 1);
-  assert.equal(ackCount, 3);
+  assert.equal(harness.projectSession.epoch, committedEpoch);
+  assert.equal(ackCount, 5);
   assert.equal(harness.workflow.getSnapshot().externalOpen.status, "idle");
   assert.equal(harness.workflow.getSnapshot().openConfirmation, null);
+});
+
+test("structured reclassification DTO automatically converges the same prepared request", async (t) => {
+  const requestId = "external_reclassify_source";
+  const commits = [];
+  const reclassifiedConfirmation = {
+    openKind: "confirmation",
+    requestId,
+    classification: "known-external",
+    sourceFileName: "known.html",
+    projectName: "Known project",
+    sourcePath: "/private/should-not-be-used.html",
+    nested: { secret: "should-not-be-used" },
+  };
+  const harness = createHarness({
+    initialProject: false,
+    projectOpen: {
+      async acceptExternal() {
+        return {
+          openKind: "confirmation",
+          requestId,
+          classification: "new-external",
+          sourceFileName: "incoming.html",
+          visibleV1FileName: "incoming-V1.html",
+          projectsRootLabel: "文稿 › PageRoot › 项目",
+        };
+      },
+      async commitPrepared(input) {
+        commits.push(input);
+        if (commits.length === 1) {
+          throw {
+            code: "OPEN_INTENT_RECLASSIFIED",
+            message: "这个文件之前已经导入过了，请确认后打开之前的项目。",
+            details: {
+              confirmation: reclassifiedConfirmation,
+              unknownNested: { channel: "html-projects:open" },
+            },
+          };
+        }
+        return { name: "A", sourcePath: A_PATH, html: A_HTML, sha256: sha256(A_HTML) };
+      },
+      async finalizePrepared() {
+        return { disposition: "kept" };
+      },
+    },
+  });
+  t.after(() => harness.workflow.dispose());
+
+  harness.workflow.acceptExternalProject({ requestId, sourcePath: A_PATH });
+  await waitFor(() => (
+    harness.events.some((event) => event.type === "project-open-prepared-settled")
+  ));
+  await waitFor(() => harness.workflow.getSnapshot().externalOpen.status === "idle");
+
+  assert.deepEqual(commits, [
+    { requestId, action: "import-new" },
+    { requestId, action: "continue-current" },
+  ]);
+  assert.equal(harness.projectSession.sourcePath, A_PATH);
+  assert.equal(harness.workflow.getSnapshot().openConfirmation, null);
+  assert.equal(
+    harness.events.filter((event) => event.type === "external-open-reclassified").length,
+    1,
+  );
+});
+
+test("structured reclassification DTO with invalid identity cannot replace the prepared request", async (t) => {
+  const requestId = "external_reclassify_invalid";
+  let commits = 0;
+  const harness = createHarness({
+    initialProject: false,
+    projectOpen: {
+      async acceptExternal() {
+        return {
+          openKind: "confirmation",
+          requestId,
+          classification: "new-external",
+          sourceFileName: "incoming.html",
+          visibleV1FileName: "incoming-V1.html",
+          projectsRootLabel: "文稿 › PageRoot › 项目",
+        };
+      },
+      async commitPrepared() {
+        commits += 1;
+        throw {
+          code: "OPEN_INTENT_RECLASSIFIED",
+          message: "reclassification",
+          details: {
+            confirmation: {
+              requestId: "",
+              classification: "known-external",
+              projectName: "invalid",
+            },
+          },
+        };
+      },
+    },
+  });
+  t.after(() => harness.workflow.dispose());
+
+  harness.workflow.acceptExternalProject({ requestId, sourcePath: A_PATH });
+  await waitFor(() => (
+    harness.events.some((event) => event.type === "project-open-prepared-settled")
+  ));
+  await waitFor(() => harness.workflow.getSnapshot().externalOpen.status === "idle");
+
+  const settled = harness.events.find((event) => (
+    event.type === "project-open-prepared-settled" && event.requestId === requestId
+  ));
+  assert.equal(settled.outcome.code, "OPEN_INTENT_RECLASSIFIED");
+  assert.equal(commits, 1);
+  assert.equal(harness.projectSession.sourcePath, null);
+  assert.equal(harness.workflow.getSnapshot().openConfirmation, null);
+  assert.equal(
+    harness.events.some((event) => event.type === "external-open-reclassified"),
+    false,
+  );
 });
 
 test("a single external ack rejection recovers without remaining deferred", async (t) => {
@@ -2618,8 +3317,15 @@ test("source rename is a typed ProjectWorkflow transition with one synchronous S
 test("title-bar rename keeps the managed OpenTarget so a later Finder rename can rebind", async (t) => {
   const finderPath = "/tmp/project-workflow-finder.html";
   const reconcileCalls = [];
+  let renameOperationId = "";
+  let canvasInvalidations = 0;
   const harness = createHarness({
     openTarget: managedOpenTarget(OLD_PATH),
+    canvas: {
+      invalidateRenderAcks() {
+        canvasInvalidations += 1;
+      },
+    },
     bridge: {
       async workspace(sourcePath) {
         const nextPath = sourcePath === finderPath
@@ -2638,6 +3344,7 @@ test("title-bar rename keeps the managed OpenTarget so a later Finder rename can
     },
     projectOpen: {
       async renameSource(payload) {
+        renameOperationId = payload.operationId;
         return {
           operationId: payload.operationId,
           previousSourcePath: payload.sourcePath,
@@ -2666,12 +3373,47 @@ test("title-bar rename keeps the managed OpenTarget so a later Finder rename can
     },
   });
   t.after(() => harness.workflow.dispose());
+  harness.documentSession.publishAuthority({
+    html: OLD_HTML,
+    persistedSourceSha256: sha256(OLD_HTML),
+    workingHtmlSha256: sha256(OLD_HTML),
+    context: harness.projectSession.context,
+    operationId: "test-initial-managed-authority",
+  });
+  const initialReceipt = harness.documentSession.sourceReceipt;
+  const initialGeneration = harness.documentSession.canvasGeneration;
+  const documentBefore = harness.documentSession.snapshot;
 
   const renamed = await harness.workflow.renameSource({ stem: "project-workflow-renamed" });
   assert.equal(renamed.status, "succeeded");
   assert.equal(harness.projectSession.context?.sourcePath, RENAMED_PATH);
   assert.equal(harness.projectSession.openTarget?.exactSourcePath, RENAMED_PATH);
   assert.equal(harness.projectSession.openTarget?.workingCopyId, "work_ver_0001");
+  const renamedReceipt = harness.documentSession.sourceReceipt;
+  assert.equal(harness.documentSession.canvasGeneration, initialGeneration + 1);
+  assert.ok(renamedReceipt.sequence > initialReceipt.sequence);
+  assert.equal(renamedReceipt.origin, "authority");
+  assert.equal(renamedReceipt.operationId, renameOperationId);
+  assert.deepEqual(renamedReceipt.context, harness.projectSession.context);
+  assert.equal(harness.documentSession.html, documentBefore.html);
+  assert.equal(
+    harness.documentSession.persistedSourceSha256,
+    documentBefore.persistedSourceSha256,
+  );
+  assert.equal(harness.documentSession.workingHtmlSha256, documentBefore.workingHtmlSha256);
+  assert.equal(harness.documentSession.editRevision, documentBefore.editRevision);
+  assert.equal(
+    harness.documentSession.lastPersistedRevision,
+    documentBefore.lastPersistedRevision,
+  );
+  assert.equal(harness.documentSession.persistState, documentBefore.persistState);
+  assert.equal(canvasInvalidations, 1);
+  assert.equal(harness.documentSession.confirmCanvas({
+    generation: initialGeneration,
+    renderedSha256: sha256(OLD_HTML),
+    renderedHtml: OLD_HTML,
+    receipt: initialReceipt,
+  }), false);
 
   const relocated = await harness.workflow.reconcileExternalSourceLocator({
     reason: "watch",
@@ -2683,6 +3425,16 @@ test("title-bar rename keeps the managed OpenTarget so a later Finder rename can
   assert.equal(harness.projectSession.openTarget?.exactSourcePath, finderPath);
   assert.equal(harness.projectSession.openTarget?.workingCopyId, "work_ver_0001");
   assert.equal(reconcileCalls.at(-1)?.previousSourcePath, RENAMED_PATH);
+  const relocatedReceipt = harness.documentSession.sourceReceipt;
+  assert.equal(harness.documentSession.canvasGeneration, initialGeneration + 2);
+  assert.ok(relocatedReceipt.sequence > renamedReceipt.sequence);
+  assert.equal(relocatedReceipt.origin, "authority");
+  assert.equal(relocatedReceipt.operationId, reconcileCalls.at(-1)?.operationId);
+  assert.deepEqual(relocatedReceipt.context, harness.projectSession.context);
+  assert.equal(relocatedReceipt.context.exactSourcePath, finderPath);
+  assert.equal(relocatedReceipt.context.workingCopyId, "work_ver_0001");
+  assert.equal(relocatedReceipt.context.versionId, "ver_0001");
+  assert.equal(canvasInvalidations, 2);
 });
 
 test("Finder relocate prefers Bridge exactSourcePath over a private-prefixed desktop path", async (t) => {
@@ -2857,6 +3609,341 @@ function locatorResult(payload, {
   };
 }
 
+test("managed source commit publishes one complete Project Run Document and session aggregate", async (t) => {
+  let publicationDepth = 0;
+  let aggregateDirty = false;
+  let captureAggregate = () => {};
+  const aggregates = [];
+  const publication = {
+    begin() {
+      publicationDepth += 1;
+      let ended = false;
+      return () => {
+        if (ended) return;
+        ended = true;
+        publicationDepth -= 1;
+        if (publicationDepth === 0 && aggregateDirty) {
+          aggregateDirty = false;
+          captureAggregate();
+        }
+      };
+    },
+  };
+  let canvasInvalidations = 0;
+  const desktopCalls = [];
+  const harness = createHarness({
+    openTarget: managedOpenTarget(),
+    publication,
+    canvas: {
+      invalidateRenderAcks() {
+        canvasInvalidations += 1;
+      },
+    },
+    projectOpen: {
+      async activateManagedWorkingCopy(input) {
+        desktopCalls.push(input);
+        return {
+          operationId: input.operationId,
+          sourcePath: RENAMED_PATH,
+          html: OLD_HTML,
+          sha256: sha256(OLD_HTML),
+        };
+      },
+    },
+  });
+  t.after(() => harness.workflow.dispose());
+  captureAggregate = () => {
+    aggregates.push({
+      projectPath: harness.projectSession.sourcePath,
+      runPath: harness.runSession.snapshot.activeSourcePath,
+      documentPath: harness.documentSession.sourceReceipt?.context?.sourcePath,
+      documentHtml: harness.documentSession.html,
+      receiptOperationId: harness.documentSession.sourceReceipt?.operationId,
+      versionId: harness.versionSession.snapshot.currentExactVersionId,
+      draftPath: harness.draftSession.context?.sourcePath,
+      draftRevision: harness.draftSession.revision,
+      commentIds: harness.commentSession.comments.map((comment) => comment.commentId),
+    });
+  };
+  const observeSession = () => {
+    if (publicationDepth > 0) {
+      aggregateDirty = true;
+    } else {
+      captureAggregate();
+    }
+  };
+  harness.projectSession.setObserver(observeSession);
+  harness.runSession.setObserver(observeSession);
+  harness.documentSession.setObserver(observeSession);
+  harness.versionSession.setObserver(observeSession);
+  harness.commentSession.setObserver(observeSession);
+
+  harness.documentSession.publishAuthority({
+    html: OLD_HTML,
+    persistedSourceSha256: sha256(OLD_HTML),
+    workingHtmlSha256: sha256(OLD_HTML),
+    editRevision: 4,
+    lastPersistedRevision: 4,
+    context: harness.projectSession.context,
+    operationId: "test-managed-commit-authority",
+  });
+  const previousRun = {
+    projectId: "project_old",
+    documentId: "document_old",
+    sourcePath: OLD_PATH,
+    requestId: "request_managed_commit",
+    attemptId: "attempt_managed_commit",
+    status: "complete",
+  };
+  harness.runSession.trackRun(previousRun, { activate: "always" });
+  const generationBefore = harness.documentSession.canvasGeneration;
+  const target = managedOpenTarget(RENAMED_PATH);
+  const prepared = await harness.workflow.prepareManagedSourceTransition({
+    previousSourcePath: OLD_PATH,
+    nextSourcePath: RENAMED_PATH,
+    expectedSha256: sha256(OLD_HTML),
+    nextProjectId: "project_old",
+    nextDocumentId: "document_old",
+    versionId: "ver_0001",
+    openTarget: target,
+    operationId: "managed_commit_success_001",
+  });
+  aggregates.length = 0;
+
+  const context = harness.workflow.commitManagedSourceTransition({
+    prepared,
+    html: OLD_HTML,
+    sourceSha256: sha256(OLD_HTML),
+    editRevision: 4,
+    lastPersistedRevision: 4,
+    publishSessions(publishedContext) {
+      harness.versionSession.hydrate({
+        versions: [{ id: "version_managed_commit" }],
+        latestVersionId: "version_managed_commit",
+        currentBasedOnVersionId: "version_managed_commit",
+        currentExactVersionId: "version_managed_commit",
+      });
+      harness.draftSession.replaceAuthority(publishedContext, 7);
+      harness.commentSession.update({
+        comments: [{
+          commentId: "comment_managed_commit",
+          text: "published with transition",
+          sourceAnchor: { id: "target_managed_commit", selector: "main" },
+          attachments: [],
+        }],
+      });
+    },
+  });
+
+  assert.equal(context?.sourcePath, RENAMED_PATH);
+  assert.equal(desktopCalls.length, 1);
+  assert.equal(desktopCalls[0].operationId, "managed_commit_success_001");
+  assert.equal(harness.projectSession.sourcePath, RENAMED_PATH);
+  assert.equal(harness.runSession.snapshot.activeSourcePath, RENAMED_PATH);
+  assert.equal(
+    harness.runSession.runForSource(RENAMED_PATH)?.requestId,
+    previousRun.requestId,
+  );
+  assert.equal(harness.runSession.runForSource(OLD_PATH), null);
+  assert.equal(harness.documentSession.html, OLD_HTML);
+  assert.equal(harness.documentSession.editRevision, 4);
+  assert.equal(harness.documentSession.lastPersistedRevision, 4);
+  assert.equal(harness.documentSession.pendingWrite, null);
+  assert.equal(harness.documentSession.canvasGeneration, generationBefore + 1);
+  assert.equal(
+    harness.documentSession.sourceReceipt.operationId,
+    "managed-source-transition",
+  );
+  assert.deepEqual(harness.documentSession.sourceReceipt.context, context);
+  assert.equal(harness.versionSession.snapshot.currentExactVersionId, "version_managed_commit");
+  assert.equal(harness.draftSession.context?.sourcePath, RENAMED_PATH);
+  assert.equal(harness.draftSession.revision, 7);
+  assert.equal(harness.commentSession.comments[0].commentId, "comment_managed_commit");
+  assert.equal(harness.documentWorkflow.resetCount, 1);
+  assert.equal(harness.commentWorkflow.resetCount, 1);
+  assert.equal(canvasInvalidations, 1);
+  assert.deepEqual(aggregates, [{
+    projectPath: RENAMED_PATH,
+    runPath: RENAMED_PATH,
+    documentPath: RENAMED_PATH,
+    documentHtml: OLD_HTML,
+    receiptOperationId: "managed-source-transition",
+    versionId: "version_managed_commit",
+    draftPath: RENAMED_PATH,
+    draftRevision: 7,
+    commentIds: ["comment_managed_commit"],
+  }]);
+});
+
+test("managed source commit restores the complete prior aggregate when session publication throws", async (t) => {
+  let publicationDepth = 0;
+  let aggregateDirty = false;
+  let captureAggregate = () => {};
+  const aggregates = [];
+  const publication = {
+    begin() {
+      publicationDepth += 1;
+      let ended = false;
+      return () => {
+        if (ended) return;
+        ended = true;
+        publicationDepth -= 1;
+        if (publicationDepth === 0 && aggregateDirty) {
+          aggregateDirty = false;
+          captureAggregate();
+        }
+      };
+    },
+  };
+  const harness = createHarness({
+    openTarget: managedOpenTarget(),
+    publication,
+    projectOpen: {
+      async activateManagedWorkingCopy(input) {
+        return {
+          operationId: input.operationId,
+          sourcePath: RENAMED_PATH,
+          html: OLD_HTML,
+          sha256: sha256(OLD_HTML),
+        };
+      },
+    },
+  });
+  t.after(() => harness.workflow.dispose());
+  harness.documentSession.publishAuthority({
+    html: OLD_HTML,
+    persistedSourceSha256: sha256(OLD_HTML),
+    workingHtmlSha256: sha256(OLD_HTML),
+    editRevision: 4,
+    lastPersistedRevision: 4,
+    context: harness.projectSession.context,
+    operationId: "test-managed-rollback-authority",
+  });
+  harness.versionSession.hydrate({
+    versions: [{ id: "version_before_failure" }],
+    latestVersionId: "version_before_failure",
+    currentBasedOnVersionId: "version_before_failure",
+    currentExactVersionId: "version_before_failure",
+  });
+  harness.draftSession.replaceAuthority(harness.projectSession.context, 5);
+  harness.commentSession.update({
+    comments: [{
+      commentId: "comment_before_failure",
+      text: "retained after rollback",
+      sourceAnchor: { id: "target_before_failure", selector: "main" },
+      attachments: [],
+    }],
+  });
+  harness.runSession.trackRun({
+    projectId: "project_old",
+    documentId: "document_old",
+    sourcePath: OLD_PATH,
+    requestId: "request_before_failure",
+    attemptId: "attempt_before_failure",
+    status: "processing",
+  }, { activate: "always" });
+  harness.runSession.publishHandoff({
+    projectId: "project_old",
+    documentId: "document_old",
+    sourcePath: OLD_PATH,
+    requestId: "request_before_failure",
+    attemptId: "attempt_before_failure",
+    status: "copied",
+  });
+  harness.runSession.rememberOutcome({
+    projectId: "project_old",
+    documentId: "document_old",
+    sourcePath: OLD_PATH,
+    requestId: "request_before_failure",
+    attemptId: "attempt_before_failure",
+    status: "error",
+  });
+  harness.runSession.markResult(OLD_PATH, {
+    state: "processing",
+    label: "retained result",
+    updatedAt: 1,
+  });
+  const beforeGeneration = harness.documentSession.canvasGeneration;
+  captureAggregate = () => {
+    aggregates.push({
+      projectPath: harness.projectSession.sourcePath,
+      runPath: harness.runSession.snapshot.activeSourcePath,
+      documentPath: harness.documentSession.sourceReceipt?.context?.sourcePath,
+      versionId: harness.versionSession.snapshot.currentExactVersionId,
+      draftPath: harness.draftSession.context?.sourcePath,
+      draftRevision: harness.draftSession.revision,
+      commentIds: harness.commentSession.comments.map((comment) => comment.commentId),
+    });
+  };
+  const observeSession = () => {
+    if (publicationDepth > 0) aggregateDirty = true;
+    else captureAggregate();
+  };
+  harness.projectSession.setObserver(observeSession);
+  harness.runSession.setObserver(observeSession);
+  harness.documentSession.setObserver(observeSession);
+  harness.versionSession.setObserver(observeSession);
+  harness.commentSession.setObserver(observeSession);
+
+  const prepared = await harness.workflow.prepareManagedSourceTransition({
+    previousSourcePath: OLD_PATH,
+    nextSourcePath: RENAMED_PATH,
+    expectedSha256: sha256(OLD_HTML),
+    nextProjectId: "project_old",
+    nextDocumentId: "document_old",
+    versionId: "ver_0001",
+    openTarget: managedOpenTarget(RENAMED_PATH),
+    operationId: "managed_commit_failure_001",
+  });
+  aggregates.length = 0;
+
+  const context = harness.workflow.commitManagedSourceTransition({
+    prepared,
+    html: OLD_HTML,
+    sourceSha256: sha256(OLD_HTML),
+    editRevision: 4,
+    lastPersistedRevision: 4,
+    publishSessions() {
+      harness.versionSession.hydrate({
+        versions: [{ id: "version_partial_failure" }],
+        latestVersionId: "version_partial_failure",
+        currentBasedOnVersionId: "version_partial_failure",
+        currentExactVersionId: "version_partial_failure",
+      });
+      throw new Error("injected session publication failure");
+    },
+  });
+
+  assert.equal(context, null);
+  assert.equal(harness.projectSession.sourcePath, OLD_PATH);
+  assert.equal(harness.runSession.snapshot.activeSourcePath, OLD_PATH);
+  assert.equal(harness.runSession.activeRun.sourcePath, OLD_PATH);
+  assert.equal(harness.runSession.activeHandoff.sourcePath, OLD_PATH);
+  assert.equal(harness.runSession.activeHandoff.status, "copied");
+  assert.equal(harness.runSession.outcomeForSource(OLD_PATH).status, "error");
+  assert.equal(harness.runSession.resultForSource(OLD_PATH).label, "retained result");
+  assert.equal(harness.runSession.runForSource(RENAMED_PATH), null);
+  assert.equal(harness.runSession.handoffForSource(RENAMED_PATH), null);
+  assert.equal(harness.runSession.outcomeForSource(RENAMED_PATH), null);
+  assert.equal(harness.runSession.resultForSource(RENAMED_PATH), null);
+  assert.equal(harness.documentSession.sourceReceipt.context.sourcePath, OLD_PATH);
+  assert.equal(harness.documentSession.html, OLD_HTML);
+  assert.ok(harness.documentSession.canvasGeneration > beforeGeneration);
+  assert.equal(harness.versionSession.snapshot.currentExactVersionId, "version_before_failure");
+  assert.equal(harness.draftSession.context.sourcePath, OLD_PATH);
+  assert.equal(harness.draftSession.revision, 5);
+  assert.equal(harness.commentSession.comments[0].commentId, "comment_before_failure");
+  assert.deepEqual(aggregates, [{
+    projectPath: OLD_PATH,
+    runPath: OLD_PATH,
+    documentPath: OLD_PATH,
+    versionId: "version_before_failure",
+    draftPath: OLD_PATH,
+    draftRevision: 5,
+    commentIds: ["comment_before_failure"],
+  }]);
+});
+
 
 test("Finder locator rebase keeps IDs, publishes the new path, and does not load disk HTML", async (t) => {
   const reconcileCalls = [];
@@ -2876,6 +3963,13 @@ test("Finder locator rebase keeps IDs, publishes the new path, and does not load
     },
   });
   t.after(() => harness.workflow.dispose());
+  const backgroundRun = {
+    projectId: "project_old", documentId: "document_old",
+    sourcePath: "/tmp/another-working-copy.html",
+    sourceWorkingCopyId: "work_ver_0002", requestId: "req_second", attemptId: "attempt_001",
+    status: "processing",
+  };
+  harness.runSession.trackRun(backgroundRun);
 
   const outcome = await harness.workflow.reconcileExternalSourceLocator({
     reason: "watch",
@@ -2894,6 +3988,8 @@ test("Finder locator rebase keeps IDs, publishes the new path, and does not load
   assert.equal(harness.documentSession.html, OLD_HTML);
   assert.equal(harness.documentSession.persistedSourceSha256, sha256(OLD_HTML));
   assert.equal(harness.runSession.snapshot.activeSourcePath, RENAMED_PATH);
+  assert.equal(harness.runSession.activeRun, null);
+  assert.equal(harness.runSession.runForSource(backgroundRun.sourcePath), backgroundRun);
   assert.equal(harness.documentWorkflow.observeCount, 1);
   assert.equal(reconcileCalls.length, 1);
   assert.equal(reconcileCalls[0].previousSourcePath, OLD_PATH);
@@ -2902,16 +3998,13 @@ test("Finder locator rebase keeps IDs, publishes the new path, and does not load
   assert.ok(harness.events.some((event) => event.type === "project-source-relocated"));
 });
 
-test("Finder relocation is not reported settled when journal rebase cannot reconcile", async (t) => {
+test("Finder locator rebase fails closed when the destination already owns a Request", async (t) => {
+  let canvasInvalidations = 0;
   const harness = createHarness({
     openTarget: managedOpenTarget(),
-    documentWorkflow: {
-      async rebaseRecoveryJournal() {
-        return {
-          status: "rejected",
-          code: "DOCUMENT_RECOVERY_REBASE_REJECTED",
-          reason: "journal rebase unavailable",
-        };
+    canvas: {
+      invalidateRenderAcks() {
+        canvasInvalidations += 1;
       },
     },
     projectOpen: {
@@ -2923,14 +4016,419 @@ test("Finder relocation is not reported settled when journal rebase cannot recon
     },
   });
   t.after(() => harness.workflow.dispose());
+  harness.documentSession.publishAuthority({
+    html: OLD_HTML,
+    persistedSourceSha256: sha256(OLD_HTML),
+    workingHtmlSha256: sha256(OLD_HTML),
+    context: harness.projectSession.context,
+    operationId: "test-collision-authority",
+  });
+  const receiptBefore = harness.documentSession.sourceReceipt;
+  const generationBefore = harness.documentSession.canvasGeneration;
+  const previousRun = {
+    projectId: "project_old",
+    documentId: "document_old",
+    sourcePath: OLD_PATH,
+    requestId: "request_previous_locator",
+    attemptId: "attempt_previous_locator",
+    status: "complete",
+  };
+  const destinationRun = {
+    projectId: "project_old",
+    documentId: "document_old",
+    sourcePath: RENAMED_PATH,
+    requestId: "request_destination_locator",
+    attemptId: "attempt_destination_locator",
+    status: "processing",
+  };
+  harness.runSession.trackRun(previousRun, { activate: "never" });
+  harness.runSession.trackRun(destinationRun, { activate: "never" });
+
+  const outcome = await harness.workflow.reconcileExternalSourceLocator({
+    reason: "watch",
+    watcherGeneration: 3,
+    previousSourcePath: OLD_PATH,
+  });
+
+  assert.notEqual(outcome.status, "succeeded");
+  assert.equal(harness.projectSession.context?.sourcePath, OLD_PATH);
+  assert.equal(harness.documentSession.sourceReceipt, receiptBefore);
+  assert.equal(harness.documentSession.canvasGeneration, generationBefore);
+  assert.equal(canvasInvalidations, 0);
+  assert.equal(harness.runSession.runForSource(OLD_PATH), previousRun);
+  assert.equal(harness.runSession.runForSource(RENAMED_PATH), destinationRun);
+  assert.ok(!harness.events.some((event) => event.type === "project-source-relocated"));
+});
+
+test("delayed Finder A-to-B response cannot publish after the Project context changes", async (t) => {
+  const response = deferred();
+  const reconcileCalls = [];
+  const harness = createHarness({
+    openTarget: managedOpenTarget(),
+    projectRulesWorkflow: {
+      resetCount: 0,
+      resetForProjectTransition() {
+        this.resetCount += 1;
+      },
+    },
+    projectOpen: {
+      async reconcileActiveManagedSource(payload) {
+        reconcileCalls.push(payload);
+        return response.promise;
+      },
+      async listRecent() { return []; },
+      async listRegistered() { return []; },
+    },
+  });
+  t.after(() => harness.workflow.dispose());
+
+  const reconcile = harness.workflow.reconcileExternalSourceLocator({
+    reason: "watch",
+    watcherGeneration: 3,
+    previousSourcePath: OLD_PATH,
+  });
+  await waitFor(() => reconcileCalls.length === 1, "Finder reconcile did not start");
+
+  const newerPath = "/tmp/project-workflow-newer-context.html";
+  const destinationRun = {
+    projectId: "project_old",
+    documentId: "document_old",
+    sourcePath: RENAMED_PATH,
+    requestId: "request_delayed_destination",
+    attemptId: "attempt_delayed_destination",
+    status: "processing",
+  };
+  harness.runSession.trackRun(destinationRun, { activate: "never" });
+  harness.projectSession.openLocator(newerPath);
+  harness.projectSession.register({
+    epoch: harness.projectSession.epoch,
+    sourcePath: newerPath,
+    projectId: "project_newer",
+    documentId: "document_newer",
+  });
+  harness.runSession.activate(newerPath);
+  response.resolve(locatorResult(reconcileCalls[0]));
+
+  const outcome = await reconcile;
+
+  assert.equal(outcome.status, "unknown");
+  assert.equal(harness.projectSession.sourcePath, newerPath);
+  assert.equal(harness.runSession.snapshot.activeSourcePath, newerPath);
+  assert.equal(harness.runSession.runForSource(RENAMED_PATH), destinationRun);
+  assert.equal(harness.documentWorkflow.resetCount, 0);
+  assert.equal(harness.commentWorkflow.resetCount, 0);
+  assert.equal(harness.workflow.getSnapshot().hydration.phase, "idle");
+  assert.equal(harness.projectRulesWorkflow?.resetCount ?? 0, 0);
+  assert.ok(!harness.events.some((event) => event.type === "project-source-relocated"));
+});
+
+test("managed source preparation blocks before Desktop when the Run destination is occupied", async (t) => {
+  const desktopCalls = [];
+  const harness = createHarness({
+    openTarget: managedOpenTarget(),
+    projectOpen: {
+      async activateManagedWorkingCopy(input) {
+        desktopCalls.push(input);
+        return {
+          operationId: input.operationId,
+          sourcePath: RENAMED_PATH,
+          html: OLD_HTML,
+          sha256: sha256(OLD_HTML),
+        };
+      },
+    },
+  });
+  t.after(() => harness.workflow.dispose());
+  const destinationRun = {
+    projectId: "project_old",
+    documentId: "document_old",
+    sourcePath: RENAMED_PATH,
+    requestId: "request_destination_prehost",
+    attemptId: "attempt_destination_prehost",
+    status: "processing",
+  };
+  harness.runSession.trackRun(destinationRun, { activate: "never" });
+  const beforeProject = harness.projectSession.context;
+  const beforeRun = harness.runSession.snapshot;
+  const beforeDocument = harness.documentSession.snapshot;
+  const beforeComments = harness.commentSession.snapshot;
+  const beforeVersions = harness.versionSession.snapshot;
+  const beforeRulesReset = harness.projectRulesWorkflow.resetCount;
+
+  const prepared = await harness.workflow.prepareManagedSourceTransition({
+    previousSourcePath: OLD_PATH,
+    nextSourcePath: RENAMED_PATH,
+    expectedSha256: sha256(OLD_HTML),
+    nextProjectId: "project_old",
+    nextDocumentId: "document_old",
+    versionId: "ver_0001",
+    openTarget: managedOpenTarget(RENAMED_PATH),
+    operationId: "source_transition_prehost_001",
+  });
+
+  assert.equal(prepared.activatedProject, null);
+  assert.equal(desktopCalls.length, 0);
+  assert.deepEqual(harness.projectSession.context, beforeProject);
+  assert.deepEqual(harness.runSession.snapshot, beforeRun);
+  assert.deepEqual(harness.documentSession.snapshot, beforeDocument);
+  assert.deepEqual(harness.commentSession.snapshot, beforeComments);
+  assert.deepEqual(harness.versionSession.snapshot, beforeVersions);
+  assert.equal(harness.projectRulesWorkflow.resetCount, beforeRulesReset);
+  assert.equal(harness.runSession.runForSource(RENAMED_PATH), destinationRun);
+});
+
+test("background Version transition validates the complete target and never activates or publishes", async (t) => {
+  const desktopCalls = [];
+  const backgroundTarget = {
+    ...managedOpenTarget(B_PATH),
+    projectId: "project_background",
+    documentId: "document_background",
+    workingCopyId: "work_ver_0002",
+    versionId: "ver_0002",
+    sourceSha256: sha256(B_HTML),
+  };
+  const harness = createHarness({
+    projectOpen: {
+      async activateManagedWorkingCopy(input) {
+        desktopCalls.push(input);
+        return {
+          operationId: input.operationId,
+          sourcePath: B_PATH,
+          sha256: sha256(B_HTML),
+          html: B_HTML,
+        };
+      },
+      async activateGeneratedVersion(input) {
+        desktopCalls.push({ generated: true, ...input });
+        return {
+          operationId: input.operationId,
+          sourcePath: B_PATH,
+          sha256: sha256(B_HTML),
+          html: B_HTML,
+        };
+      },
+    },
+  });
+  t.after(() => harness.workflow.dispose());
+  const currentLocator = harness.projectSession.openLocator(B_PATH);
+  harness.projectSession.register({
+    ...currentLocator,
+    projectId: "project_current",
+    documentId: "document_current",
+  });
+  harness.runSession.activate(B_PATH);
+  harness.documentSession.publishAuthority({
+    html: B_HTML,
+    persistedSourceSha256: sha256(B_HTML),
+  });
+  const beforeProject = harness.projectSession.context;
+  const beforeDocument = harness.documentSession.snapshot;
+  const beforeComments = harness.commentSession.snapshot;
+  const beforeVersion = harness.versionSession.snapshot;
+  const beforeRun = harness.runSession.snapshot;
+
+  const prepared = await harness.workflow.prepareManagedSourceTransition({
+    previousSourcePath: OLD_PATH,
+    nextSourcePath: B_PATH,
+    expectedSha256: sha256(B_HTML),
+    nextProjectId: backgroundTarget.projectId,
+    nextDocumentId: backgroundTarget.documentId,
+    versionId: backgroundTarget.versionId,
+    openTarget: backgroundTarget,
+    operationId: "background_version_0001",
+  });
+
+  assert.equal(prepared.updatesCurrentProject, false);
+  assert.equal(prepared.activatedProject, null);
+  assert.equal(desktopCalls.length, 0);
+  assert.deepEqual(harness.projectSession.context, beforeProject);
+  assert.deepEqual(harness.documentSession.snapshot, beforeDocument);
+  assert.deepEqual(harness.commentSession.snapshot, beforeComments);
+  assert.deepEqual(harness.versionSession.snapshot, beforeVersion);
+  assert.deepEqual(harness.runSession.snapshot, beforeRun);
+
+  await assert.rejects(
+    () => harness.workflow.prepareManagedSourceTransition({
+      previousSourcePath: OLD_PATH,
+      nextSourcePath: B_PATH,
+      expectedSha256: sha256(B_HTML),
+      nextProjectId: backgroundTarget.projectId,
+      nextDocumentId: backgroundTarget.documentId,
+      versionId: backgroundTarget.versionId,
+      openTarget: { ...backgroundTarget, sourceSha256: "" },
+      operationId: "background_version_0002",
+    }),
+  );
+  assert.equal(desktopCalls.length, 0);
+  assert.deepEqual(harness.projectSession.context, beforeProject);
+  assert.deepEqual(harness.documentSession.snapshot, beforeDocument);
+  assert.deepEqual(harness.versionSession.snapshot, beforeVersion);
+});
+
+test("same project with a different document stays background and cannot publish a partial tuple", async (t) => {
+  const desktopCalls = [];
+  const harness = createHarness({
+    openTarget: managedOpenTarget(),
+    projectOpen: {
+      async activateManagedWorkingCopy(input) {
+        desktopCalls.push(input);
+        return {
+          operationId: input.operationId,
+          sourcePath: B_PATH,
+          html: B_HTML,
+          sha256: sha256(B_HTML),
+        };
+      },
+      async activateGeneratedVersion(input) {
+        desktopCalls.push({ generated: true, ...input });
+        return {
+          operationId: input.operationId,
+          sourcePath: B_PATH,
+          html: B_HTML,
+          sha256: sha256(B_HTML),
+        };
+      },
+    },
+  });
+  t.after(() => harness.workflow.dispose());
+  const target = {
+    ...managedOpenTarget(B_PATH),
+    documentId: "document_other",
+    workingCopyId: "work_ver_0002",
+    versionId: "ver_0002",
+    sourceSha256: sha256(B_HTML),
+  };
+  const beforeProject = harness.projectSession.context;
+  const beforeDocument = harness.documentSession.snapshot;
+  const beforeComments = harness.commentSession.snapshot;
+  const beforeVersion = harness.versionSession.snapshot;
+  const beforeRulesReset = harness.projectRulesWorkflow.resetCount;
+
+  const prepared = await harness.workflow.prepareManagedSourceTransition({
+    previousSourcePath: OLD_PATH,
+    nextSourcePath: B_PATH,
+    expectedSha256: sha256(B_HTML),
+    nextProjectId: "project_old",
+    nextDocumentId: "document_other",
+    versionId: "ver_0002",
+    openTarget: target,
+    operationId: "same_project_other_document_001",
+  });
+
+  assert.equal(prepared.updatesCurrentProject, false);
+  assert.equal(prepared.activatedProject, null);
+  assert.equal(desktopCalls.length, 0);
+  assert.deepEqual(harness.projectSession.context, beforeProject);
+  assert.deepEqual(harness.documentSession.snapshot, beforeDocument);
+  assert.deepEqual(harness.commentSession.snapshot, beforeComments);
+  assert.deepEqual(harness.versionSession.snapshot, beforeVersion);
+  assert.equal(harness.projectRulesWorkflow.resetCount, beforeRulesReset);
+});
+
+test("managed source commit fails closed before ProjectSession publication on an occupied destination", async (t) => {
+  const harness = createHarness({ openTarget: managedOpenTarget() });
+  t.after(() => harness.workflow.dispose());
+  const destinationRun = {
+    projectId: "project_old",
+    documentId: "document_old",
+    sourcePath: RENAMED_PATH,
+    requestId: "request_destination_commit",
+    attemptId: "attempt_destination_commit",
+    status: "processing",
+  };
+  harness.runSession.trackRun(destinationRun, { activate: "never" });
+
+  const outcome = harness.workflow.commitManagedSourceTransition({
+    prepared: {
+      updatesCurrentProject: true,
+      previousSourcePath: OLD_PATH,
+      nextSourcePath: RENAMED_PATH,
+      projectId: "project_old",
+      documentId: "document_old",
+      openTarget: managedOpenTarget(RENAMED_PATH),
+    },
+    html: OLD_HTML,
+    sourceSha256: sha256(OLD_HTML),
+  });
+
+  assert.equal(outcome, null);
+  assert.equal(harness.projectSession.context?.sourcePath, OLD_PATH);
+  assert.equal(harness.runSession.runForSource(RENAMED_PATH), destinationRun);
+});
+
+test("Finder relocation is not reported settled when journal rebase cannot reconcile", async (t) => {
+  let locatorOperationId = "";
+  let journalRebaseInput = null;
+  let canvasInvalidations = 0;
+  const harness = createHarness({
+    openTarget: managedOpenTarget(),
+    canvas: {
+      invalidateRenderAcks() {
+        canvasInvalidations += 1;
+      },
+    },
+    documentWorkflow: {
+      async rebaseRecoveryJournal(input) {
+        journalRebaseInput = input;
+        return {
+          status: "rejected",
+          code: "DOCUMENT_RECOVERY_REBASE_REJECTED",
+          reason: "journal rebase unavailable",
+        };
+      },
+    },
+    projectOpen: {
+      async reconcileActiveManagedSource(payload) {
+        locatorOperationId = payload.operationId;
+        return locatorResult(payload);
+      },
+      async listRecent() { return []; },
+      async listRegistered() { return []; },
+    },
+  });
+  t.after(() => harness.workflow.dispose());
+  harness.documentSession.publishAuthority({
+    html: OLD_HTML,
+    persistedSourceSha256: sha256(OLD_HTML),
+    workingHtmlSha256: sha256(OLD_HTML),
+    context: harness.projectSession.context,
+    operationId: "test-journal-rebase-authority",
+  });
+  const receiptBefore = harness.documentSession.sourceReceipt;
+  const generationBefore = harness.documentSession.canvasGeneration;
+  const previousRun = {
+    projectId: "project_old",
+    documentId: "document_old",
+    sourcePath: OLD_PATH,
+    requestId: "request_journal_rebase",
+    attemptId: "attempt_journal_rebase",
+    status: "complete",
+  };
+  harness.runSession.trackRun(previousRun, { activate: "always" });
 
   const outcome = await harness.workflow.reconcileExternalSourceLocator({
     reason: "watch",
     previousSourcePath: OLD_PATH,
   });
 
-  assert.notEqual(outcome.status, "succeeded");
+  assert.equal(outcome.status, "unknown");
+  assert.equal(outcome.operationId, locatorOperationId);
   assert.match(outcome.reason, /journal rebase unavailable/u);
+  assert.equal(harness.projectSession.sourcePath, RENAMED_PATH);
+  assert.equal(harness.runSession.snapshot.activeSourcePath, RENAMED_PATH);
+  assert.equal(
+    harness.runSession.runForSource(RENAMED_PATH)?.requestId,
+    previousRun.requestId,
+  );
+  assert.equal(harness.runSession.runForSource(OLD_PATH), null);
+  assert.equal(harness.documentSession.html, OLD_HTML);
+  assert.equal(harness.documentSession.canvasGeneration, generationBefore + 1);
+  assert.ok(harness.documentSession.sourceReceipt.sequence > receiptBefore.sequence);
+  assert.equal(harness.documentSession.sourceReceipt.operationId, locatorOperationId);
+  assert.equal(harness.documentSession.sourceReceipt.context.sourcePath, RENAMED_PATH);
+  assert.equal(canvasInvalidations, 1);
+  assert.equal(journalRebaseInput.previousContext.sourcePath, OLD_PATH);
+  assert.equal(journalRebaseInput.context.sourcePath, RENAMED_PATH);
   assert.ok(!harness.events.some((event) => event.type === "project-source-relocated"));
 });
 
@@ -3098,10 +4596,18 @@ test("Finder directory events coalesce to one rebase and late old-path events ar
 });
 
 test("Finder content-changed rebase keeps editor HTML and asks DocumentWorkflow to compare hashes", async (t) => {
+  let locatorOperationId = "";
+  let canvasInvalidations = 0;
   const harness = createHarness({
     openTarget: managedOpenTarget(),
+    canvas: {
+      invalidateRenderAcks() {
+        canvasInvalidations += 1;
+      },
+    },
     projectOpen: {
       async reconcileActiveManagedSource(payload) {
+        locatorOperationId = payload.operationId;
         return locatorResult(payload, {
           status: "content-changed",
           sha: sha256(A_HTML),
@@ -3117,6 +4623,16 @@ test("Finder content-changed rebase keeps editor HTML and asks DocumentWorkflow 
   });
   t.after(() => harness.workflow.dispose());
   harness.documentWorkflow.observeResult = { conflict: true };
+  harness.documentSession.publishAuthority({
+    html: OLD_HTML,
+    persistedSourceSha256: sha256(OLD_HTML),
+    workingHtmlSha256: sha256(OLD_HTML),
+    context: harness.projectSession.context,
+    operationId: "test-content-changed-authority",
+  });
+  const receiptBefore = harness.documentSession.sourceReceipt;
+  const generationBefore = harness.documentSession.canvasGeneration;
+  const documentBefore = harness.documentSession.snapshot;
 
   const outcome = await harness.workflow.reconcileExternalSourceLocator({
     reason: "watch",
@@ -3128,6 +4644,24 @@ test("Finder content-changed rebase keeps editor HTML and asks DocumentWorkflow 
   assert.equal(outcome.value.contentChanged, true);
   assert.equal(harness.documentSession.html, OLD_HTML);
   assert.equal(harness.documentSession.persistedSourceSha256, sha256(OLD_HTML));
+  assert.equal(harness.documentSession.workingHtmlSha256, sha256(OLD_HTML));
+  assert.equal(harness.documentSession.editRevision, documentBefore.editRevision);
+  assert.equal(
+    harness.documentSession.lastPersistedRevision,
+    documentBefore.lastPersistedRevision,
+  );
+  assert.equal(harness.documentSession.canvasGeneration, generationBefore + 1);
+  assert.ok(harness.documentSession.sourceReceipt.sequence > receiptBefore.sequence);
+  assert.equal(harness.documentSession.sourceReceipt.operationId, locatorOperationId);
+  assert.equal(harness.documentSession.sourceReceipt.context.sourcePath, RENAMED_PATH);
+  assert.equal(harness.documentSession.sourceReceipt.context.sourceSha256, sha256(A_HTML));
+  assert.equal(canvasInvalidations, 1);
+  assert.equal(harness.documentSession.confirmCanvas({
+    generation: receiptBefore.canvasGeneration,
+    renderedSha256: sha256(OLD_HTML),
+    renderedHtml: OLD_HTML,
+    receipt: receiptBefore,
+  }), false);
   assert.equal(harness.documentWorkflow.observeCount, 1);
 });
 
@@ -3266,15 +4800,7 @@ test("startup confirmation commits without fencing a nonexistent Canvas", async 
 
   const started = await harness.workflow.openProject({ kind: "startup" });
   assert.equal(started.status, "succeeded");
-  assert.equal(started.value.awaitingConfirmation, true);
-  assert.equal(harness.projectSession.epoch, 0);
-  assert.equal(fenced, 0);
-
-  const confirmed = await harness.workflow.confirmExternalOpen({
-    requestId: "req_startup_new",
-    action: "import-new",
-  });
-  assert.equal(confirmed.status, "succeeded");
+  assert.equal(started.value.opened, true);
   assert.equal(ackCount, 0);
   assert.equal(fenced, 0);
   await waitFor(
@@ -3286,8 +4812,7 @@ test("startup confirmation commits without fencing a nonexistent Canvas", async 
   assert.equal(harness.documentSession.html, A_HTML);
 });
 
-test("a local Start confirmation cancel or commit failure never publishes the retained Controller", async (t) => {
-  let commitShouldFail = false;
+test("a failed local Start import remains cancellable without publishing the retained Controller", async (t) => {
   let appliedCount = 0;
   let canceledCount = 0;
   const harness = createHarness({
@@ -3308,8 +4833,9 @@ test("a local Start confirmation cancel or commit failure never publishes the re
         return { canceled: true };
       },
       async commitPrepared() {
-        if (commitShouldFail) throw new Error("commit rejected");
-        return { name: "A", sourcePath: A_PATH, html: A_HTML, sha256: sha256(A_HTML) };
+        throw Object.assign(new Error("commit response lost"), {
+          code: "PROJECT_SERVICE_UNAVAILABLE",
+        });
       },
     },
   });
@@ -3319,25 +4845,20 @@ test("a local Start confirmation cancel or commit failure never publishes the re
   });
   t.after(unsubscribe);
 
-  await harness.workflow.openProject({ kind: "local" });
+  assert.equal((await harness.workflow.openProject({ kind: "local" })).status, "rejected");
   const canceled = await harness.workflow.cancelExternalOpen({ requestId: "req_local_start" });
   assert.equal(canceled.status, "succeeded");
   assert.equal(canceledCount, 1);
   assert.equal(harness.projectSession.epoch, 0);
   assert.equal(appliedCount, 0);
 
-  commitShouldFail = true;
-  await harness.workflow.openProject({ kind: "local" });
-  const failed = await harness.workflow.confirmExternalOpen({
-    requestId: "req_local_start",
-    action: "import-new",
-  });
+  const failed = await harness.workflow.openProject({ kind: "local" });
   assert.equal(failed.status, "rejected");
   assert.equal(harness.projectSession.epoch, 0);
   assert.equal(appliedCount, 0);
 });
 
-test("a new-external picker result shows confirmation without switching", async (t) => {
+test("a new-external picker result imports and opens in the same operation", async (t) => {
   let fenced = 0;
   let committed = null;
   const harness = createHarness({
@@ -3384,13 +4905,8 @@ test("a new-external picker result shows confirmation without switching", async 
 
   const opened = await harness.workflow.openProject({ kind: "local" });
   assert.equal(opened.status, "succeeded");
-  assert.equal(opened.value.awaitingConfirmation, true);
-  assert.equal(fenced, 0);
-  assert.equal(
-    harness.workflow.getSnapshot().openConfirmation?.classification,
-    "new-external",
-  );
-  assert.equal(harness.projectSession.sourcePath, OLD_PATH);
+  assert.equal(opened.value.opened, true);
+  assert.ok(fenced > 0);
 
   assert.equal(
     (await harness.workflow.confirmExternalOpen({
@@ -3400,11 +4916,6 @@ test("a new-external picker result shows confirmation without switching", async 
     "rejected",
   );
 
-  const confirmed = await harness.workflow.confirmExternalOpen({
-    requestId: "req_new",
-    action: "import-new",
-  });
-  assert.equal(confirmed.status, "succeeded");
   assert.deepEqual(committed, {
     requestId: "req_new",
     action: "import-new",
@@ -3416,6 +4927,7 @@ test("a new-external picker result shows confirmation without switching", async 
 test("canvas failure after import keeps the published project and never trashes", async (t) => {
   let finalized = 0;
   let rolledBack = 0;
+  let allowCommit = false;
   const harness = createHarness({
     projectOpen: {
       async openLocal() {
@@ -3429,6 +4941,11 @@ test("canvas failure after import keeps the published project and never trashes"
         };
       },
       async commitPrepared() {
+        if (!allowCommit) {
+          throw Object.assign(new Error("temporary commit failure"), {
+            code: "PROJECT_SERVICE_UNAVAILABLE",
+          });
+        }
         return {
           name: "page-V1.html",
           sourcePath: A_PATH,
@@ -3457,7 +4974,8 @@ test("canvas failure after import keeps the published project and never trashes"
     };
   };
 
-  await harness.workflow.openProject({ kind: "local" });
+  assert.equal((await harness.workflow.openProject({ kind: "local" })).status, "rejected");
+  allowCommit = true;
   harness.workflow.setExternalOpenDeleteOriginal({
     requestId: "req_canvas_fail",
     deleteOriginal: true,
@@ -3467,12 +4985,13 @@ test("canvas failure after import keeps the published project and never trashes"
     action: "import-new",
     deleteOriginal: true,
   });
-  assert.equal(confirmed.status, "succeeded");
+  assert.equal(confirmed.status, "rejected");
+  assert.equal(confirmed.code, "EXTERNAL_OPEN_CANVAS_REJECTED");
   assert.equal(canvasCalls, 2);
   assert.equal(finalized, 0);
   assert.equal(rolledBack, 0);
   assert.equal(harness.projectSession.sourcePath, A_PATH);
-  assert.equal(harness.workflow.getSnapshot().openConfirmation, null);
+  assert.equal(harness.workflow.getSnapshot().openConfirmation.requestId, "req_canvas_fail");
   assert.equal(
     harness.events.some((event) => event.type === "external-open-canvas-failed"),
     true,
@@ -3526,11 +5045,7 @@ test("canvas confirmation recovers after one failed acknowledgement", async (t) 
     return succeeded({ ready: true });
   };
 
-  await harness.workflow.openProject({ kind: "local" });
-  const confirmed = await harness.workflow.confirmExternalOpen({
-    requestId: "req_canvas_retry",
-    action: "import-new",
-  });
+  const confirmed = await harness.workflow.openProject({ kind: "local" });
   assert.equal(confirmed.status, "succeeded");
   assert.equal(canvasCalls, 2);
   assert.equal(finalized, 1);
@@ -3576,18 +5091,7 @@ test("continue-current opens the bound project without importing again", async (
   });
   t.after(() => harness.workflow.dispose());
 
-  await harness.workflow.openProject({ kind: "local" });
-  assert.equal(
-    harness.workflow.setExternalOpenDeleteOriginal({
-      requestId: "req_known",
-      deleteOriginal: true,
-    }).status,
-    "rejected",
-  );
-  const confirmed = await harness.workflow.confirmExternalOpen({
-    requestId: "req_known",
-    action: "continue-current",
-  });
+  const confirmed = await harness.workflow.openProject({ kind: "local" });
   assert.equal(confirmed.status, "succeeded");
   assert.deepEqual(committed, {
     requestId: "req_known",
@@ -3627,4 +5131,568 @@ test("catalog stops after one reread when authority keeps changing", async (t) =
   assert.equal((await h.workflow.refreshRegisteredProjects()).status, "stale");
   assert.equal(revision, 2);
   assert.equal(h.events.some((event) => event.type === "project-catalog-loaded"), false);
+});
+
+function preparedDescriptor(requestId, classification = "new-external") {
+  return { openKind: "confirmation", requestId, classification, sourceFileName: "page.html" };
+}
+
+for (const kind of ["local", "recent", "startup", "external"]) {
+  test(`${kind} automatically converges one same-request new-to-known reclassification`, async (t) => {
+    const requestId = `reclassified_${kind}`;
+    const commits = [];
+    const acknowledgements = [];
+    const h = createHarness({ initialProject: false, projectOpen: {
+      openLocal: async () => preparedDescriptor(requestId),
+      openRecent: async () => preparedDescriptor(requestId),
+      getActive: async () => preparedDescriptor(requestId),
+      acceptExternal: async () => preparedDescriptor(requestId),
+      commitPrepared: async (input) => {
+        commits.push(input);
+        if (commits.length === 1) throw Object.assign(new Error("already imported"), {
+          code: "OPEN_INTENT_RECLASSIFIED",
+          details: { confirmation: preparedDescriptor(requestId, "known-external") },
+        });
+        return { name: "A", sourcePath: A_PATH, html: A_HTML, sha256: sha256(A_HTML) };
+      },
+      finalizePrepared: async () => ({ disposition: "kept" }),
+      ackExternal: async (id) => { acknowledgements.push(id); },
+    } });
+    t.after(() => h.workflow.dispose());
+    if (kind === "external") {
+      h.workflow.acceptExternalProject({ requestId, sourcePath: A_PATH });
+      await waitFor(() => h.events.some((event) => event.type === "project-open-prepared-settled"));
+      await waitFor(() => h.workflow.getSnapshot().externalOpen.status === "idle");
+    } else {
+      assert.equal((await h.workflow.openProject({ kind, sourcePath: A_PATH })).value.opened, true);
+    }
+    assert.deepEqual(commits, [
+      { requestId, action: "import-new" }, { requestId, action: "continue-current" },
+    ]);
+    assert.deepEqual(acknowledgements, kind === "external" ? [requestId] : []);
+    assert.equal(h.projectSession.sourcePath, A_PATH);
+    assert.equal(h.workflow.getSnapshot().openConfirmation, null);
+    assert.equal(h.events.some((event) => event.type === "project-open-confirmation-presented"), false);
+  });
+}
+
+for (const next of [
+  preparedDescriptor("another_request", "known-external"),
+  preparedDescriptor("reclass_invalid", "new-external"),
+]) {
+  test(`reclassification cannot replace request or repeat classification: ${next.requestId}/${next.classification}`, async (t) => {
+    let commits = 0;
+    const h = createHarness({ projectOpen: {
+      openLocal: async () => preparedDescriptor("reclass_invalid"),
+      commitPrepared: async () => {
+        commits += 1;
+        throw Object.assign(new Error("invalid reclassification"), {
+          code: "OPEN_INTENT_RECLASSIFIED", confirmation: next,
+        });
+      },
+    } });
+    t.after(() => h.workflow.dispose());
+    assert.equal((await h.workflow.openProject({ kind: "local" })).status, "rejected");
+    assert.equal(commits, 1);
+    assert.equal(h.projectSession.sourcePath, OLD_PATH);
+    assert.equal(h.workflow.getSnapshot().openConfirmation, null);
+  });
+}
+
+test("repeated reclassification stops after two commits and clears deletion consent", async (t) => {
+  const commits = [];
+  let firstFailure = true;
+  const h = createHarness({ projectOpen: {
+    openLocal: async () => preparedDescriptor("reclass_bounded"),
+    commitPrepared: async (input) => {
+      if (firstFailure) {
+        throw Object.assign(new Error("temporary failure"), {
+          code: "PROJECT_SERVICE_UNAVAILABLE",
+        });
+      }
+      commits.push(input);
+      throw Object.assign(new Error("already imported"), {
+        code: "OPEN_INTENT_RECLASSIFIED",
+        confirmation: preparedDescriptor("reclass_bounded", "known-external"),
+      });
+    },
+  } });
+  t.after(() => h.workflow.dispose());
+  await h.workflow.openProject({ kind: "local" });
+  firstFailure = false;
+  h.workflow.setExternalOpenDeleteOriginal({ requestId: "reclass_bounded", deleteOriginal: true });
+  const result = await h.workflow.confirmExternalOpen({ requestId: "reclass_bounded", action: "import-new", deleteOriginal: true });
+  assert.equal(result.code, "OPEN_INTENT_RECLASSIFIED");
+  assert.deepEqual(commits, [
+    { requestId: "reclass_bounded", action: "import-new", deleteOriginal: true },
+    { requestId: "reclass_bounded", action: "continue-current" },
+  ]);
+  assert.equal(h.workflow.getSnapshot().openConfirmation, null);
+  assert.equal(h.projectSession.sourcePath, OLD_PATH);
+});
+
+test("unknown Prepared commit retries the same receipt without another import", async (t) => {
+  const ids = [];
+  let imports = 0;
+  let receipt = null;
+  let lostResponses = 0;
+  let finalizes = 0;
+  const h = createHarness({ projectOpen: {
+    openLocal: async () => preparedDescriptor("lost_response"),
+    commitPrepared: async ({ requestId }) => {
+      ids.push(requestId);
+      if (!receipt) {
+        imports += 1;
+        receipt = { name: "A", sourcePath: A_PATH, html: A_HTML, sha256: sha256(A_HTML) };
+      }
+      if (lostResponses < 2) {
+        lostResponses += 1;
+        throw Object.assign(new Error("response lost after commit"), { code: "IPC_TIMEOUT" });
+      }
+      return receipt;
+    },
+    finalizePrepared: async () => { finalizes += 1; return { disposition: "kept" }; },
+  } });
+  t.after(() => h.workflow.dispose());
+  assert.equal((await h.workflow.openProject({ kind: "local" })).status, "rejected");
+  assert.equal(h.projectSession.sourcePath, OLD_PATH);
+  assert.equal(h.events.filter((event) => (
+    event.type === "project-open-failed" && event.requestId === "lost_response"
+  )).length, 1);
+  assert.equal((await h.workflow.retryExternalOpen({ requestId: "lost_response" })).status, "rejected");
+  assert.equal(h.workflow.getSnapshot().openConfirmation.requestId, "lost_response");
+  assert.equal(h.events.filter((event) => (
+    event.type === "project-open-failed" && event.requestId === "lost_response"
+  )).length, 2);
+  assert.equal((await h.workflow.retryExternalOpen({ requestId: "lost_response" })).status, "succeeded");
+  assert.deepEqual(ids, ["lost_response", "lost_response", "lost_response"]);
+  assert.equal(imports, 1);
+  assert.equal(finalizes, 1);
+  assert.equal(h.projectSession.sourcePath, A_PATH);
+});
+
+for (const stop of ["cancel", "dispose"]) {
+  test(`${stop} during preparation prevents a late ordinary import`, async (t) => {
+    let release;
+    let commits = 0;
+    const h = createHarness({ projectOpen: {
+      openLocal: async () => preparedDescriptor("prepare_stop"),
+      commitPrepared: async () => { commits += 1; },
+      cancelPrepared: async () => ({ canceled: true }),
+    } });
+    t.after(() => h.workflow.dispose());
+    h.workflow.prepareSwitch = () => new Promise((resolve) => { release = resolve; });
+    const opening = h.workflow.openProject({ kind: "local" });
+    await waitFor(() => Boolean(release));
+    if (stop === "cancel") assert.equal((await h.workflow.cancelExternalOpen({ requestId: "prepare_stop" })).status, "succeeded");
+    else h.workflow.dispose();
+    release(succeeded());
+    assert.equal((await opening).status, "stale");
+    assert.equal(commits, 0);
+    assert.equal(h.projectSession.sourcePath, OLD_PATH);
+  });
+}
+
+test("ordinary import holds its commit against duplicate confirm and cancellation", async (t) => {
+  let release;
+  let commits = 0;
+  const h = createHarness({ projectOpen: {
+    openLocal: async () => preparedDescriptor("commit_busy"),
+    commitPrepared: () => { commits += 1; return new Promise((resolve) => { release = resolve; }); },
+  } });
+  t.after(() => h.workflow.dispose());
+  const opening = h.workflow.openProject({ kind: "local" });
+  await waitFor(() => Boolean(release));
+  assert.equal((await h.workflow.confirmExternalOpen({ requestId: "commit_busy", action: "import-new" })).code, "EXTERNAL_OPEN_BUSY");
+  assert.equal((await h.workflow.cancelExternalOpen({ requestId: "commit_busy" })).code, "EXTERNAL_OPEN_BUSY");
+  release({ name: "A", sourcePath: A_PATH, html: A_HTML, sha256: sha256(A_HTML) });
+  assert.equal((await opening).status, "succeeded");
+  assert.equal(commits, 1);
+});
+
+test("ordinary external opens keep FIFO through Canvas finalization and ACK", async (t) => {
+  const calls = [];
+  let release;
+  const h = createHarness({ initialProject: false, projectOpen: {
+    acceptExternal: async (requestId) => {
+      calls.push(`accept:${requestId}`);
+      return preparedDescriptor(requestId);
+    },
+    commitPrepared: async ({ requestId }) => {
+      calls.push(`commit:${requestId}`);
+      return { name: "A", sourcePath: A_PATH, html: A_HTML, sha256: sha256(A_HTML) };
+    },
+    finalizePrepared: async (requestId) => {
+      calls.push(`finalize:${requestId}`);
+      if (requestId === "fifo_first") await new Promise((resolve) => { release = resolve; });
+      return { disposition: "kept" };
+    },
+    ackExternal: async (requestId) => { calls.push(`ack:${requestId}`); },
+  } });
+  t.after(() => h.workflow.dispose());
+  h.workflow.acceptExternalProject({ requestId: "fifo_first", sourcePath: A_PATH });
+  h.workflow.acceptExternalProject({ requestId: "fifo_second", sourcePath: B_PATH });
+  await waitFor(() => Boolean(release));
+  assert.deepEqual(calls, ["accept:fifo_first", "commit:fifo_first", "finalize:fifo_first"]);
+  release();
+  await waitFor(() => h.workflow.getSnapshot().externalOpen.status === "idle");
+  assert.deepEqual(calls, [
+    "accept:fifo_first", "commit:fifo_first", "finalize:fifo_first", "ack:fifo_first",
+    "accept:fifo_second", "commit:fifo_second", "finalize:fifo_second", "ack:fifo_second",
+  ]);
+});
+
+test("source changes reject an ordinary import without reclassification or publication", async (t) => {
+  let commits = 0;
+  let cancels = 0;
+  const h = createHarness({ projectOpen: {
+    openLocal: async () => preparedDescriptor("source_changed"),
+    commitPrepared: async () => {
+      commits += 1;
+      throw Object.assign(new Error("source changed"), { code: "OPEN_INTENT_SOURCE_CHANGED" });
+    },
+    cancelPrepared: async () => { cancels += 1; return { canceled: true }; },
+  } });
+  t.after(() => h.workflow.dispose());
+  assert.equal((await h.workflow.openProject({ kind: "local" })).code, "OPEN_INTENT_SOURCE_CHANGED");
+  assert.equal(commits, 1);
+  assert.equal(cancels, 1);
+  assert.equal(h.projectSession.sourcePath, OLD_PATH);
+  assert.equal(h.workflow.getSnapshot().openConfirmation, null);
+  const failure = h.events.findLast((event) => event.type === "project-open-failed");
+  assert.equal(Object.hasOwn(failure, "requestId"), false);
+  assert.equal((await h.workflow.retryExternalOpen({ requestId: "source_changed" })).status, "stale");
+});
+
+test("dispose during commit rolls back a late receipt without publishing or trashing", async () => {
+  let release;
+  const calls = [];
+  const h = createHarness({ projectOpen: {
+    openLocal: async () => preparedDescriptor("dispose_commit"),
+    commitPrepared: () => new Promise((resolve) => { release = resolve; }),
+    rollbackPrepared: async (id) => { calls.push(`rollback:${id}`); },
+    finalizePrepared: async () => { calls.push("finalize"); },
+  } });
+  const opening = h.workflow.openProject({ kind: "local" });
+  await waitFor(() => Boolean(release));
+  h.workflow.dispose();
+  const disposedConfirmation = h.workflow.getSnapshot().openConfirmation;
+  release({ name: "A", sourcePath: A_PATH, html: A_HTML, sha256: sha256(A_HTML) });
+  assert.equal((await opening).code, "WORKBENCH_NAVIGATION_STALE_APPLICATION");
+  assert.deepEqual(calls, ["rollback:dispose_commit"]);
+  assert.equal(h.projectSession.sourcePath, OLD_PATH);
+  assert.deepEqual(h.workflow.getSnapshot().openConfirmation, disposedConfirmation);
+});
+
+test("a stale preparation releases the surviving request for an explicit retry", async (t) => {
+  let release;
+  let commits = 0;
+  const h = createHarness({ projectOpen: {
+    openLocal: async () => preparedDescriptor("prepare_epoch_change"),
+    commitPrepared: async () => { commits += 1;
+      return { name: "A", sourcePath: A_PATH, html: A_HTML, sha256: sha256(A_HTML) }; },
+    finalizePrepared: async () => ({ disposition: "kept" }),
+  } });
+  t.after(() => h.workflow.dispose());
+  h.workflow.prepareSwitch = () => new Promise((resolve) => { release = resolve; });
+  const opening = h.workflow.openProject({ kind: "local" });
+  await waitFor(() => Boolean(release));
+  h.projectSession.openLocator(OLD_PATH);
+  release(succeeded());
+  assert.equal((await opening).status, "stale");
+  assert.equal(commits, 0);
+  assert.equal(h.workflow.getSnapshot().openConfirmation.requestId, "prepare_epoch_change");
+  assert.equal(h.workflow.getSnapshot().openConfirmation.busy, false);
+  assert.equal(h.events.some((event) => (
+    event.type === "project-open-failed"
+    && event.requestId === "prepare_epoch_change"
+  )), true);
+  h.workflow.prepareSwitch = async () => succeeded();
+  const retry = await h.workflow.retryExternalOpen({ requestId: "prepare_epoch_change" });
+  assert.equal(retry.status, "succeeded", JSON.stringify(retry));
+  assert.equal(commits, 1);
+});
+
+test("a malformed action retires a retained Prepared intent instead of preserving retry authority", async (t) => {
+  let commits = 0;
+  let cancels = 0;
+  const h = createHarness({ projectOpen: {
+    openLocal: async () => preparedDescriptor("malformed_action"),
+    commitPrepared: async () => {
+      commits += 1;
+      throw Object.assign(new Error("commit response lost"), {
+        code: "PROJECT_SERVICE_UNAVAILABLE",
+      });
+    },
+    cancelPrepared: async () => { cancels += 1; return { canceled: true }; },
+  } });
+  t.after(() => h.workflow.dispose());
+
+  assert.equal((await h.workflow.openProject({ kind: "local" })).status, "rejected");
+  assert.equal(h.workflow.getSnapshot().openConfirmation.requestId, "malformed_action");
+  const malformed = await h.workflow.confirmExternalOpen({
+    requestId: "malformed_action",
+    action: "continue-current",
+  });
+
+  assert.equal(malformed.code, "EXTERNAL_OPEN_ACTION_MISMATCH");
+  assert.equal(commits, 1);
+  assert.equal(cancels, 1);
+  assert.equal(h.workflow.getSnapshot().openConfirmation, null);
+  assert.equal((await h.workflow.retryExternalOpen({ requestId: "malformed_action" })).status, "stale");
+});
+
+test("a missing Prepared commit port reports actionable same-request recovery", async (t) => {
+  const h = createHarness({ projectOpen: {
+    openLocal: async () => preparedDescriptor("commit_port_missing"),
+  } });
+  t.after(() => h.workflow.dispose());
+
+  const outcome = await h.workflow.openProject({ kind: "local" });
+
+  assert.equal(outcome.code, "EXTERNAL_OPEN_COMMIT_UNAVAILABLE");
+  assert.equal(h.workflow.getSnapshot().openConfirmation.requestId, "commit_port_missing");
+  assert.equal(h.events.some((event) => (
+    event.type === "project-open-failed"
+    && event.requestId === "commit_port_missing"
+  )), true);
+});
+
+test("a blocked external Prepared head stays actionable and its queued successor drains after retry", async (t) => {
+  const calls = [];
+  let blockFirstSwitch = true;
+  const h = createHarness({ projectOpen: {
+    acceptExternal: async (requestId) => {
+      calls.push(`accept:${requestId}`);
+      return preparedDescriptor(requestId);
+    },
+    commitPrepared: async ({ requestId }) => {
+      calls.push(`commit:${requestId}`);
+      return requestId === "blocked_external_a"
+        ? { name: "A", sourcePath: A_PATH, html: A_HTML, sha256: sha256(A_HTML) }
+        : { name: "B", sourcePath: B_PATH, html: B_HTML, sha256: sha256(B_HTML) };
+    },
+    finalizePrepared: async () => ({ disposition: "kept" }),
+    ackExternal: async (requestId) => { calls.push(`ack:${requestId}`); },
+  } });
+  t.after(() => h.workflow.dispose());
+  h.workflow.prepareSwitch = async () => {
+    if (blockFirstSwitch) {
+      blockFirstSwitch = false;
+      return { status: "blocked", code: "PROJECT_SWITCH_DRAIN_BLOCKED", reason: "save pending" };
+    }
+    return succeeded({ prepared: true });
+  };
+
+  h.workflow.acceptExternalProject({ requestId: "blocked_external_a", sourcePath: A_PATH });
+  h.workflow.acceptExternalProject({ requestId: "blocked_external_b", sourcePath: B_PATH });
+  await waitFor(() => h.workflow.getSnapshot().externalOpen.status === "awaiting-confirmation");
+
+  assert.deepEqual(calls, ["accept:blocked_external_a"]);
+  assert.equal(h.workflow.getSnapshot().externalOpen.queuedRequestId, "blocked_external_b");
+  assert.equal(h.events.some((event) => (
+    event.type === "project-open-failed"
+    && event.requestId === "blocked_external_a"
+  )), true);
+
+  assert.equal((await h.workflow.retryExternalOpen({ requestId: "blocked_external_a" })).status, "succeeded");
+  await waitFor(
+    () => h.workflow.getSnapshot().externalOpen.status === "idle",
+    `external queue did not drain: ${JSON.stringify({
+      calls,
+      snapshot: h.workflow.getSnapshot(),
+      events: h.events.map((event) => ({ type: event.type, requestId: event.requestId, reason: event.reason })),
+    })}`,
+  );
+  assert.deepEqual(calls, [
+    "accept:blocked_external_a",
+    "commit:blocked_external_a",
+    "ack:blocked_external_a",
+    "accept:blocked_external_b",
+    "commit:blocked_external_b",
+    "ack:blocked_external_b",
+  ]);
+  assert.equal(h.projectSession.sourcePath, B_PATH);
+});
+
+test("replacing an external Prepared confirmation cancels and ACKs its exact FIFO head", async (t) => {
+  const calls = [];
+  let blockExternal = true;
+  const h = createHarness({ projectOpen: {
+    acceptExternal: async (requestId) => {
+      calls.push(`accept:${requestId}`);
+      return preparedDescriptor(requestId);
+    },
+    openLocal: async () => preparedDescriptor("replacement_local"),
+    cancelPrepared: async (requestId) => { calls.push(`cancel:${requestId}`); return { canceled: true }; },
+    ackExternal: async (requestId) => { calls.push(`ack:${requestId}`); return { acknowledged: true, requestId }; },
+    commitPrepared: async ({ requestId }) => {
+      calls.push(`commit:${requestId}`);
+      return { name: "A", sourcePath: A_PATH, html: A_HTML, sha256: sha256(A_HTML) };
+    },
+    finalizePrepared: async () => ({ disposition: "kept" }),
+  } });
+  t.after(() => h.workflow.dispose());
+  h.workflow.prepareSwitch = async () => {
+    if (blockExternal) {
+      blockExternal = false;
+      return { status: "blocked", code: "PROJECT_SWITCH_DRAIN_BLOCKED", reason: "save pending" };
+    }
+    return succeeded({ prepared: true });
+  };
+
+  h.workflow.acceptExternalProject({ requestId: "replacement_external", sourcePath: B_PATH });
+  await waitFor(() => h.workflow.getSnapshot().openConfirmation?.requestId === "replacement_external");
+  assert.equal((await h.workflow.openProject({ kind: "local" })).status, "succeeded");
+  await waitFor(() => h.workflow.getSnapshot().externalOpen.status === "idle");
+
+  assert.ok(calls.indexOf("cancel:replacement_external") >= 0);
+  assert.ok(calls.indexOf("ack:replacement_external") > calls.indexOf("cancel:replacement_external"));
+  assert.equal(h.workflow.getSnapshot().openConfirmation, null);
+});
+
+test("a lost finalize response resumes from the renderer receipt without reapplying project state", async (t) => {
+  let imports = 0;
+  let finalizeCalls = 0;
+  let finalizeSideEffects = 0;
+  const h = createHarness({ projectOpen: {
+    openLocal: async () => preparedDescriptor("finalize_response_lost"),
+    commitPrepared: async () => {
+      imports += 1;
+      return { name: "A", sourcePath: A_PATH, html: A_HTML, sha256: sha256(A_HTML) };
+    },
+    finalizePrepared: async () => {
+      finalizeCalls += 1;
+      if (finalizeSideEffects === 0) {
+        finalizeSideEffects += 1;
+        throw Object.assign(new Error("finalize response lost"), {
+          code: "PROJECT_SERVICE_UNAVAILABLE",
+        });
+      }
+      return { disposition: "kept" };
+    },
+  } });
+  t.after(() => h.workflow.dispose());
+
+  assert.equal((await h.workflow.openProject({ kind: "local" })).status, "rejected");
+  const appliedEpoch = h.projectSession.epoch;
+  const resetCount = h.documentWorkflow.resetCount;
+  const edited = A_HTML.replace("A", "edited after finalize loss");
+  h.documentSession.beginEdit(edited);
+  h.draftSession.activate({
+    epoch: appliedEpoch,
+    projectId: "project_a",
+    documentId: "document_a",
+    sourcePath: A_PATH,
+  }, 7);
+
+  const retried = await h.workflow.retryExternalOpen({ requestId: "finalize_response_lost" });
+
+  assert.equal(retried.status, "succeeded", JSON.stringify(retried));
+  assert.equal(retried.value.alreadyApplied, true);
+  assert.equal(imports, 1);
+  assert.equal(finalizeCalls, 2);
+  assert.equal(finalizeSideEffects, 1);
+  assert.equal(h.events.filter((event) => event.type === "project-applied").length, 1);
+  assert.equal(h.projectSession.epoch, appliedEpoch);
+  assert.equal(h.documentWorkflow.resetCount, resetCount);
+  assert.equal(h.documentSession.html, edited);
+  assert.equal(h.draftSession.revision, 7);
+});
+
+test("a post-apply Canvas failure retries only Canvas and finalization on the same epoch", async (t) => {
+  let imports = 0;
+  let canvasCalls = 0;
+  let finalizes = 0;
+  const h = createHarness({ projectOpen: {
+    openLocal: async () => preparedDescriptor("canvas_stage_retry"),
+    commitPrepared: async () => {
+      imports += 1;
+      return { name: "A", sourcePath: A_PATH, html: A_HTML, sha256: sha256(A_HTML) };
+    },
+    finalizePrepared: async () => { finalizes += 1; return { disposition: "kept" }; },
+  }, documentWorkflow: {
+    async ensureCurrentCanvas() {
+      canvasCalls += 1;
+      return canvasCalls <= 2
+        ? { status: "rejected", code: "DOCUMENT_CANVAS_AUTHORITY_REJECTED", reason: "canvas pending" }
+        : succeeded({ ready: true });
+    },
+  } });
+  t.after(() => h.workflow.dispose());
+
+  const first = await h.workflow.openProject({ kind: "local" });
+  assert.equal(first.status, "rejected");
+  assert.equal(first.code, "EXTERNAL_OPEN_CANVAS_REJECTED");
+  const appliedEpoch = h.projectSession.epoch;
+  const resetCount = h.documentWorkflow.resetCount;
+  const edited = A_HTML.replace("A", "edited during canvas recovery");
+  h.documentSession.beginEdit(edited);
+  h.draftSession.activate({
+    epoch: appliedEpoch,
+    projectId: "project_a",
+    documentId: "document_a",
+    sourcePath: A_PATH,
+  }, 9);
+
+  const retried = await h.workflow.retryExternalOpen({ requestId: "canvas_stage_retry" });
+
+  assert.equal(retried.status, "succeeded", JSON.stringify(retried));
+  assert.equal(retried.value.alreadyApplied, true);
+  assert.equal(imports, 1);
+  assert.equal(canvasCalls, 3);
+  assert.equal(finalizes, 1);
+  assert.equal(h.events.filter((event) => event.type === "project-applied").length, 1);
+  assert.equal(h.projectSession.epoch, appliedEpoch);
+  assert.equal(h.documentWorkflow.resetCount, resetCount);
+  assert.equal(h.documentSession.html, edited);
+  assert.equal(h.draftSession.revision, 9);
+});
+
+test("a lost Main ACK response replays A exactly and drains B without reimport or epoch churn", async (t) => {
+  let nextId = 0;
+  const mailbox = createExternalFileOpenMailbox({
+    createRequestId: () => `ack_receipt_${++nextId}`,
+    platform: "darwin",
+  });
+  const first = mailbox.publish("/Users/demo/A.html");
+  const second = mailbox.publish("/Users/demo/B.html");
+  const commits = [];
+  const ackEpochs = [];
+  let loseFirstResponse = true;
+  const h = createHarness({ initialProject: false, projectOpen: {
+    acceptExternal: async (requestId) => {
+      const begun = mailbox.begin(requestId, async () => preparedDescriptor(requestId));
+      if (!begun) throw new Error("out-of-order accept");
+      return begun;
+    },
+    commitPrepared: async ({ requestId }) => {
+      commits.push(requestId);
+      return requestId === first.requestId
+        ? { name: "A", sourcePath: A_PATH, html: A_HTML, sha256: sha256(A_HTML) }
+        : { name: "B", sourcePath: B_PATH, html: B_HTML, sha256: sha256(B_HTML) };
+    },
+    finalizePrepared: async () => ({ disposition: "kept" }),
+    ackExternal: async (requestId) => {
+      const receipt = mailbox.acknowledge(requestId);
+      if (!receipt) throw Object.assign(new Error("ACK out of order"), { code: "EXTERNAL_OPEN_ACK_OUT_OF_ORDER" });
+      if (requestId === first.requestId) ackEpochs.push(h.projectSession.epoch);
+      if (requestId === first.requestId && loseFirstResponse) {
+        loseFirstResponse = false;
+        throw Object.assign(new Error("ACK response lost"), { code: "PROJECT_SERVICE_UNAVAILABLE" });
+      }
+      return { acknowledged: true, requestId };
+    },
+  } });
+  t.after(() => h.workflow.dispose());
+
+  h.workflow.acceptExternalProject({ requestId: first.requestId, sourcePath: A_PATH });
+  h.workflow.acceptExternalProject({ requestId: second.requestId, sourcePath: B_PATH });
+  await waitFor(() => h.workflow.getSnapshot().externalOpen.status === "idle");
+
+  assert.deepEqual(commits, [first.requestId, second.requestId]);
+  assert.deepEqual(ackEpochs, [1, 1]);
+  assert.equal(h.events.filter((event) => event.type === "project-applied").length, 2);
+  assert.equal(h.projectSession.epoch, 2);
+  assert.equal(mailbox.peek(), null);
 });

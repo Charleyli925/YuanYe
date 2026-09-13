@@ -1,3 +1,4 @@
+import { workspaceShellSnapshot } from "./workspace-shell-snapshot.js";
 import { loadCatalogVersionSummaries } from "./project-catalog-query.js";
 import { createRuntimeBridgeClient, isBridgeRequestError } from "./bridge-client.js";
 import { CommentSession } from "./comment-session.js";
@@ -14,9 +15,15 @@ import { ProjectSession } from "./project-session.js";
 import { ProjectRulesSession } from "./project-rules-session.js";
 import { ProjectRulesWorkflow } from "./project-rules-workflow.js";
 import { ProjectWorkflow } from "./project-workflow.js";
+import { PROJECT_SESSION_COORDINATION } from "./project-session.js";
 import { createRendererRecoveryStore } from "./recovery-store.js";
 import { RunSession } from "./run-session.js";
 import { RunWorkflow } from "./run-workflow.js";
+import { RUN_SESSION_COORDINATION } from "./run-session.js";
+import {
+  copyProjectContext,
+  verifyOpenTarget,
+} from "./verified-project-context.js";
 import { SourceHistorySession } from "./source-history-session.js";
 import { ConversationSession } from "./conversation-session.js";
 import { ConversationWorkflow } from "./conversation-workflow.js";
@@ -33,6 +40,70 @@ import {
   workbenchStartupPriority,
 } from "./workbench-navigation-workflow.js";
 import { reportInternalFailure } from "./internal-failure.js";
+
+function composerTargetForDisplay(sourceTarget, selection) {
+  const visualHint = selection?.visualHint;
+  return visualHint
+    ? { ...sourceTarget, label: visualHint.label, visualHint }
+    : sourceTarget;
+}
+
+function sameRegistrationDocumentRoute(left, right, sameSourcePath) {
+  if (!left || !right) return false;
+  return Number(left.epoch) === Number(right.epoch)
+    && String(left.projectId || "") === String(right.projectId || "")
+    && String(left.documentId || "") === String(right.documentId || "")
+    && sameSourcePath(left.sourcePath, right.sourcePath)
+    && sameSourcePath(
+      left.projectRootPath || left.sourcePath,
+      right.projectRootPath || right.sourcePath,
+    )
+    && String(left.targetKind || "") === String(right.targetKind || "")
+    && String(left.workingCopyId || "") === String(right.workingCopyId || "")
+    && String(left.versionId || "") === String(right.versionId || "")
+    && sameSourcePath(
+      left.exactSourcePath || left.sourcePath,
+      right.exactSourcePath || right.sourcePath,
+    )
+    && Number(left.sessionEpoch ?? left.epoch)
+      === Number(right.sessionEpoch ?? right.epoch);
+}
+
+function rebindRegistrationComments({
+  html,
+  snapshot,
+  rebindTargetsPreservingGlobal,
+}) {
+  const reboundTargets = rebindTargetsPreservingGlobal(
+    html,
+    [
+      ...snapshot.comments.map((comment) => comment.sourceAnchor),
+      ...(
+        snapshot.composerTarget
+          ? [snapshot.composerTarget.commentAnchor || snapshot.composerTarget]
+          : []
+      ),
+    ],
+  );
+  const reboundById = new Map(
+    reboundTargets.map((target) => [target.id, target]),
+  );
+  return Object.freeze({
+    comments: snapshot.comments.map((comment) => ({
+      ...comment,
+      sourceAnchor: reboundById.get(comment.sourceAnchor?.id)
+        || comment.sourceAnchor,
+    })),
+    composerTarget: snapshot.composerTarget
+      ? composerTargetForDisplay(
+        reboundById.get(
+          (snapshot.composerTarget.commentAnchor || snapshot.composerTarget).id,
+        ) || snapshot.composerTarget.commentAnchor || snapshot.composerTarget,
+        snapshot.composerTarget,
+      )
+      : null,
+  });
+}
 
 function copyLocator({
   operationId,
@@ -76,17 +147,6 @@ function unknown(operationId, reason) {
     operationId: String(operationId),
     reason: String(reason),
   });
-}
-
-function commentSourceTarget(comment) {
-  return comment?.sourceAnchor || comment?.target || null;
-}
-
-function commentTargetForDisplay(sourceTarget, comment) {
-  const visualHint = comment?.visualHint || comment?.target?.visualHint;
-  return visualHint
-    ? { ...sourceTarget, label: visualHint.label, visualHint }
-    : sourceTarget;
 }
 
 function stale(identity) {
@@ -302,6 +362,7 @@ export class WorkspaceController {
   #readySurfaceKeys = new Set();
   #bufferedExternalOpens = [];
   #runSessionUnsubscribe = null;
+  #sessionPublicationDepth = 0;
   #registration = registrationSnapshot().registration;
   #projectSessionSnapshot = null;
   #documentSessionSnapshot = null;
@@ -311,6 +372,12 @@ export class WorkspaceController {
     persistence: null,
   });
   #commentsCapabilityListeners = new Set();
+  #shellSnapshot = null;
+  #shellListeners = new Set();
+  #conversationCapabilitySnapshot = null;
+  #conversationCapabilityListeners = new Set();
+  #projectRulesCapabilitySnapshot = null;
+  #projectRulesCapabilityListeners = new Set();
   #projectCatalogSnapshot = projectCatalogSnapshot();
   #projectCatalogListeners = new Set();
   #summaryGenerations = new Map();
@@ -339,6 +406,7 @@ export class WorkspaceController {
     registration: this.#registration,
     projectSession: null,
     document: null,
+    hasDocumentHistoryAction: false,
     commentSession: null,
     runSession: null,
     versionSession: null,
@@ -357,6 +425,7 @@ export class WorkspaceController {
   #listeners = new Set();
   #eventListeners = new Set();
   #registrationPromise = null;
+  #pendingRegistrationPublication = null;
   #registrationSequence = 0;
   #disposed = false;
 
@@ -491,6 +560,30 @@ export class WorkspaceController {
       workingCopy: this.#commentSessionSnapshot,
       persistence: null,
     });
+    this.shell = Object.freeze({
+      getSnapshot: () => this.#shellSnapshot,
+      subscribe: (listener) => {
+        if (typeof listener !== "function") throw new TypeError("Shell listener must be a function.");
+        this.#shellListeners.add(listener);
+        return () => this.#shellListeners.delete(listener);
+      },
+    });
+    this.conversation = Object.freeze({
+      getSnapshot: () => this.#conversationCapabilitySnapshot,
+      subscribe: (listener) => {
+        if (typeof listener !== "function") throw new TypeError("Conversation listener must be a function.");
+        this.#conversationCapabilityListeners.add(listener);
+        return () => this.#conversationCapabilityListeners.delete(listener);
+      },
+    });
+    this.projectRules = Object.freeze({
+      getSnapshot: () => this.#projectRulesCapabilitySnapshot,
+      subscribe: (listener) => {
+        if (typeof listener !== "function") throw new TypeError("Project rules listener must be a function.");
+        this.#projectRulesCapabilityListeners.add(listener);
+        return () => this.#projectRulesCapabilityListeners.delete(listener);
+      },
+    });
     this.comments = Object.freeze({
       getSnapshot: () => this.#commentsCapabilitySnapshot,
       subscribe: (listener) => {
@@ -607,6 +700,7 @@ export class WorkspaceController {
       this.#documentWorkflow = new DocumentWorkflow({
         bridgeClient,
         ensureRegistered: (input) => this.ensureRegistered(input),
+        registrationPending: () => Boolean(this.#pendingRegistrationPublication),
         projectSession,
         documentSession,
         commentSession,
@@ -740,6 +834,9 @@ export class WorkspaceController {
         codecs: projectWorkflow.codecs,
         ports: {
           ...projectWorkflow.ports,
+          publication: {
+            begin: () => this.#beginSessionPublicationBatch(),
+          },
           navigation: {
             authorizeProjectApplication: (input) => {
               if (!this.#workbenchNavigationWorkflow) {
@@ -784,6 +881,12 @@ export class WorkspaceController {
         (event) => {
           if (event?.type === "project-open-confirmation-presented") {
             this.#workbenchNavigationWorkflow?.onConfirmationPresented(event);
+          }
+          if (event?.type === "project-open-prepared-started") {
+            this.#workbenchNavigationWorkflow?.onPreparedOpenStarted(event);
+          }
+          if (event?.type === "project-open-prepared-settled") {
+            this.#workbenchNavigationWorkflow?.onPreparedOpenSettled(event);
           }
           if (event?.type === "project-navigation-terminal-failed") {
             this.#workbenchNavigationWorkflow?.onTerminalFailure(event);
@@ -1009,6 +1112,7 @@ export class WorkspaceController {
     this.#surfaceReadyWaiters.clear();
     this.#readySurfaceKeys.clear();
     this.#disposed = true;
+    this.#pendingRegistrationPublication = null;
     this.#projectSession.setObserver(null);
     this.#documentSession.setObserver(null);
     this.#commentSession.setObserver(null);
@@ -1071,6 +1175,9 @@ export class WorkspaceController {
     this.#listeners.clear();
     this.#eventListeners.clear();
     this.#commentsCapabilityListeners.clear();
+    this.#shellListeners.clear();
+    this.#conversationCapabilityListeners.clear();
+    this.#projectRulesCapabilityListeners.clear();
     this.#projectCatalogListeners.clear();
     this.#runsCapabilityListeners.clear();
     this.#navigationCapabilityListeners.clear();
@@ -1123,7 +1230,10 @@ export class WorkspaceController {
   }
 
   reloadDocumentCanvas() {
-    return this.#documentSession.reloadCanvas();
+    return this.#documentSession.reloadCanvas({
+      context: this.#projectSession.context,
+      operationId: "workspace-reload-canvas",
+    });
   }
 
   replaceCommentWorkingCopy(input) {
@@ -1546,11 +1656,14 @@ export class WorkspaceController {
   }
 
   acknowledgeEditCanvas(input) {
-    return this.#documentSession.confirmCanvas(input);
+    return this.#documentWorkflow?.confirmCanvas?.(input) === true;
   }
 
   retryCanvasVerification(input) {
-    this.#documentSession.reloadCanvas();
+    this.#documentSession.reloadCanvas({
+      context: input?.context || this.#projectSession.context,
+      operationId: "workspace-retry-canvas",
+    });
     return this.#requireDocumentWorkflow().ensureCurrentCanvas(input);
   }
 
@@ -1921,11 +2034,18 @@ export class WorkspaceController {
     return this.#requireVersionWorkflow().queryHistoryCreation(input);
   }
 
-  continueEditingHistoryVersion(input) {
-    return this.#requireVersionWorkflow().continueEditingHistoryVersion(input);
-  }
-
   enqueueDocumentEdit(input) {
+    const publication = this.#pendingRegistrationPublication;
+    if (
+      publication
+      && publication.stage < 9
+      && publication.presentedDocumentHtml !== publication.documentAuthority.html
+    ) {
+      return blocked(
+        "PROJECT_REGISTRATION_RECONCILIATION_REQUIRED",
+        "项目身份正在核对新的源 HTML；请等待画布完成切换后再编辑。",
+      );
+    }
     return this.#requireDocumentWorkflow().enqueueEdit(input);
   }
 
@@ -1934,7 +2054,14 @@ export class WorkspaceController {
   }
 
   performDocumentHistoryAction(input) {
-    return this.#requireDocumentWorkflow().performHistoryAction(input);
+    const operation = this.#requireDocumentWorkflow().performHistoryAction(input);
+    this.#publishAggregateSnapshot();
+    void operation.finally(() => {
+      if (!this.#disposed) this.#publishAggregateSnapshot();
+    }).catch(() => {
+      // DocumentWorkflow converts authority failures to typed outcomes.
+    });
+    return operation;
   }
 
   reloadDocumentAuthority(input) {
@@ -2175,12 +2302,71 @@ export class WorkspaceController {
       this.#registrationPromise = null;
     }
 
+    const pendingPublication = this.#pendingRegistrationPublication;
+    if (pendingPublication) {
+      if (this.#registrationPublicationOwnsLiveDocument(pendingPublication)) {
+        const explicitlyDifferentSource = Boolean(
+          sourcePath
+          && !this.#codecs.sameSourcePath(
+            String(sourcePath),
+            pendingPublication.context.sourcePath,
+          )
+          && !this.#codecs.sameSourcePath(
+            String(sourcePath),
+            pendingPublication.identity.sourcePath,
+          )
+        );
+        const explicitlyDifferentHash = Boolean(
+          expectedSourceSha256
+          && expectedSourceSha256 !== pendingPublication.expectedSourceSha256
+          && expectedSourceSha256 !== pendingPublication.identity.expectedSourceSha256
+        );
+        if (explicitlyDifferentSource || explicitlyDifferentHash) {
+          return Promise.resolve(blocked(
+            "PROJECT_REGISTRATION_RECONCILIATION_CONFLICT",
+            "上一轮项目注册仍在核对，当前源文件身份与该操作不一致。",
+          ));
+        }
+        this.#publishSnapshot({
+          phase: "registering",
+          operationId: pendingPublication.identity.operationId,
+          identity: pendingPublication.identity,
+        });
+        const registration = Promise.resolve().then(
+          () => this.#completeRegistrationPublication(pendingPublication),
+        );
+        this.#registrationPromise = registration;
+        registration.then(
+          (outcome) => this.#settleRegistration(registration, outcome),
+          (cause) => this.#settleRegistration(
+            registration,
+            unknown(
+              pendingPublication.identity.operationId,
+              String(cause?.message || "项目注册发布结果待同一操作核对。"),
+            ),
+          ),
+        );
+        return registration;
+      }
+      // A later navigation owns the live Sessions. Retire this in-memory
+      // continuation without publishing its older candidate into the new tab.
+      this.#pendingRegistrationPublication = null;
+    }
+
     const existingContext = this.#projectSession.context;
     if (existingContext && this.#draftSession.isActive(existingContext)) {
       return Promise.resolve(succeeded(existingContext));
     }
 
-    const operationId = this.#nextOperationId();
+    const previousRegistration = this.#snapshot.registration;
+    const reusableRegistration = previousRegistration?.outcome?.status === "unknown"
+      && previousRegistration.identity
+      && previousRegistration.identity.epoch === (existingContext?.epoch ?? this.#projectSession.epoch)
+      && this.#codecs.sameSourcePath(previousRegistration.identity.sourcePath, activeSource)
+      && previousRegistration.identity.expectedSourceSha256 === expectedHash
+      ? previousRegistration.identity.operationId
+      : null;
+    const operationId = reusableRegistration || this.#nextOperationId();
     const identity = copyLocator({
       operationId,
       epoch: existingContext?.epoch ?? this.#projectSession.epoch,
@@ -2220,6 +2406,116 @@ export class WorkspaceController {
     ].join("_");
   }
 
+  #registrationPublicationOwnsLiveDocument(publication) {
+    if (!publication) return false;
+    if (this.#projectSession.matches(publication.context)) return true;
+    return Boolean(
+      publication.stage >= 1
+      && sameRegistrationDocumentRoute(
+        publication.context,
+        this.#projectSession.context,
+        this.#codecs.sameSourcePath,
+      )
+    );
+  }
+
+  #reconcileRegistrationPublication(publication) {
+    if (
+      !this.#registrationPublicationOwnsLiveDocument(publication)
+      || this.#pendingRegistrationPublication !== publication
+    ) return false;
+
+    const liveContext = copyProjectContext(this.#projectSession.context);
+    if (!liveContext) return false;
+    if (publication.stage < 1) {
+      return this.#projectSession.matches(publication.context);
+    }
+
+    const document = this.#documentSession.snapshot;
+    const receiptContext = copyProjectContext(document.sourceReceipt?.context);
+    const persistedSourceSha256 = String(document.persistedSourceSha256 || "");
+    if (
+      !receiptContext
+      || !sameRegistrationDocumentRoute(
+        receiptContext,
+        liveContext,
+        this.#codecs.sameSourcePath,
+      )
+      || !/^sha256:[a-f0-9]{64}$/u.test(persistedSourceSha256)
+      || (
+        liveContext.sourceSha256
+        && liveContext.sourceSha256 !== persistedSourceSha256
+      )
+      || document.editRevision < publication.documentSnapshot.editRevision
+      || document.lastPersistedRevision
+        < publication.documentSnapshot.lastPersistedRevision
+    ) return false;
+
+    const documentContentAdvanced = Boolean(
+      document.html !== publication.documentSnapshot.html
+      || document.editRevision !== publication.documentSnapshot.editRevision
+      || document.workingHtmlSha256
+        !== publication.documentSnapshot.workingHtmlSha256
+    );
+    if (documentContentAdvanced) {
+      const workingHtmlSha256 = String(document.workingHtmlSha256 || "");
+      if (
+        publication.presentedDocumentHtml !== publication.documentAuthority.html
+        || !/^sha256:[a-f0-9]{64}$/u.test(workingHtmlSha256)
+        || !this.#sourceHistorySession.isActive(liveContext)
+        || this.#sourceHistorySession.capabilities.sourceSha256
+          !== workingHtmlSha256
+      ) return false;
+      publication.sourceWasEdited = true;
+    }
+
+    if (this.#commentSession.snapshot !== publication.commentFence) {
+      const commentFence = this.#commentSession.snapshot;
+      if (publication.shouldAdoptCanonicalSource) {
+        const rebound = rebindRegistrationComments({
+          html: document.html,
+          snapshot: commentFence,
+          rebindTargetsPreservingGlobal:
+            this.#codecs.rebindTargetsPreservingGlobal,
+        });
+        publication.nextComments = rebound.comments;
+        publication.nextComposerTarget = rebound.composerTarget;
+        if (publication.stage > 2) {
+          publication.commentFence = this.#commentSession.update({
+            comments: rebound.comments,
+            composerTarget: rebound.composerTarget,
+          });
+        } else {
+          publication.commentFence = commentFence;
+        }
+      } else {
+        publication.commentFence = commentFence;
+      }
+    }
+
+    const contextChanged = !this.#projectSession.matches(publication.context);
+    publication.context = liveContext;
+    publication.expectedSourceSha256 = persistedSourceSha256;
+    publication.event = Object.freeze({
+      ...publication.event,
+      context: liveContext,
+    });
+    if (contextChanged && publication.stage >= 4) {
+      this.#draftSession.activate(
+        liveContext,
+        this.#draftSession.revision,
+      );
+    }
+    if (
+      publication.stage < 5
+      && persistedSourceSha256
+        !== publication.documentAuthority.persistedSourceSha256
+    ) {
+      publication.recoveryIdentitySuperseded = true;
+    }
+    return true;
+  }
+
   #publishSnapshot({ phase, operationId = null, identity = null, outcome = null }) {
     this.#registration = registrationSnapshot({
       phase,
@@ -2230,7 +2526,101 @@ export class WorkspaceController {
     this.#publishAggregateSnapshot();
   }
 
+  #publishRegistrationOnly() {
+    this.#snapshot = Object.freeze({
+      ...this.#snapshot,
+      registration: this.#registration,
+    });
+    const shell = workspaceShellSnapshot(this.#snapshot, this.#shellSnapshot);
+    if (shell !== this.#shellSnapshot) {
+      this.#shellSnapshot = shell;
+      this.#notifyPresentation(this.#shellListeners);
+    }
+    for (const listener of this.#listeners) {
+      try {
+        listener(this.#snapshot);
+      } catch {
+        // Presentation listeners cannot affect application authority.
+      }
+    }
+  }
+
+  #beginSessionPublicationBatch() {
+    this.#sessionPublicationDepth += 1;
+    let ended = false;
+    return ({ publish = true } = {}) => {
+      if (ended) return;
+      ended = true;
+      this.#sessionPublicationDepth = Math.max(0, this.#sessionPublicationDepth - 1);
+      if (this.#sessionPublicationDepth > 0) return;
+      if (!publish) return;
+      // Keep the flush itself inside the fence: EditRuntime and surface-cache
+      // refreshes are Session observers too and must not publish an
+      // intermediate tuple before the final aggregate snapshot.
+      this.#sessionPublicationDepth = 1;
+      try {
+        this.#projectSessionSnapshot = this.#projectSession.snapshot;
+        this.#documentSessionSnapshot = this.#documentSession.snapshot;
+        this.#commentSessionSnapshot = this.#commentSession.snapshot;
+        this.#runSessionSnapshot = this.#runSession?.snapshot || null;
+        this.#versionSessionSnapshot = this.#versionSession.snapshot;
+        try {
+          this.#captureCurrentVersionSummary();
+        } catch (cause) {
+          reportInternalFailure({
+            area: "workspace-registration",
+            operation: "refresh-version-summary",
+            code: "registration-summary-projection-failed",
+            recovered: true,
+            cause,
+          });
+        }
+        try {
+          this.#refreshEditAuthorRuntime();
+        } catch (cause) {
+          reportInternalFailure({
+            area: "workspace-registration",
+            operation: "refresh-edit-runtime",
+            code: "registration-edit-runtime-projection-failed",
+            recovered: true,
+            cause,
+          });
+        }
+        try {
+          this.#refreshDocumentSurfaceCache();
+        } catch (cause) {
+          reportInternalFailure({
+            area: "workspace-registration",
+            operation: "refresh-document-surface",
+            code: "registration-surface-projection-failed",
+            recovered: true,
+            cause,
+          });
+        }
+      } finally {
+        this.#sessionPublicationDepth = 0;
+      }
+      this.#publishAggregateSnapshot();
+    };
+  }
+
   #publishAggregateSnapshot() {
+    if (this.#sessionPublicationDepth > 0) return;
+    if (
+      this.#pendingRegistrationPublication
+      && !this.#registrationPublicationOwnsLiveDocument(
+        this.#pendingRegistrationPublication,
+      )
+    ) {
+      this.#pendingRegistrationPublication = null;
+    }
+    if (
+      this.#pendingRegistrationPublication
+      && this.#pendingRegistrationPublication.stage < 6
+    ) {
+      this.#publishRegistrationOnly();
+      return;
+    }
     this.#publishCommentsCapabilitySnapshot();
     this.#publishRunsCapabilitySnapshot();
     this.#publishNavigationCapabilitySnapshot();
@@ -2238,6 +2628,7 @@ export class WorkspaceController {
       registration: this.#registration,
       projectSession: this.#projectSessionSnapshot,
       document: this.#documentSessionSnapshot,
+      hasDocumentHistoryAction: this.hasDocumentHistoryAction,
       commentSession: this.#commentSessionSnapshot,
       runSession: this.#runSessionSnapshot,
       versionSession: this.#versionSessionSnapshot,
@@ -2254,11 +2645,32 @@ export class WorkspaceController {
       workbenchNavigation: this.#workbenchNavigationSnapshot,
       workbenchTabsPersistence: this.#workbenchTabsPersistenceSnapshot,
     });
+    const shell = workspaceShellSnapshot(this.#snapshot, this.#shellSnapshot);
+    if (shell !== this.#shellSnapshot) {
+      this.#shellSnapshot = shell;
+      this.#notifyPresentation(this.#shellListeners);
+    }
+    if (this.#conversationCapabilitySnapshot !== this.#conversationSnapshot) {
+      this.#conversationCapabilitySnapshot = this.#conversationSnapshot;
+      this.#notifyPresentation(this.#conversationCapabilityListeners);
+    }
+    if (this.#projectRulesCapabilitySnapshot !== this.#projectRulesSnapshot) {
+      this.#projectRulesCapabilitySnapshot = this.#projectRulesSnapshot;
+      this.#notifyPresentation(this.#projectRulesCapabilityListeners);
+    }
     for (const listener of this.#listeners) {
       try {
         listener(this.#snapshot);
       } catch {
         // Presentation listeners cannot affect application authority.
+      }
+    }
+  }
+
+  #notifyPresentation(listeners) {
+    for (const listener of listeners) {
+      try { listener(); } catch {
+        // A read-only projection listener cannot change application authority.
       }
     }
   }
@@ -2395,6 +2807,7 @@ export class WorkspaceController {
     this.#projectSession.setObserver((snapshot) => {
       if (this.#disposed) return;
       this.#projectSessionSnapshot = snapshot;
+      if (this.#sessionPublicationDepth > 0) return;
       this.#refreshEditAuthorRuntime();
       this.#refreshDocumentSurfaceCache();
       this.#publishAggregateSnapshot();
@@ -2402,6 +2815,7 @@ export class WorkspaceController {
     this.#documentSession.setObserver((snapshot) => {
       if (this.#disposed) return;
       this.#documentSessionSnapshot = snapshot;
+      if (this.#sessionPublicationDepth > 0) return;
       this.#refreshEditAuthorRuntime();
       this.#refreshDocumentSurfaceCache();
       this.#publishAggregateSnapshot();
@@ -2409,16 +2823,19 @@ export class WorkspaceController {
     this.#commentSession.setObserver((snapshot) => {
       if (this.#disposed) return;
       this.#commentSessionSnapshot = snapshot;
+      if (this.#sessionPublicationDepth > 0) return;
       this.#publishAggregateSnapshot();
     });
     this.#runSession?.setObserver((snapshot) => {
       if (this.#disposed) return;
       this.#runSessionSnapshot = snapshot;
+      if (this.#sessionPublicationDepth > 0) return;
       this.#publishAggregateSnapshot();
     });
     this.#versionSession.setObserver((snapshot) => {
       if (this.#disposed) return;
       this.#versionSessionSnapshot = snapshot;
+      if (this.#sessionPublicationDepth > 0) return;
       this.#captureCurrentVersionSummary();
       this.#publishAggregateSnapshot();
     });
@@ -2530,6 +2947,7 @@ export class WorkspaceController {
     adoptCanonicalSource,
     identity,
   }) {
+    let managedHostCommitted = false;
     try {
       const payload = await this.#bridgeClient.ensureProject({
         sourcePath: activeSource,
@@ -2547,7 +2965,7 @@ export class WorkspaceController {
       try {
         decodedWorkspace = decodeWorkspaceResponse(payload, this.#codecs);
       } catch (cause) {
-        return unknown(this.#registration.operationId, cause.message || "项目操作结果待确认。");
+        return unknown(identity.operationId, cause.message || "项目操作结果待确认。");
       }
 
       const nextProjectId = String(payload.projectId || "");
@@ -2573,9 +2991,49 @@ export class WorkspaceController {
         );
       }
 
+      let recoveryIdentity;
+      let versionHydration;
+      let authoritativeDraftRevision;
+      let sourceHistoryAuthority;
+      try {
+        recoveryIdentity = this.#codecs.recoveryIdentityFromRecord(
+          payload.recoveryIdentity,
+        );
+        versionHydration = Object.freeze({
+          versions: decodedWorkspace.versions,
+          latestVersionId: payload.latestVersionId,
+          currentBasedOnVersionId: payload.currentBasedOnVersionId,
+          currentExactVersionId: payload.currentExactVersionId,
+        });
+        authoritativeDraftRevision = this.#codecs.authoritativeDraftRevision(
+          decodedWorkspace.draft,
+        );
+        sourceHistoryAuthority = this.#documentWorkflow
+          ?.captureProjectTransitionAuthority?.() || null;
+      } catch {
+        return rejected(
+          "PROJECT_REGISTRATION_PAYLOAD_INVALID",
+          "项目记录已建立，但工作区投影无法完整验证。",
+        );
+      }
+
       const currentDocument = this.#documentSession.snapshot;
+      const documentFence = Object.freeze({
+        snapshot: currentDocument,
+        sourceReceipt: currentDocument.sourceReceipt,
+        pendingWrite: this.#documentSession.pendingWrite,
+        flushPromise: this.#documentSession.flushPromise,
+      });
+      const documentFenceIsCurrent = () => Boolean(
+        this.#documentSession.snapshot === documentFence.snapshot
+        && this.#documentSession.sourceReceipt === documentFence.sourceReceipt
+        && this.#documentSession.pendingWrite === documentFence.pendingWrite
+        && this.#documentSession.flushPromise === documentFence.flushPromise
+      );
       const currentHtmlSha256 = await this.#hashPort.sha256(currentDocument.html);
-      if (!this.#isCurrentLocator(identity)) return stale(identity);
+      if (!this.#isCurrentLocator(identity) || !documentFenceIsCurrent()) {
+        return stale(identity);
+      }
       const currentDocumentClean = Boolean(
         currentDocument.editRevision === currentDocument.lastPersistedRevision
         && !this.#documentSession.pendingWrite
@@ -2598,12 +3056,67 @@ export class WorkspaceController {
       const nextDocumentHtml = shouldAdoptCanonicalSource
         ? canonicalSource
         : currentDocument.html;
+      const commentFence = this.#commentSession.snapshot;
+      let nextComments = null;
+      let nextComposerTarget = null;
+      try {
+        if (shouldAdoptCanonicalSource) {
+          const rebound = rebindRegistrationComments({
+            html: canonicalSource,
+            snapshot: commentFence,
+            rebindTargetsPreservingGlobal:
+              this.#codecs.rebindTargetsPreservingGlobal,
+          });
+          nextComments = rebound.comments;
+          nextComposerTarget = rebound.composerTarget;
+        }
+      } catch {
+        return rejected(
+          "PROJECT_REGISTRATION_PAYLOAD_INVALID",
+          "项目记录已建立，但评论目标无法与返回的源码安全对齐。",
+        );
+      }
+      const publicationFencesCurrent = () => Boolean(
+        documentFenceIsCurrent()
+        && this.#commentSession.snapshot === commentFence
+      );
       const projectRecord = this.#codecs.isRecord(payload.project)
         ? payload.project
         : {};
-      const openTarget = this.#codecs.isRecord(payload.openTarget)
+      const rawOpenTarget = this.#codecs.isRecord(payload.openTarget)
         ? payload.openTarget
         : null;
+      const rawTargetPath = String(rawOpenTarget?.exactSourcePath || "");
+      const openTarget = rawOpenTarget
+        ? verifyOpenTarget(rawOpenTarget, {
+          projectId: nextProjectId,
+          documentId: nextDocumentId,
+          sourcePath: payload.sourcePath || activeSource,
+          sourceSha256: nextSourceSha256,
+          sameSourcePath: this.#codecs.sameSourcePath,
+          targetKind: "working-copy",
+        })
+        : null;
+      const openTargetInvalid = Boolean(
+        (!openTarget && (
+          rawOpenTarget
+          || (
+            payload.sourcePath
+            && !this.#codecs.sameSourcePath(String(payload.sourcePath), activeSource)
+          )
+        ))
+        || (
+          rawOpenTarget
+          && payload.sourcePath
+          && !this.#codecs.sameSourcePath(String(payload.sourcePath), rawTargetPath)
+        ),
+      );
+      if (openTargetInvalid) {
+        return rejected(
+          "PROJECT_REGISTRATION_OPEN_TARGET_INVALID",
+          "新项目缺少与已核对源文件一致的完整工作文件身份，未保存修改仍保留在当前页面。",
+        );
+      }
       const registeredSourcePath = String(
         openTarget?.exactSourcePath || payload.sourcePath || activeSource,
       );
@@ -2611,6 +3124,11 @@ export class WorkspaceController {
         openTarget
         && !this.#codecs.sameSourcePath(registeredSourcePath, activeSource),
       );
+      if (this.#projectSession.context) return stale(identity);
+      let managedRunReservation = null;
+      let managedProjectReservation = null;
+      const runCoordination = this.#runSession?.[RUN_SESSION_COORDINATION] || null;
+      const projectCoordination = this.#projectSession[PROJECT_SESSION_COORDINATION] || null;
       if (requiresManagedWorkingCopyActivation) {
         if (
           openTarget.targetKind !== "working-copy"
@@ -2631,7 +3149,28 @@ export class WorkspaceController {
             "当前运行环境不能切换到新建立的工作文件；未保存修改仍保留在当前页面。",
           );
         }
+        managedRunReservation = runCoordination?.prepareRebaseSource?.({
+          previousSourcePath: activeSource,
+          sourcePath: registeredSourcePath,
+          projectId: nextProjectId,
+          documentId: nextDocumentId,
+        }) || null;
+        managedProjectReservation = projectCoordination?.prepareTransitionSource?.({
+          previousSourcePath: activeSource,
+          sourcePath: registeredSourcePath,
+          projectId: nextProjectId,
+          documentId: nextDocumentId,
+          openTarget,
+        });
+        if (!managedProjectReservation || (this.#runSession && !managedRunReservation)) {
+          return rejected(
+            "PROJECT_RUN_LOCATOR_REBASE_REJECTED",
+            "新项目的工作文件路径与现有 Request 状态无法形成一致身份，未发布项目会话。",
+          );
+        }
+        managedHostCommitted = true;
         const activated = await this.#projectSourcePort.activateManagedWorkingCopy({
+          operationId: identity.operationId,
           previousSourcePath: activeSource,
           nextSourcePath: registeredSourcePath,
           expectedSha256: nextSourceSha256,
@@ -2641,151 +3180,432 @@ export class WorkspaceController {
           versionId: String(openTarget.versionId),
           projectRootPath: String(openTarget.projectRootPath),
         });
-        if (!this.#isCurrentLocator(identity)) return stale(identity);
+        if (!this.#isCurrentLocator(identity) || !publicationFencesCurrent()) {
+          return unknown(
+            identity.operationId,
+            "托管工作文件已完成桌面激活，但当前项目或文档已经变化，请按同一操作重新核对。",
+          );
+        }
+        if (
+          (this.#runSession && !runCoordination?.rebaseReservationCurrent?.(managedRunReservation))
+          || !projectCoordination?.transitionReservationCurrent?.(managedProjectReservation)
+        ) {
+          return unknown(
+            identity.operationId,
+            "托管工作文件已完成桌面激活，但本地 reservation 已变化，请按同一操作核对结果。",
+          );
+        }
+        const activatedHash = this.#codecs.isRecord(activated)
+          && typeof activated.html === "string"
+          ? await this.#hashPort.sha256(activated.html)
+          : null;
         if (
           !this.#codecs.isRecord(activated)
+          || String(activated.operationId || "") !== identity.operationId
           || !this.#codecs.sameSourcePath(
             String(activated.sourcePath || ""),
             registeredSourcePath,
           )
           || String(activated.sha256 || "") !== nextSourceSha256
           || typeof activated.html !== "string"
-          || await this.#hashPort.sha256(activated.html) !== nextSourceSha256
+          || activatedHash !== nextSourceSha256
         ) {
-          return rejected(
-            "PROJECT_WORKING_COPY_ACTIVATION_INVALID",
-            "托管工作文件未通过路径和内容校验；未保存修改仍保留在当前页面。",
+          return unknown(
+            identity.operationId,
+            "托管工作文件已返回，但桌面结果的路径、身份或 Hash 无法核对，请重新打开。",
+          );
+        }
+        if (!this.#isCurrentLocator(identity) || !publicationFencesCurrent()) {
+          return unknown(
+            identity.operationId,
+            "托管工作文件已完成桌面激活，但当前文档 receipt 或源 Hash 已经变化，请按同一操作重新核对。",
+          );
+        }
+        if (
+          (this.#runSession && !runCoordination?.rebaseReservationCurrent?.(managedRunReservation))
+          || !projectCoordination?.transitionReservationCurrent?.(managedProjectReservation)
+        ) {
+          return unknown(
+            identity.operationId,
+            "托管工作文件 Hash 返回时本地 reservation 已变化，请按同一操作核对结果。",
           );
         }
       }
-      if (this.#projectSession.context) return stale(identity);
-      const registeredContext = (
-        openTarget
-        && !this.#codecs.sameSourcePath(registeredSourcePath, activeSource)
-      )
-        ? this.#projectSession.adoptOpenTarget({
-            previousSourcePath: activeSource,
-            target: openTarget,
-          })
-        : this.#projectSession.register({
+      if (!publicationFencesCurrent()) {
+        return requiresManagedWorkingCopyActivation
+          ? unknown(
+            identity.operationId,
+            "托管工作文件已完成桌面激活，但当前文档已经变化，请按同一操作重新核对。",
+          )
+          : stale(identity);
+      }
+      if (this.#projectSession.context) {
+        return requiresManagedWorkingCopyActivation
+          ? unknown(
+            identity.operationId,
+            "托管工作文件已完成桌面激活，但本地项目身份已经变化，请重新核对。",
+          )
+          : stale(identity);
+      }
+      const endPublication = this.#beginSessionPublicationBatch();
+      let publicationOwnsBatch = false;
+      try {
+        let registeredContext = null;
+        if (requiresManagedWorkingCopyActivation) {
+          if (
+            !managedProjectReservation
+            || (this.#runSession && (
+              !managedRunReservation
+              || !runCoordination?.commitRebaseSource?.(
+                managedRunReservation,
+                { publish: false },
+              )
+            ))
+          ) {
+            return unknown(
+              identity.operationId,
+              "托管工作文件已完成桌面激活，但本地 Request Locator CAS 失败，请重新核对。",
+            );
+          }
+          let committedContext = null;
+          try {
+            committedContext = projectCoordination?.commitTransitionSource?.(
+              managedProjectReservation,
+              { publish: false },
+            );
+          } catch {
+            committedContext = null;
+          }
+          if (!committedContext) {
+            const rolledBack = runCoordination
+              ? runCoordination.rollbackRebaseSource?.(
+                managedRunReservation,
+                { publish: false },
+              )
+              : true;
+            return unknown(
+              identity.operationId,
+              rolledBack
+                ? "托管工作文件已完成桌面激活，但本地项目会话未能提交，请重新核对。"
+                : "托管工作文件已完成桌面激活，但本地 Locator 状态未知，请重新核对。",
+            );
+          }
+          registeredContext = committedContext;
+        } else {
+          registeredContext = this.#projectSession.register({
             epoch: identity.epoch,
             projectId: nextProjectId,
             documentId: nextDocumentId,
             sourcePath: registeredSourcePath,
             ...(openTarget ? { openTarget } : {}),
           });
-      if (!registeredContext) return stale(identity);
-      if (
-        requiresManagedWorkingCopyActivation
-        && this.#runSession
-        && typeof this.#runSession.rebaseSource === "function"
-      ) {
-        this.#runSession.rebaseSource({
-          previousSourcePath: activeSource,
-          sourcePath: registeredContext.sourcePath,
-          projectId: registeredContext.projectId,
-        });
-      }
+        }
+        if (!registeredContext) {
+          return requiresManagedWorkingCopyActivation
+            ? unknown(
+              identity.operationId,
+              "托管工作文件已完成桌面激活，但本地项目身份未形成，请重新核对。",
+            )
+            : stale(identity);
+        }
 
-      const recoveryIdentity = this.#codecs.recoveryIdentityFromRecord(
-        payload.recoveryIdentity,
-      );
-      this.#recoveryPort.replace(recoveryIdentity);
-      this.#documentWorkflow?.replaceRecoveryIdentity(recoveryIdentity);
-      const documentAlreadyMatchesCanonical = Boolean(
-        currentDocument.html === nextDocumentHtml
-        && currentDocument.persistedSourceSha256 === nextSourceSha256,
-      );
-      if (shouldAdoptCanonicalSource && !documentAlreadyMatchesCanonical) {
-        if (currentDocument.html !== nextDocumentHtml) {
-          this.#documentSession.publishAuthority({
+        const publication = {
+          stage: 0,
+          identity,
+          context: registeredContext,
+          expectedSourceSha256: nextSourceSha256,
+          presentedDocumentHtml: currentDocument.html,
+          documentFenceIsCurrent,
+          documentAuthority: Object.freeze({
             html: nextDocumentHtml,
             persistedSourceSha256: nextSourceSha256,
-          });
-          this.#canvasPort.invalidateRenderAcks();
-        } else {
-          // The renderer already holds the exact canonical bytes. Repair only
-          // its source identity; recreating the disposable canvas would abort
-          // an otherwise valid author-runtime page for no source-level reason.
-          this.#documentSession.update({ persistedSourceSha256: nextSourceSha256 });
-        }
-      } else if (!documentAlreadyMatchesCanonical) {
-        this.#documentSession.update({
-          html: nextDocumentHtml,
-          persistedSourceSha256: nextSourceSha256,
+            workingHtmlSha256: shouldAdoptCanonicalSource
+              ? nextSourceSha256
+              : currentDocumentClean
+                ? currentHtmlSha256
+                : currentDocument.workingHtmlSha256,
+            editRevision: currentDocument.editRevision,
+            lastPersistedRevision: currentDocument.lastPersistedRevision,
+            pendingWrite: documentFence.pendingWrite ? {
+              ...documentFence.pendingWrite,
+              ...registeredContext,
+              sourcePath: registeredSourcePath,
+              expectedSourceSha256: nextSourceSha256,
+            } : null,
+            context: registeredContext,
+            operationId: "workspace-register-authority",
+          }),
+          versionHydration,
+          sourceWasEdited: Boolean(
+            currentDocument.editRevision > currentDocument.lastPersistedRevision
+            || (
+              currentDocument.workingHtmlSha256
+              && currentDocument.workingHtmlSha256 !== nextSourceSha256
+            )
+          ),
+          shouldAdoptCanonicalSource,
+          commentFence,
+          nextComments,
+          nextComposerTarget,
+          authoritativeDraft: decodedWorkspace.draft,
+          authoritativeDraftRevision,
+          recoveryIdentity,
+          sourceHistoryAuthority,
+          publishManagedSessions: requiresManagedWorkingCopyActivation,
+          projectCoordination,
+          runCoordination,
+          event: Object.freeze({
+            type: "registration-published",
+            context: registeredContext,
+            projectName: projectRecord.displayName
+              ? String(projectRecord.displayName)
+              : null,
+            ...(payload.imported === true ? { imported: true } : {}),
+            ...(payload.workingCopyRecovered === true
+              ? { workingCopyRecovered: true }
+              : {}),
+            canonicalSourceAdopted: shouldAdoptCanonicalSource,
+          }),
+        };
+        this.#pendingRegistrationPublication = publication;
+        publicationOwnsBatch = true;
+        return this.#completeRegistrationPublication(publication, {
+          endPublication,
         });
+      } finally {
+        if (!publicationOwnsBatch) endPublication?.();
       }
-      this.#versionSession.hydrate({
-        versions: decodedWorkspace.versions,
-        latestVersionId: payload.latestVersionId,
-        currentBasedOnVersionId: payload.currentBasedOnVersionId,
-        currentExactVersionId: payload.currentExactVersionId,
-      });
-      if (shouldAdoptCanonicalSource) {
-        const reboundTargets = this.#codecs.rebindTargetsPreservingGlobal(
-          canonicalSource,
-          [
-            ...this.#commentSession.comments.map(commentSourceTarget),
-            ...(
-              this.#commentSession.composerTarget
-                ? [this.#commentSession.composerTarget.commentAnchor
-                  || this.#commentSession.composerTarget]
-                : []
-            ),
-          ],
+    } catch (cause) {
+      if (managedHostCommitted) {
+        return unknown(
+          identity.operationId,
+          String(cause?.message || "托管工作文件已完成桌面激活，但本地状态待同一操作核对。"),
         );
-        const reboundById = new Map(
-          reboundTargets.map((target) => [target.id, target]),
-        );
-        this.#commentSession.setComments(
-          this.#commentSession.comments.map((comment) => ({
-            ...comment,
-            target: commentTargetForDisplay(
-              reboundById.get(commentSourceTarget(comment)?.id)
-                || commentSourceTarget(comment),
-              comment,
-            ),
-            sourceAnchor: reboundById.get(commentSourceTarget(comment)?.id)
-              || commentSourceTarget(comment),
-          })),
-        );
-        if (this.#commentSession.composerTarget) {
-          const composerTarget = this.#commentSession.composerTarget;
-          const sourceTarget = composerTarget.commentAnchor || composerTarget;
-          this.#commentSession.setComposerTarget(
-            commentTargetForDisplay(
-              reboundById.get(sourceTarget.id) || sourceTarget,
-              composerTarget,
-            ),
+      }
+      return this.#outcomeFromCause(identity, cause);
+    }
+  }
+
+  #completeRegistrationPublication(publication, { endPublication = null } = {}) {
+    const finishPublication = endPublication || this.#beginSessionPublicationBatch();
+    let publishAggregate = publication.stage >= 6;
+    try {
+      if (
+        this.#disposed
+        || this.#pendingRegistrationPublication !== publication
+        || !this.#reconcileRegistrationPublication(publication)
+      ) {
+        if (this.#pendingRegistrationPublication === publication) {
+          this.#pendingRegistrationPublication = null;
+          publishAggregate = true;
+        }
+        return stale(publication.identity);
+      }
+
+      if (publication.stage === 0) {
+        if (!publication.documentFenceIsCurrent()) {
+          return unknown(
+            publication.identity.operationId,
+            "项目身份已形成，但当前文档在发布前发生了变化，请按同一操作重新核对。",
           );
         }
+        // Registration changes the complete source context even when bytes
+        // are identical. The fresh receipt fences the old frame and ACKs.
+        this.#documentSession.publishAuthority(publication.documentAuthority);
+        publication.documentSnapshot = this.#documentSession.snapshot;
+        publication.stage = 1;
+        try {
+          this.#canvasPort.invalidateRenderAcks();
+        } catch (cause) {
+          reportInternalFailure({
+            area: "workspace-registration",
+            operation: "invalidate-canvas-acks",
+            code: "registration-canvas-projection-failed",
+            recovered: true,
+            cause,
+          });
+        }
       }
-      const authoritativeDraft = decodedWorkspace.draft;
-      this.#draftSession.replaceAuthority(
-        registeredContext,
-        this.#codecs.authoritativeDraftRevision(authoritativeDraft),
-        authoritativeDraft,
-      );
-      this.#commentWorkflow?.reconcileAuthority();
-      this.#sourceHistorySession.activate(
-        registeredContext,
-        nextSourceSha256,
-        null,
-        { preservePending: true },
-      );
-      this.#emitEvent({
-        type: "registration-published",
-        context: registeredContext,
-        projectName: projectRecord.displayName
-          ? String(projectRecord.displayName)
-          : null,
-        ...(payload.imported === true ? { imported: true } : {}),
-        ...(payload.workingCopyRecovered === true ? { workingCopyRecovered: true } : {}),
-        canonicalSourceAdopted: shouldAdoptCanonicalSource,
-      });
-      return succeeded(registeredContext);
+
+      const receiptContext = this.#documentSession.sourceReceipt?.context;
+      if (
+        publication.stage >= 1
+        && (
+          this.#documentSession.persistedSourceSha256
+            !== publication.expectedSourceSha256
+          || !receiptContext
+          || !this.#projectSession.matches(receiptContext)
+        )
+      ) {
+        return unknown(
+          publication.identity.operationId,
+          "项目注册的文档 receipt 已与当前源文件身份不一致，未重放旧候选状态。",
+        );
+      }
+
+      if (publication.stage === 1) {
+        this.#versionSession.hydrate(publication.versionHydration);
+        if (publication.sourceWasEdited) {
+          this.#versionSession.markSourceEdited();
+        }
+        publication.stage = 2;
+      }
+
+      if (publication.stage === 2) {
+        if (
+          publication.shouldAdoptCanonicalSource
+          && this.#commentSession.snapshot !== publication.commentFence
+        ) {
+          return unknown(
+            publication.identity.operationId,
+            "项目注册的评论目标尚未发布，但评论已继续变化，未覆盖新内容。",
+          );
+        }
+        if (publication.shouldAdoptCanonicalSource) {
+          this.#commentSession.setComments(publication.nextComments);
+          if (publication.nextComposerTarget) {
+            this.#commentSession.setComposerTarget(
+              publication.nextComposerTarget,
+            );
+          }
+        }
+        publication.stage = 3;
+      }
+
+      if (publication.stage === 3) {
+        this.#draftSession.replaceAuthority(
+          publication.context,
+          publication.authoritativeDraftRevision,
+          publication.authoritativeDraft,
+        );
+        publication.stage = 4;
+      }
+
+      if (publication.stage === 4) {
+        if (!publication.recoveryIdentitySuperseded) {
+          this.#documentWorkflow?.replaceRecoveryIdentity(
+            publication.recoveryIdentity,
+          );
+        }
+        publication.stage = 5;
+        if (!publication.recoveryIdentitySuperseded) {
+          try {
+            this.#recoveryPort.replace(publication.recoveryIdentity);
+          } catch (cause) {
+            reportInternalFailure({
+              area: "workspace-registration",
+              operation: "replace-recovery-projection",
+              code: "registration-recovery-projection-failed",
+              recovered: true,
+              cause,
+            });
+          }
+        }
+      }
+
+      if (publication.stage === 5) {
+        if (publication.publishManagedSessions) {
+          publication.projectCoordination?.publish?.();
+          publication.runCoordination?.publish?.();
+        }
+        publication.stage = 6;
+        publishAggregate = true;
+      }
+
+      if (publication.stage === 6) {
+        const documentChanged = this.#documentSession.snapshot
+          !== publication.documentSnapshot;
+        const liveHistoryMatches = Boolean(
+          documentChanged
+          && this.#sourceHistorySession.isActive(publication.context)
+          && this.#sourceHistorySession.capabilities.sourceSha256
+            === this.#documentSession.workingHtmlSha256
+        );
+        if (!documentChanged) {
+          this.#sourceHistorySession.activate(
+            publication.context,
+            publication.expectedSourceSha256,
+            null,
+            { preservePending: true },
+          );
+        } else if (!liveHistoryMatches) {
+          const sourceSha256 = String(
+            this.#documentSession.workingHtmlSha256
+            || publication.expectedSourceSha256
+            || "",
+          );
+          if (!/^sha256:[a-f0-9]{64}$/u.test(sourceSha256)) {
+            return unknown(
+              publication.identity.operationId,
+              "项目注册的源码历史缺少可验证的当前 Hash，未重置新历史。",
+            );
+          }
+          const sourceHistory = publication.sourceHistoryAuthority?.sourceHistory
+            ? {
+              ...publication.sourceHistoryAuthority.sourceHistory,
+              projectId: publication.context.projectId,
+              documentId: publication.context.documentId,
+              sourcePath: publication.context.sourcePath,
+            }
+            : null;
+          this.#sourceHistorySession.activate(
+            publication.context,
+            sourceSha256,
+            sourceHistory,
+          );
+          const pendingHistory = this.#documentSession.pendingWrite
+            ?.historyOperations
+            || publication.sourceHistoryAuthority?.sourceHistoryOperations
+            || [];
+          this.#sourceHistorySession.restorePendingEvidence(
+            publication.context,
+            pendingHistory,
+          );
+          if (
+            !this.#sourceHistorySession.isActive(publication.context)
+            || this.#sourceHistorySession.capabilities.sourceSha256
+              !== sourceSha256
+          ) {
+            return unknown(
+              publication.identity.operationId,
+              "项目注册的源码历史尚未发布，但文档已继续变化，未重置新历史。",
+            );
+          }
+        }
+        publication.stage = 7;
+      }
+
+      if (publication.stage === 7) {
+        const reconciliation = this.#commentWorkflow?.reconcileAuthority();
+        if (
+          reconciliation
+          && reconciliation.status !== "succeeded"
+        ) {
+          throw new Error(
+            reconciliation.reason || "评论权威尚未完成对齐。",
+          );
+        }
+        publication.stage = 8;
+      }
+
+      if (publication.stage === 8) {
+        this.#emitEvent(publication.event);
+        publication.stage = 9;
+      }
+
+      this.#pendingRegistrationPublication = null;
+      publishAggregate = true;
+      return succeeded(publication.context);
     } catch (cause) {
-      return this.#outcomeFromCause(identity, cause);
+      return unknown(
+        publication.identity.operationId,
+        String(
+          cause?.message
+          || "项目身份已形成，但本地发布状态待同一操作核对。",
+        ),
+      );
+    } finally {
+      finishPublication?.({ publish: publishAggregate });
     }
   }
 

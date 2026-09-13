@@ -4,13 +4,19 @@ import test from "node:test";
 import { createAgentEventReducer } from "../bridge/agent/agent-events.mjs";
 import {
   executionPhaseForEvent,
-  publicVisibleTextUpdates,
+  createPublicAgentTextAccumulator,
   safePublicAgentText,
 } from "../bridge/agent/agent-session-projector.mjs";
 import {
   AgentRuntimeCoordinator,
   TRUSTED_LOCAL_AGENT_POLICY_VERSION,
 } from "../bridge/agent/agent-runtime-coordinator.mjs";
+
+function projectPublicText(events) {
+  const accumulator = createPublicAgentTextAccumulator();
+  for (const event of events) accumulator.append(event);
+  return accumulator.snapshot().visibleTextUpdates;
+}
 
 const IDENTITY = Object.freeze({
   projectId: `project_${"a".repeat(16)}`,
@@ -491,7 +497,7 @@ test("canonical visible-text truncation facts survive a byte-limited runtime", (
 });
 
 test("public Agent text keeps message boundaries without exposing non-text events", () => {
-  const updates = publicVisibleTextUpdates([
+  const updates = projectPublicText([
     { eventId: "one", sequence: 1, kind: "visible-text", messageId: "message-a", text: "正在" },
     { eventId: "two", sequence: 2, kind: "visible-text", messageId: "message-a", text: "读取页面。" },
     { eventId: "hidden", sequence: 3, kind: "reasoning", text: "隐藏推理" },
@@ -507,7 +513,7 @@ test("public Agent text keeps message boundaries without exposing non-text event
 });
 
 test("explicit public paragraphs remain separate without terminal punctuation", () => {
-  assert.deepEqual(publicVisibleTextUpdates([
+  assert.deepEqual(projectPublicText([
     {
       kind: "visible-text",
       eventId: "visible-paragraphs",
@@ -518,6 +524,40 @@ test("explicit public paragraphs remain separate without terminal punctuation", 
     { id: "visible-paragraphs:0", sequence: 1, text: "第一段标题" },
     { id: "visible-paragraphs:1", sequence: 1, text: "第二段内容" },
   ]);
+});
+
+test("repeated tool activity persists phase transitions and keeps a return to an earlier phase", async () => {
+  const finish = deferred();
+  const facts = [];
+  const coordinator = new AgentRuntimeCoordinator({
+    recordExecutionFact: async (_identity, event) => facts.push(event),
+    providerRegistry: registry({ run: async (_ticket, { onEvent }) => {
+      for (const kind of ["file-read", "file-written", "file-read"]) {
+        for (let i = 0; i < 1000; i += 1) onEvent({ kind });
+      }
+      onEvent({ kind: "visible-text", text: "Finished the requested work." });
+      await finish.promise;
+    } }),
+    resolveTask: async () => executionAuthority(),
+    leaseStore: {
+      acquire: async ({ ownerToken }) => ({ key: "lease", path: "memory", ownerToken }),
+      release: async () => true,
+    },
+  });
+  const ticket = await ready(coordinator);
+  await coordinator.submit({ ...IDENTITY, selection: ticket.selection,
+    trustPolicyAccepted: TRUSTED_LOCAL_AGENT_POLICY_VERSION,
+    preflightId: ticket.preflightId, configurationDigest: ticket.configuration.configurationDigest });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(facts.filter((event) => ["reading-task", "writing-candidate"].includes(event.kind))
+    .map((event) => event.kind), ["reading-task", "writing-candidate", "reading-task"]);
+  assert.equal(new Set(facts.map((event) => event.eventId)).size, facts.length);
+  finish.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(coordinator.executionStatus(IDENTITY).state, "completed");
+  for (const kind of ["started", "public-summary", "execution-ended"]) {
+    assert.equal(facts.filter((event) => event.kind === kind).length, 1, kind);
+  }
 });
 
 test("execution status projects only public Agent text with frozen provider identity", async () => {
@@ -558,7 +598,7 @@ test("execution status projects only public Agent text with frozen provider iden
   assert.equal(running.runtimeId, "synthetic-runtime");
   assert.equal(running.agentName, "Synthetic Agent");
   assert.equal(running.state, "running");
-  assert.equal(running.visibleText, "正在读取冻结任务。正在写入 Candidate。");
+  assert.equal(running.visibleText, "正在读取冻结任务。\n\n正在写入 Candidate。");
   assert.deepEqual(running.visibleTextUpdates.map((update) => update.text), [
     "正在读取冻结任务。",
     "正在写入 Candidate。",
@@ -734,7 +774,7 @@ test("execution persistence failure before launch never invokes the provider", a
 
 
 test("public text redacts assembled credentials, paths and generated markup", () => {
-  const updates = publicVisibleTextUpdates([
+  const updates = projectPublicText([
     { kind: "visible-text", eventId: "event_1", sequence: 1, messageId: "msg_1", text: "Bearer sk-" },
     { kind: "visible-text", eventId: "event_2", sequence: 2, messageId: "msg_1", text: "synthetic-secret /Users/测试/secret.txt" },
     { kind: "tool-call", arguments: "password=private", text: "raw prompt" },
@@ -743,7 +783,7 @@ test("public text redacts assembled credentials, paths and generated markup", ()
   assert.doesNotMatch(updates[0].text, /synthetic-secret|Users|secret.txt|password|raw prompt/);
   assert.doesNotMatch(safePublicAgentText("<h1>unvalidated output</h1>"), /<h1>|unvalidated/);
   assert.doesNotMatch(safePublicAgentText("https://service.invalid?api_key=private"), /private|service.invalid/);
-  assert.ok(publicVisibleTextUpdates([{ kind: "visible-text", text: "a".repeat(100000) }])[0].text.length <= 65536);
+  assert.ok(projectPublicText([{ kind: "visible-text", text: "a".repeat(100000) }])[0].text.length <= 65536);
 });
 
 test("stop during unpublished startup waits and prevents a late provider launch", async () => {
@@ -788,4 +828,107 @@ test("unconfirmed startup lease cleanup never authorizes durable cancellation", 
   await assert.rejects(coordinator.cancelDurableExecution({ identity: IDENTITY,
     cancelRequest: async () => { cancellations += 1; } }), { code: "AGENT_CANCEL_UNCONFIRMED" });
   assert.equal(cancellations, 0);
+});
+
+test("public narration survives the diagnostic event cap through sealed summary", async () => {
+  const finish = deferred();
+  const persistedFacts = [];
+  const coordinator = new AgentRuntimeCoordinator({
+    recordExecutionFact: async (_identity, event) => persistedFacts.push(event),
+    providerRegistry: registry({ run: async (_ticket, { onEvent }) => {
+      onEvent({ kind: "visible-text", messageId: "opening", text: "开始读取。" });
+      for (let index = 0; index < 2048; index += 1) onEvent({ kind: "tool-call", text: "private-tool-output" });
+      onEvent({ kind: "visible-text", messageId: "closing", text: "最后一段确已保留。" });
+      await finish.promise;
+    } }),
+    resolveTask: async () => executionAuthority(),
+    leaseStore: { acquire: async ({ ownerToken }) => ({ key: "lease", path: "memory", ownerToken }), release: async () => true },
+  });
+  const ticket = await ready(coordinator);
+  await coordinator.submit({ ...IDENTITY, selection: ticket.selection,
+    trustPolicyAccepted: TRUSTED_LOCAL_AGENT_POLICY_VERSION, preflightId: ticket.preflightId,
+    configurationDigest: ticket.configuration.configurationDigest });
+  await new Promise((resolve) => setImmediate(resolve));
+  const running = coordinator.executionStatus(IDENTITY);
+  assert.ok(running.eventCount > 2048);
+  assert.equal(running.visibleText, "开始读取。\n\n最后一段确已保留。");
+  assert.equal(running.visibleText, running.visibleTextUpdates.map((update) => update.text).join("\n\n"));
+  assert.equal(running.textTruncated, false);
+  finish.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(persistedFacts.find((event) => event.kind === "public-summary").publicSummary, running.visibleText);
+  assert.doesNotMatch(JSON.stringify(persistedFacts), /private-tool-output/);
+  await coordinator.shutdown();
+});
+
+test("public messages preserve whitespace, assembled redaction and first appearance", () => {
+  const accumulator = createPublicAgentTextAccumulator();
+  let sequence = 0;
+  const append = (messageId, text) => accumulator.append({ kind: "visible-text", messageId,
+    eventId: `fragment-${++sequence}`, sequence, text });
+  append("a", "一"); append("a", " "); append("a", "二"); append("a", "\n\n");
+  append("b", "第二条消息。");
+  append("a", "三 api_"); append("a", "key=synthetic-secret");
+  const value = accumulator.snapshot();
+  assert.deepEqual(value.visibleTextUpdates.map(({ id }) => id), ["message:a:0", "message:b:0"]);
+  assert.equal(value.visibleTextUpdates[0].sequence, 7);
+  assert.equal(value.visibleTextUpdates[0].text, "一 二\n\n三 api_key=[已隐藏]");
+  assert.equal(value.visibleText, value.visibleTextUpdates.map((update) => update.text).join("\n\n"));
+  assert.doesNotMatch(value.visibleText, /synthetic-secret/);
+  assert.equal(accumulator.snapshot(), value);
+  for (const raw of ["前\n\n后", "前\n\n\n\n后", "\n\n前\n\n", "前 \n后"]) {
+    const ungrouped = createPublicAgentTextAccumulator();
+    ungrouped.append({ kind: "visible-text", eventId: "paragraphs", text: raw });
+    assert.equal(ungrouped.snapshot().visibleText, raw);
+  }
+});
+
+test("80 public updates is a lossless presentation budget with stable earlier identity", () => {
+  const accumulator = createPublicAgentTextAccumulator();
+  const append = (index, text = `第${index}条。`) => accumulator.append({ kind: "visible-text",
+    messageId: `message-${index}`, sequence: index, eventId: `event-${index}`, text });
+  for (let index = 1; index <= 81; index += 1) append(index);
+  const first = accumulator.snapshot();
+  assert.equal(first.visibleTextUpdates.length, 80);
+  for (let index = 82; index <= 100; index += 1) append(index);
+  append(1, "补充。");
+  const value = accumulator.snapshot();
+  assert.equal(value.visibleTextUpdates.length, 80);
+  assert.equal(value.visibleTextUpdates[0].id, first.visibleTextUpdates[0].id);
+  assert.equal(value.visibleText, Array.from({ length: 100 }, (_, index) => `第${index + 1}条。${index ? "" : "补充。"}`).join("\n\n"));
+  assert.equal(value.textTruncated, false);
+});
+
+test("one text budget includes separators and redaction expansion without partial surrogates", () => {
+  for (const { limit, messages, expected, truncated } of [
+    { limit: 5, messages: ["abcde"], expected: "abcde", truncated: false },
+    { limit: 5, messages: ["abcdef"], expected: "abcde", truncated: true },
+    { limit: 5, messages: ["ab", "cd"], expected: "ab\n\nc", truncated: true },
+    { limit: 5, messages: ["abc😀"], expected: "abc😀", truncated: false },
+    { limit: 4, messages: ["abc😀"], expected: "abc", truncated: true },
+    { limit: 5, messages: ["sk-x"], expected: "[凭据已隐", truncated: true },
+  ]) {
+    const accumulator = createPublicAgentTextAccumulator({ maxTextLength: limit });
+    messages.forEach((text, index) => accumulator.append({ kind: "visible-text", text,
+      eventId: `event-${index}`, messageId: `message-${index}`, sequence: index }));
+    const value = accumulator.snapshot();
+    assert.equal(value.visibleText, expected);
+    assert.equal(value.visibleText, value.visibleTextUpdates.map((update) => update.text).join("\n\n"));
+    assert.equal(value.textTruncated, truncated);
+    assert.ok(value.visibleText.length <= limit);
+  }
+});
+
+
+test("ungrouped provider chunks keep their existing whitespace separators", () => {
+  for (const chunks of [["第一句。\n\n", "第二句。\n\n"], ["第一句。", "\n", "第二句。"],
+    ["First.", " ", "Second."], ["第一句。", "\n\n第二句。"]]) {
+    const accumulator = createPublicAgentTextAccumulator();
+    chunks.forEach((text, sequence) => accumulator.append({ kind: "visible-text", text,
+      sequence, eventId: `whitespace-${sequence}` }));
+    const value = accumulator.snapshot();
+    assert.equal(value.visibleText, chunks.join(""));
+    assert.equal(value.visibleText, value.visibleTextUpdates.map(({ text }) => text).join("\n\n"));
+    assert.equal(value.textTruncated, false);
+  }
 });

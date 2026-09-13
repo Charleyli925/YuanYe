@@ -36,6 +36,18 @@ export type RuntimeFrameSettlement = Readonly<{
   shouldUseStaticFallback: boolean;
 }>;
 
+export function runtimeCandidateAlreadyActive(input: {
+  request: Pick<RuntimeFrameIdentity, "kind" | "sourceRevision">;
+  runtimeFrame: Readonly<{
+    attempt: RuntimeFrameIdentity;
+    elementGeneration: number;
+    activation: "pending" | "ready" | "partial" | "failed";
+    settled: boolean;
+  }> | null;
+  frameLoadGeneration: number;
+  snapshot: RuntimeFrameCoordinatorSnapshot;
+}): boolean;
+
 export class RuntimeFrameCoordinator {
   readonly snapshot: RuntimeFrameCoordinatorSnapshot;
   beginCandidate(input: {

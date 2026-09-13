@@ -1,5 +1,380 @@
 # Design QA
 
+## 2026-09-12 — Mode switch ownership and available Review controls
+
+- Truth: approved complexity plan M7; preserve the existing visual design and AI draft/no-send behavior.
+- Mode switch rules are consolidated from base/review/chrome layers into top-toolbar.css. Review controls are absent in Edit/Preview while the portal slot remains mounted. A genuinely empty Review hides only its change filters; filtered-empty results retain their filters.
+- Typecheck/architecture and lint passed. The existing CSS test initially rejected the equivalent border shorthand and required a removed empty pseudo-element override; its corresponding source assertions were updated, and all 11 CSS checks passed. Original failure evidence is retained outside Git.
+- An isolated real Chromium comparison loaded the actual before/after full CSS cascade into identical synthetic component DOM: 52 cases (1024/1440 widths, normal/reduced motion, 13 pointer/keyboard/selected/disabled states). Every sampled geometry and computed property matched except five transition fields in the 26 reduced-motion cases: the existing reduced-motion rule now correctly wins (none/0s instead of 150ms). This verifies the component cascade, not application pixels.
+- Independent source review found no P0/P1. Existing empty-Review journeys now check the header, mode switch, center allocation, right actions, AI entry and Canvas row through Preview/Edit/Review; the CSS-only Review journey checks returning from a filtered-empty result.
+- Focused real Electron execution passed 2/2 at the normal window and at 1024px with a long source name, dark authored HTML, hover/focus/disabled states and reduced motion. Screenshot inspection exposed a pre-existing narrow-Review Grid bug: the overlay sidebar retained `grid-column: 2` after the layout became one column, creating a zero-width implicit track offscreen. The narrow rule now releases both Grid axes and raises the overlay above the Review directory; an exact hit-test plus close/reopen journey verifies it. Post-rebase verification also passed real Electron 4/4, including R4 annotation-capacity adoption and discard.
+- Final completion gate `2026-09-12T15-39-43-004Z-task` passed all 10/10 steps against `origin/main`: type/architecture, lint with 0 errors, Node contract/core, web and desktop builds, Browser 36/36, Electron 53/53 and AI 30/30; every selected Playwright test reported 0 failed / 0 skipped / 0 not executed. Independent review remained PASS with no P0/P1. This is not a complete stylesheet migration or full accessibility audit; shared trailing transition/focus ownership is recorded as P2, and stale changelog wording plus a fuller sidebar-bounds assertion as P3 without widening this package.
+
+## 2026-09-13 — Exact source receipts fence Canvas authority
+
+- Scope: Document authority now publishes one immutable Source Receipt with
+  the complete project, document, source-path, source-hash, revision,
+  operation and Canvas-generation context. Canvas confirmation consumes that
+  exact receipt and a complete rendered observation; the former HTML echo
+  queue and hash-only confirmation paths are retired.
+- Interaction result: ordinary local and history editing still completes in
+  the current physical frame. An authority reload creates exactly one new
+  physical document, executes authored scripts once in that frame and waits
+  for its exact settled Runtime identity before the receipt can confirm. No
+  new control, notice, layout, color or motion was introduced.
+- Failure boundaries: missing or mismatched path/session/hash/revision,
+  duplicate or late acknowledgements, a null/conflicting working hash and an
+  observation from another frame all fail closed. Exact autosave authority
+  repair issues a corrected receipt; it never retroactively certifies an old
+  hashless receipt.
+- Focused evidence covered initial render, same-source authority reload,
+  dynamic chart repaint, autosave repair, moved Working Copy hydration,
+  terminal/incarnation fencing and local/history in-place continuity.
+  Independent final review passed with no P0/P1/P2/P3 after the seeded fault
+  oracle was tightened to require the corrected authority receipt.
+- Final task gate `2026-09-12T21-38-36-703Z-task` passed all 10 selected
+  suites on the frozen source: targeted Node 1061/1061, contract Node 16/16,
+  core Node 1901/1901, Browser 34/34, Electron 74/74 and AI 20/20, with zero
+  selected failure, skip or not-executed result. Nine already-passed steps
+  were reused only after the gate revalidated the identical fingerprint and
+  original `origin/main` base. Two different pairs of AI cases had previously
+  stalled before their business assertions while reading the shared system
+  clipboard; all four exact cases passed in sequential isolation, and the
+  final complete AI step passed 20/20 without retry.
+- The user-designated eight-file corpus then completed one real Electron run:
+  4 passed, 4 failed and 0 skipped, with all eight originals byte-identical.
+  Every passing file completed three text hosts, two duplicate/delete cycles,
+  preview/edit re-entry, source reload and save/reopen. One failure completed
+  three text hosts before the copy action was unavailable; three completed
+  only one independent host against the three-host minimum. The four failure
+  screenshots were inspected, and the result matches the recorded baseline
+  shape. This is rebuilt-source evidence, not an installed-app or full-corpus
+  pass.
+- final result: passed for the scoped Source Receipt authority and
+  source/Runtime continuity.
+
+## 2026-09-12 — Direct semantic native island and Enter commands
+
+- Scope: native text editing, Enter and managed hard-break identity now submit a
+  direct semantic editable-island operation. Canvas no longer builds or
+  translates a SourcePatch plan; the Kernel owns the single source
+  materialization, allocates fresh hard-break IDs in DOM order, and returns the
+  canonical operation and identity delta that Canvas seals after acceptance.
+- Source and interaction boundary: current HTML bytes remain authoritative;
+  exact island authorization, stale source/identity rejection, inverse replay,
+  IME/selection continuity and one-apply projection are retained. No control,
+  copy, geometry, color, motion or recovery surface changed, so no new pixel
+  comparison was required for this ownership-only refactor.
+- Focused implementation evidence: 97/97 Node tests and 3/3 exact Electron
+  journeys passed, together with typecheck, lint with zero errors,
+  architecture checks and diff validation. The Electron cases cover managed
+  Enter identity, continuous type/Enter/style/save in one Runtime document and
+  the native editable-island path without the retired Canvas adapter.
+- Independent review passed with no P0/P1. Its documentation findings were
+  repaired in the architecture, MVP and test-strategy owner documents. One P2
+  test-depth debt remains: Kernel-level collision cases for duplicate,
+  pre-existing and illegal `randomUUID` output are not yet isolated as direct
+  unit tests; production allocation still fails closed and existing identity
+  coverage remains green.
+- Final task gate `2026-09-12T16-31-28-845Z-task` passed all 10 selected suites
+  without reuse: typecheck, lint, targeted Node, contract Node, core Node
+  1876/1876, both builds, Browser 34/34, Electron 60/60 and AI 20/20. There
+  were zero selected failures, skips or not-executed results.
+- The user-designated eight-file corpus then completed one real Electron run:
+  5 passed, 3 failed and 0 skipped, with all eight originals byte-identical.
+  Every passing file completed three text hosts, two duplicate/delete cycles,
+  preview/edit re-entry, source reload and save/reopen. One failure completed
+  three text hosts before the copy action was unavailable; two found only one
+  independent text host. The single-file improvement from the recorded 4/8
+  baseline is treated as discovery noise, not broader acceptance. This is
+  rebuilt-source evidence, not an installed-app or full-corpus pass.
+- final result: passed for the scoped direct native-island ownership and
+  source/Runtime continuity.
+
+## 2026-09-12 — Direct semantic text-range style commands
+
+- Mode: DESIGN CHANGE. Existing text-format controls, quiet refusal copy,
+  selection treatment and recovery surfaces are unchanged. The implementation
+  removes Canvas range pre-planning: exact logical range/quote becomes direct
+  `setStyle` intent, and flex/grid or partial-background safety is decided from
+  the same Kernel materialization before source publication.
+- Focused Node evidence: 92/92 passed across the Canvas command helper,
+  semantic Kernel, SourcePatch, source text map, edit-pipeline baseline and
+  Repository identity/save contracts. New cases cover mixed inline segments,
+  entities and exact surrounding bytes; deterministic fresh wrapper IDs
+  returned by the Kernel; no-change and existing-wrapper projections; stale
+  revision/hash/target/quote rejection; tracked caller identity; inverse/redo;
+  and one full patch apply.
+- Rebuilt-source Electron evidence: 7/7 targeted journeys passed with zero
+  retry. They cover a normal new range wrapper, forged-clone isolation, native
+  range restoration, one full patch apply, chart/script continuity, flex/grid
+  refusal, partial background-fill refusal, continued typing after rejection,
+  Undo/Redo, save and managed Working Copy reopen. The first sandboxed attempt
+  stopped before product execution because Electron launch hit macOS
+  `SIGABRT`/`EPERM`; the identical command then passed in the authorized host
+  environment.
+- Quiet-first and accessibility result: successful formatting stays in the
+  same iframe with the native range active; rejected formatting restores the
+  editable host and selection without adding a banner, modal, control, color or
+  motion. No new geometry or visual token was introduced, so a new pixel
+  comparison would not add evidence beyond the interaction assertions.
+- Independent source review found no P0/P1. It recorded a P2 test-depth debt:
+  the two refusal journeys do not yet assert the exact retained selected text
+  and pipeline count together, plus a P3 module-ref assertion gap; neither
+  changes the verified production result or expands this scoped package.
+- Final task gate `2026-09-12T15-03-37-444Z-task` passed all 10 selected
+  suites on the frozen production diff: targeted Node 796/796, contract Node
+  16/16, core Node 1874/1874, Browser 34/34, Electron 60/60 and AI 20/20,
+  with zero selected failure, skip or not-executed result. The first sandboxed
+  Node pass could not create its Unix socket (`EPERM`); the exact subtest passed
+  3/3 on the authorized host and the gate's fingerprinted resume reused only
+  typecheck/lint before completing every remaining suite.
+- The user-designated eight-file corpus then completed one real Electron run:
+  4 passed, 4 failed and 0 skipped, with all eight originals byte-identical.
+  The four passes each completed three text hosts, two duplicate/delete cycles,
+  preview/edit re-entry, source reload and save/reopen. Failures retained the
+  previously recorded baseline shapes: one reached three text hosts before the
+  copy action was unavailable; three completed only one host against the
+  three-host minimum. This is not a full-corpus pass or installed-app evidence.
+- final result: passed for the scoped direct-range behavior and continuity.
+
+## 2026-09-12 — Direct element style and sibling reorder commands
+
+- Scope: existing element-style controls and same-parent up/down actions now
+  construct semantic intent directly. The layout, copy, native checkpoints,
+  Runtime source proof and persistence boundaries are unchanged. Range styles,
+  editable islands, Enter/IME and controlled HTML echoes remain separate work.
+- Source evidence: the two former Canvas command/translation branches are
+  removed; direct projection uses the kernel's materialization type. Kernel
+  re-planning, exact source materialization, target mapping and inverse remain.
+- Local validation: 30 focused Node tests passed, including direct commands,
+  exact style bytes/priority, sibling positions through the end, comment-owned
+  whitespace, unchanged style, inverse/redo and identity/stale-source rejection.
+  Typecheck and architecture passed. Initial synthetic fixtures used invalid
+  UUID version bits, then assumed the wrong trailing-comment newline ownership;
+  both failures were retained and the fixtures were corrected against the
+  existing identity contract and shared reorder planner, without relaxing it.
+- Independent review reproduced a blocking target-continuity defect before
+  delivery: direct Kernel materialization returned its canonical subregion
+  TargetRef but omitted the caller's module-level target, so the first move
+  left the selection orphaned and disabled a second move. Direct operations
+  now carry that caller identity as a tracked mapping in the same Kernel
+  apply. Focused Node coverage checks both style and reorder mappings; the
+  Electron reorder flow requires two consecutive module moves without a new
+  selection, retains the module marker and checks one full patch apply for
+  each move. Independent re-review confirmed the P1 closed with no new P0/P1
+  or P2; the remaining P3 is that the automated counter proves one apply but
+  does not independently count old pre-planning calls.
+- Runtime evidence before that repair: the exact pre-fix completion gate
+  `2026-09-12T10-54-27-167Z-task` passed 10/10 selected suites (Browser 34,
+  Electron 52 and AI 20; no selected failure, skip or flaky result). The
+  user-designated eight-file HTML corpus then completed one real Electron run:
+  5 passed, 3 failed and 0 skipped, with all eight originals byte-identical.
+  The five passes completed preview/edit re-entry, source reload, save/reopen
+  and two duplicate/delete cycles. One failure followed three text hosts when
+  the copy action was unavailable; two found only one independent text host
+  rather than the required three. Failure screenshots were inspected. This is
+  not a full-corpus pass or a same-HEAD attribution experiment.
+- Repaired-source runtime evidence: the focused real Electron module reorder
+  flow passed 1/1. It retained the same module selection through two moves,
+  kept the second move available, preserved one document and one script
+  execution, and recorded one full patch apply for each command. The same
+  eight-file corpus was then rerun once: 4 passed, 4 failed and 0 skipped,
+  again with all eight originals byte-identical. The extra failure versus the
+  preceding run was another one-text-host minimum failure; the file had passed
+  in the immediately preceding run, so the variation is treated as discovery
+  noise rather than a repair regression. The other failure shapes were the
+  same missing copy action and one-text-host minimum. This matches the earlier
+  recorded 4/8 baseline shape and still is not a full-corpus pass. The exact
+  repaired-source completion gate remains pending.
+## 2026-09-12 — 合法空差异候选进入同一审阅页
+
+- Truth: 用户确认即使没有可定位变化也应进入审阅，保留 AI 草稿作为未来对话入口。
+- Evidence: 真实 Electron、合成 `complex-layout.html` fixture；2880×1920 像素截图：
+  `output/playwright/wave1-empty-review-final/results/ai-review-adoption-CSS-and-f42d8-ew-without-position-markers/empty-review.png`、
+  `output/playwright/wave1-empty-review-script/results/ai-review-adoption-Script--7491e-ew-without-position-markers/empty-review.png`。
+- 核对：空态说明占原变化目录行，未新增悬浮提示；前后页、原顶栏、既有会话及草稿均可见。
+  脚本用例中修改后为蓝色背景，修改前保持原色，虽然没有位置标记仍能直接比较。
+  两页 focus 为 all、focus-group 为空，零 marker、outline、mask hole 和 region bar。
+- 流程：注释变化用例通过单双页切换、收起/重开会话、明确采用与新工作文件持久化，原件字节不变；
+  Script-only 用例通过相同查看路径及明确不用本次，当前源未含脚本修改，评论保留。
+- 测试修正：空态不复用强制非空 marker 的旧助手；使用正式嵌入式工具栏名称；
+  head 中的合成脚本在 DOMContentLoaded 后访问 body。先前测试脚本失败的报告保留，未计为通过。
+- 验收边界：此证据覆盖已存在合法 Candidate 的零事实审阅，不证明上游原始同内容输出
+  已从 no-change 改为 Candidate；后者属于独立 R2。
+- 私人 HTML 全目录：8/8 文件执行，4 通过、4 失败，原件 Hash 全部不变。两类文件级失败为复制按钮不可用，
+  以及既有 pending refresh 的 sourceRevision 更新触发旧整对象相等断言；后续未执行步骤未计通过。
+  两类代表文件在未含本次产品修改的主干基线均复现相同失败。此归因不等同于全目录验收通过；
+  通过文件中的候选宿主 rejection 也保留在本机完整报告，私人名称、路径和截图不提交。
+- final result: scoped empty-Review Electron flows and screenshot inspection passed; broader gate results are recorded separately.
+
+## 2026-09-12 — Run identity and aggregate (historical pre-P1 review evidence)
+
+- Internal identity/coordination repair; no layout, control, copy, chat or execution-purpose change. One locator-keyed RunSession entry now owns run/result/handoff/recovery/outcome facts, while active presentation keeps only locator keys. Request origin and the current display locator remain distinct; pending submissions reuse their in-memory token, and the public methods/snapshot remain unchanged.
+- Two new regressions first reproduced production failures: rebinding A removed B's run in the same project/document, and reconciling unknown A removed B's pending run. The original failing log is retained locally. Both passed after narrowing locator selection and run/submission matching.
+- The first expanded ProjectWorkflow fixture put a processing Run on the current page; the existing locator lock correctly blocked that operation. The fixture now exercises the permitted state: editable A, processing B in the same project. No production lock was relaxed.
+- Scoped evidence: 259 Node checks passed across RunSession/RunWorkflow/decoder and Project/Version/WorkspaceController consumers, including the expanded aggregate, legacy, late-writer and alias cases. A real synthetic Bridge Request → Candidate → Promotion check passed and preserved the source Working Copy identity. Its first launch was blocked by sandbox loopback `EPERM`; the authorized rerun passed. No UI, full task gate, real-vendor, private-corpus, packaged-app or performance acceptance is claimed.
+- Typecheck/architecture and 48 selection/context checks passed. Targeted aggregate lint reported no errors or warnings; the earlier identity-preparation pass reported only its two existing ProjectWorkflow/Bridge warnings.
+
+This section records the pre-review M6 evidence and is not final acceptance; the
+current post-review checks are recorded below.
+
+## 2026-09-13 — M6 identity and managed-source repair (post-review focused evidence)
+
+- Scope is internal Run/Project/Workspace identity coordination. There is no
+  layout, control, copy, chat or execution-purpose change. The strict recent-run
+  authority requires complete top-level workspace identity plus a matching
+  OpenTarget; Request origin remains independent from the current Working Copy.
+  Managed Finder/Version/registration transitions reserve both Sessions before
+  Desktop awaits and publish one complete aggregate tuple, with an explicit
+  same-operation `unknown` outcome when host/local state cannot be proven.
+- Current evidence is tied to the frozen base `e1ebe3dfc306286e37c774d31c4bddfc11914449`;
+  the exact dirty tracked-diff SHA is reported with this handoff rather than
+  self-embedded in the evidence file. The current focused Node combination
+  passed 218/218, the Session/Controller batch passed 71/71, and the preload
+  batch passed 41/41. Coverage includes Recent hydration ABA/authority and
+  Candidate identity negatives, Finder reservation fences, managed activation
+  receipt replay, background Version no-publication,
+  same-project/different-document no-publication, legacy-history receipt
+  retention and aggregate publication. The Bridge HTTP suite was attempted
+  separately: 0/14 passed because every case
+  stopped at sandbox `listen EPERM 127.0.0.1`, with no assertion failure.
+  `npm run typecheck`, `npm run desktop:renderer`, syntax checks and diff checks
+  passed; Electron receipt execution was not rerun in this short pass (the
+  prior attempt stopped at sandbox `kill EPERM`/`SIGABRT`).
+  No UI, full task gate, real-vendor, private-corpus, packaged-app or
+  performance acceptance is claimed.
+
+- Sixth-round receipt fence evidence: the focused Node set passed 339/339,
+  including the existing managed activation and identity regressions. The
+  renderer build passed with only the existing large-chunk warning. The three
+  focused Electron receipt cases (clean pending restart, pending A→B followed
+  by persisted Y/Z returning to A, and completed-receipt replay) were attempted
+  but all stopped before app launch at sandbox `kill EPERM`/Electron `SIGABRT`;
+  therefore no Electron pass is claimed. The new persisted
+  `activeEffectGeneration` plus predecessor-effect fence is asserted by the
+  Node source contract and exercised by the deterministic persistence fixture;
+  the runtime result remains awaiting an authorized Electron environment.
+
+## 2026-09-13 — Current P1 boundary follow-up
+
+- Candidate mutation authority: the real Bridge suite passed 14/14 after an
+  authorized loopback run. The focused Candidate promotion test passed 22/22;
+  the broader 91-test repository batch passed 90/91, with its only failure the
+  unrelated sandbox `listen EPERM 127.0.0.1` startup case (the same test passed
+  in the authorized Bridge run). Missing/wrong Candidate decision identity and
+  lost-response same-operation replay both assert no duplicate manifest Version.
+- Source rename and Version identity: `source-rename.test.mjs` passed 13/13,
+  including managed/generated A→C→A predecessor invalidation;
+  `project-workflow.test.mjs` passed 75/75 and `version-workflow.test.mjs`
+  passed 42/42, including complete target/hash/document fences, no-publication
+  same-project/different-document paths, and preseeded legacy receipt X
+  retention while renderer request Y fails later validation.
+- Final local checks for this follow-up: syntax checks, `git diff --check`,
+  architecture/typecheck and renderer build passed; lint reported 0 errors and
+  26 existing warnings. The new focused production rename Electron case was
+  attempted and stopped before app launch at sandbox `kill EPERM` / `SIGABRT`,
+  matching the prior focused Electron limitation; no Electron pass is claimed.
+
+## 2026-09-13 — M6 final acceptance
+
+- Final production/test-source gate `2026-09-12T23-44-39-699Z-task` passed all
+  10 selected steps: architecture/typecheck, lint with 0 errors and 26 existing
+  warnings, dependency audit, Node targeted 1340/1340, contract 16/16, Web and
+  Desktop builds, Browser 26/26, Electron 73/73, and AI 25/25. Every Playwright
+  selection reconciled with 0 failed, skipped, or unexecuted cases.
+- The Electron set includes structured contextBridge error redaction, lost
+  activation reply recovery, exact-predecessor restart, intermediate activation
+  ABA rejection, production rename A-C-A rejection, and completed-receipt replay.
+  The focused structured-error/ProjectWorkflow Node set separately passed
+  141/141, and the real synthetic Bridge boundary passed 14/14.
+- The first full gate exposed a deterministic M1 package-closure defect: the
+  native HTTP provider imported `shared/agent-input-policy.mjs`, but the shared
+  resource was absent from the packaged Bridge allowlist. The final source adds
+  that exact resource to the manifest, package oracle, artifact verifier and
+  synthetic artifact fixture; the impact map now selects the package-closure
+  owner for future native HTTP provider/policy changes. Focused package,
+  artifact and selection checks passed 73/73 before the final full gate.
+- Independent final review reported no P0, P1 or P2. Remaining P3 debt is limited
+  to a narrower TypeScript description for the one nested reclassification DTO
+  and more granular mutant-catching assertions for invalid confirmation shape
+  and the HTTP runtime impact-map path. No layout, copy, control, real-vendor,
+  installed-app, private-corpus or packaged-artifact execution claim is added.
+
+## 2026-09-12 — Shared HTTP Agent input policy
+
+- Mode: DESIGN CHANGE + AI EXPERIENCE LENS; base `353fb6c3`. Scope is admission/attachment policy, with the existing Agent controls and rejection copy. No layout, new mode, chat purpose or additional notification is introduced.
+- Flow: explicit comment submission → current-input estimate → existing frozen Request/ticket → verified serialized Runtime input → Candidate. Attachments increase input demand; expected complete output comes from frozen HTML. Unknown model capability remains unknown, with the existing HTTP byte cap. Runtime verifies every file's actual reread bytes rather than trusting an old label. Failed validation precedes any model request/output publication.
+- Scoped evidence: 131 Node checks passed across shared policy, HTTP runtime/provider, RunWorkflow and Coordinator; typecheck/architecture passed. Boundary checks cover small HTML with large text input, unknown capability, output headroom, BOM/NUL/invalid UTF-8, changed frozen attachment bytes and selected ticket capability snapshots. Existing submission cancellation/configuration and clipboard tests remain in those suites.
+- First new regression run expected an unprefixed policy error code; the existing policy-error adapter correctly returned `AGENT_FROZEN_INPUT_DRIFT`. Only the exact expected code was corrected; the first log remains local. No production check was relaxed.
+- Final frozen-source task gate `2026-09-12T09-42-17-991Z-task`: 6/6 selected steps passed (typecheck, lint, Node targeted 369/369 in 24 files, contract 16/16, desktop build, source Electron AI 13/13). No selected failure, skip, flaky or missing execution; source fingerprints were unchanged and test processes exited. Node groups may overlap. No Browser/core/standalone editing Electron lane was selected.
+- Evidence limits: synthetic local protocol/provider fixtures, no real vendor/tokenizer or timing claim, installed-app or private-corpus validation. The existing identity-repair test does not prove the real Runtime retry budget path; this P2 coverage gap remains recorded without expanding this change. No new layout or pixel-equivalence claim.
+
+## 2026-09-12 — Document-owned leave boundary
+
+ProjectWorkflow now coordinates freeze/drain and consumes an operation-local DocumentWorkflow result. The result is not a cached permission: source bytes, revision, route/epoch and current protection evidence are verified again. Normal save ACKs may update the source Hash without becoming a different route; first registration and valid recovery after a failed first save remain supported. No UI layout or input affordance changes.
+
+Independent review found and closed three blockers: stale full-context Hash after successful ACK, null-to-registered context, and pre-registration identity used to check post-registration recovery evidence. Actual registration and recovery first-failure logs were retained. An earlier new ACK fixture omitted lastModifiedAt and was correctly rejected; that fixture failure is not evidence reproducing the product defect.
+
+Final frozen-source task gate `2026-09-12T10-06-22-251Z-task`: 5/5 steps, Node 428/428 across 32 files and source Electron 14/14, no selected failure/skip/flaky/missing execution. Tests include failed autosave with original disk bytes retained, recoverable edits across navigation/close/restart, managed identity, tab restart and source replacement races. The unselected existing rapid dirty A→B→A / immediate close case was additionally run once and passed with zero retries. Source fingerprints remained unchanged; all test processes exited.
+
+Scope limits: source Electron with synthetic fixtures, not installed-app or private-corpus acceptance. First-registration failure recovery is covered by real workflow Node checks, not a dedicated Electron case. Supplementary trace contains API events without PNG/screencast; no pixel equivalence or real power-loss claim. Project coordination harness assertions are distinguished from the real Document ACK/recovery integrations.
+
+## 2026-09-12 — Comment recovery publication repair
+
+The first full gate passed Node 772 and Browser 37, then failed the runtime table/SVG/Canvas comment test after returning to the document tab: the helper reported 0 instead of 5 comments. The gate was stopped (15 Electron passes, 1 failure, 1 interrupted, 40 not run; AI not run). No success is claimed for that run.
+
+One diagnostic run retained all original actions/assertions and captured raw HTTP plus synthetic disk snapshots. The same project/document/Working Copy returned HTTP 200 while its Draft advanced from revision 13 / 5 comments to revision 14 / 0; the UI still held 5 cards. No user corpus was involved. Another task's Electron was visible in process inventory during diagnosis, but the defect was independently reproduced using real application modules in memory.
+
+Cause and repair: recoverDraft published deleted IDs before recovered comments, triggering an intermediate empty autosave. It now returns deletion metadata, and ProjectWorkflow publishes the complete recovered aggregate once. The general DraftSession in-flight/no-op interaction remains a separately recorded P2; this repair removes the intermediate writer. A new production-codec regression failed before the repair (2 writes instead of 1), then passed; another covers unapplied local text plus tombstones. Focused Node 93/93 and typecheck/architecture passed. The repaired original runtime table/SVG/Canvas journey and selected-text, orphaned, and global-comment journeys passed once as a focused set (4/4, no retries). Full task gate `2026-09-12T10-15-55-355Z-task` passed 8/8 steps: Node 774/774, Browser 37/37, Electron 57/57, and AI/Review 16/16, with no selected failures, skips, flaky results or missing tests. Source fingerprint stayed unchanged through the gate. Counts overlap across invocations and are not a unique coverage total.
+
+Root inspected `output/design-qa/ai-review-comment.png`: the existing before-pane marker and comment bubble remain readable, and the per-document AI draft remains separate and unsent. This capture follows the original horizontal-scroll check, so the target text is outside its horizontal viewport; it does not certify a fully visible page comparison. The complete original Review/comment/adoption assertions passed. Evidence is rebuilt source Electron with synthetic fixtures, not a private-corpus rerun, real vendor run or installed-app replacement. Original failure and diagnostic artifacts are retained outside Git. Result: scoped comment persistence, recovery, submission and Review acceptance passed.
+
+## 2026-09-12 — M3 shell 与局部输入订阅
+
+- Mode / scope: DESIGN CHANGE + AI EXPERIENCE LENS；基线 `353fb6c3`，批准的 M3 第三步。保留既有 UI、会话草稿的文档保存/关闭 drain 与 PROJECT.md IME/选择状态，不实现聊天入口或新 Request purpose；同包包含普通打开协调和身份类型；Document 离开边界在独立已交付包。
+- 实现：Workbench 通过 `useSyncExternalStore` 消费既有 Controller 的显式 shell 展示投影。投影没有完整 Conversation、评论输入正文、规则正文或 Agent narration/时钟/字节字段；并非保留旧 full snapshot 再忽略更新。删除根全量订阅、`sameWorkbenchRenderSnapshot` 与镜像测试。实时 aggregate 继续供操作期读取和原有 Application 协调。
+- 局部消费者：RunConversationOutlet 同时订阅 runs 与 conversation；root hook 只保留显示偏好、文档加载生命周期、设置/动作。Rules page 直接订阅 projectRules，保留本地 IME/光标处理；comments 原有 facet/Canvas port 不变。
+
+| 状态 / 触发 | 可观察结果 | 证据 / 限制 |
+| --- | --- | --- |
+| 连续 Agent narration / clock / bytes | 40 次 runs 通知，shell 0 次，shell 引用不变且不含这些字段 | 真实 Controller + RunSession Node 计数；非性能耗时测量 |
+| 会话草稿连续输入 | 20 次局部更新不通知 shell；flush 保存原文档最后文本 | Controller + ConversationSession/Workflow，写入 DTO 独立断言 |
+| 切文档 / 旧返回 / 销毁 | 新区域不显示旧消息或草稿；旧 load 拒绝；unsubscribe/dispose 不续发 | Controller 及 sidebar presentation 负例；真实 UI 切换待验 |
+| 关闭输入锁 | 历史与草稿继续可读，输入禁用；取消关闭后恢复 | presentation Boolean 与原 Controller 命令 fence 保留；完整关闭 UI 待验 |
+| 评论正文与结构 | 文本内部更新留局部；空/非空、目标、保存评论、附件或编辑身份变化通知 shell | Controller 计数与省略正文的类型断言 |
+| PROJECT.md 输入 / 组合 / 保存 / 恢复 | 正文仅局部；composition、保存状态与 restore generation 保留通知 | Controller + ProjectRules Session/Workflow；IME 保存被阻止、结束后成功；真实 native IME/caret 待验 |
+
+- 验证：定向 Node 101/101（workspace-controller、conversation-workflow、project-rules-session、project-rules-workflow、ai-conversation-sidebar）；test-gate-selection / capability-context-locate 48/48；typecheck（含 architecture）通过；所改四个 React 文件定向 ESLint 通过。既有预算 advisory 不改阈值。
+- 首错保留：首两次新增 Conversation fixture 分别缺少 DraftSession 要求的 `saveDraft`、误把实际扁平 draft-write DTO 当成嵌套 draft，均在 fixture 修正；没有修改产品保护来通过。原始日志保留供根验收。
+- 同包纳入 M3 的小型身份类型收口：Workbench 重导出应用层 ProjectContext；未登记 locator、无 managed 路由的已登记身份、完整 OpenTarget 分开，原始登记 DTO 与展示 snapshot 保留宽兼容。无 runtime 更改，不从类型假定非空 ID 或凭 snapshot 建立权威。组合 typecheck/architecture 和 ProjectSession 7/7 通过；两部分此前均独立源码复审无 P0/P1。
+- 组合验证：OPEN/SHELL/IDENTITY 共38文件组合时只发生文档与测试映射冲突，根按当前合同合并；304/304相关Node和typecheck/architecture通过。独立组合源码复审发现 Prepared open 重试 P1，本轮已修复：commit/ACK 失败的同一现有动作只携带不透明 requestId，优先重放同一 receipt/ACK；无 requestId 仍重新选择。重复 commit 回执丢失与 ACK 失败均保留恢复出口，且分别保持 import/commit 次数为1。修复后 GlobalInterruption/ProjectWorkflow/Navigation/Controller 定向 Node 171/171，typecheck/architecture、所改文件 ESLint 与 `git diff --check` 通过；只有既存架构预算 advisory。
+- 真实 Electron：Agent setup 精确用例最终 1/1 通过（53.1s），并先证明第二段 narration 在合成前尚未出现；随后真实 run narration 局部更新穿过 `compositionstart`/`compositionend`，更新前后为同一草稿 textarea，焦点与尾部 caret 保持；`PROJECT.md` 精确用例 1/1 通过（2.6s），保留 sameElement/focus/caret/composition/Cmd+S 逐字节断言。两条首次沙箱运行分别因 `listen EPERM 127.0.0.1` 与 Electron launch/kill EPERM 在产品断言前失败，同一命令在允许环境复跑通过。这些是真实 Chromium composition 与局部订阅证据，不是 Apple 输入法候选窗验收。
+- 最终门禁：`npm run task:finish -- --base origin/main` 报告 `2026-09-12T15-26-09-056Z-task` 通过；typecheck、lint（0 error，30 个既存 warning）、Node targeted 894/894、Node core 1895/1895、Browser 26/26、Electron 61/61、AI 15/15，所有选测均 0 failed / 0 skipped / 0 not executed。独立最终源码复审在四项 receipt/ACK/取消与 renderer staged-receipt P1 修复后无 P0/P1。
+- 剩余边界：没有 Profiler 或毫秒性能结论；真实 Electron 组合事件不等同 Apple 输入法候选窗实机验收。未打包；本包不改变 Canvas 的 Source HTML 语义，未重复运行私人 HTML 语料。
+
+## 2026-09-12 — M3 普通外部打开由工作流收口
+
+- Mode / truth: DESIGN CHANGE；基线 `353fb6c3`，批准的复杂度规划 M3 第一步。普通导入/继续已由原 Workbench effect 自动驱动，本次移入 ProjectWorkflow 同操作；不增加确认界面；Document 离开边界保持独立包，本包同时收敛 shell 订阅。
+- 当前合同冲突：旧 `IMPORT_CONFIRMATION_PRD` 要求普通首次/再次打开弹框，与基线 Workbench 自动确认不符。v1.4 明确取代普通模态要求，保留 A/B/C 分类、文件身份/Hash、原子导入与显式删除权限；旧 UI 文案标为历史资料。
+- 旅程范围：选择本地 HTML / recent / startup / 系统外部交付 → 分类 → 当前项目安全收口 → Prepared commit → 发布项目 → Canvas / 可选删除 / ACK → 释放导航。默认保留原稿；真实删除仍使用原 native confirm，不重做 UI。
+
+| 状态/触发 | 可观察结果 | 本次证据 |
+| --- | --- | --- |
+| 普通导入或继续 | 一个操作完成；不等待 React 第二次提交 | ProjectWorkflow local/recent/startup/external Node 矩阵 |
+| 并发同源 C→B | 同请求最多两次 commit，第二次只继续，删除同意清零 | 精确 commit payload 与次数断言；换 ID/相同分类/重复重分类负例 |
+| commit 响应未知 | 原请求重放已有回执，仅一次 import | lost-response fixture；真实 Prepared Store 幂等测试 |
+| 首个项目已显示但 finalize/ACK 未结束 | 后续导航与 close 等待；Tab 与 Controller 对齐 | Navigation held-settlement；实际两外部请求 FIFO 测试 |
+| ACK 失败后重试 | 仅 ACK，不重做项目应用，不索取新应用回执 | ProjectWorkflow 与 Navigation ACK-only 测试 |
+| 取消/销毁/源变化 | 迟到执行不复活 FIFO，源变化不重试导入；销毁后仅 rollback 不发布或 finalize | ExternalFileOpenSession + ProjectWorkflow 负例 |
+| 新 Canvas 失败或显式删除 | Canvas 失败不 finalize/trash；删除同意不跨 C→B | 既有删除/Canvas 负例及更新的自动打开测试 |
+
+- 定向 Node：`node --test tests/project-workflow.test.mjs tests/workbench-navigation-workflow.test.mjs tests/external-file-open-session.test.mjs` 最终 147/147；`node --test tests/prepared-html-open.test.mjs tests/external-file-open.test.mjs tests/workspace-controller.test.mjs tests/workbench-navigation-session.test.mjs` 49/49。`npm run typecheck`（含 architecture check）通过；既有大小 advisory 未修改阈值。
+- 首错留存：第一轮 116/117，关闭期间 executor 迟到返回可复活已取消队首；加 await 后 generation + active requestId 核对及取消/完成回归后通过。第三/四轮新增 dispose 测试错误假设销毁会清空或冻结整个最终快照；调整为公开边界断言：不发布源、不 finalize、确认不复活。所有首次失败日志保留供根验收，不以重跑掩盖产品失败。
+- 独立审查新增P1：prepareSwitch等待中epoch变化会留下同请求busy=true，重试一直被拒绝。根已用延迟prepare+同路径新epoch复现，修复为stale出口仅清理仍存活同request的busy；取消/销毁不重建确认。修复后Project/Navigation/ExternalSession/Workspace共176/176通过，显式同ID重试只提交一次。既有外部导航15秒receipt计时与Prepared慢提交的P2记录后续，本包不扩改。
+- 最终组合证据：同一完成门禁已覆盖 Browser 26/26、Electron 61/61 与 AI 15/15，其中项目首次导入、Registry 恢复、历史版本打开及外部冷启动优先级均通过；Node targeted/core 共 2789 条通过并覆盖普通打开的 receipt/ACK/FIFO 负例。显式删除确认仍沿用既有原生确认边界；未单独声明连续系统级多文件投递的人工视觉验收，也未打包或作性能实测。
+
+
 ## 2026-09-08 — 独立服务配置与接入恢复
 
 - Truth: 本批三条真实旅程要求；沿用既有桌面视觉语言，共享控件但分别布局设置页与侧栏。
@@ -3042,3 +3417,42 @@ Remaining: full 200% zoom, long-history keyboard/scroll matrix, real accounts, a
 - Focused rebuilt-source Electron checks cover the generated-descendant host, a retained reference to the formerly visible copy button, an independent safe source block, overlapping edits, a slow but already valid Candidate, stale-candidate rejection, and chart continuity around normal source content. The corresponding Node policy/capability checks also pass; final task-gate evidence is owned by the existing runner.
 - Evidence boundary: these are isolated synthetic fixtures in rebuilt source Electron, not an installed-app replacement or proof for arbitrary web applications. The change conditionally removes one existing toolbar item and adds no new geometry, so no separate pixel-design artifact is claimed.
 - Result: passed for the scoped copy availability and Runtime continuity behavior; full task-level verification remains separate.
+
+
+## 2026-09-12 — R2 identical HTML Candidate decision
+
+- Mode: DESIGN CHANGE + AI EXPERIENCE LENS. Source base: `3c0b1d58ce6d1af1dfcf615362da5b70d9283edc`. Truth is the existing Review, unchanged empty-result presentation, and existing adoption confirmation. No new panel, mode, automatic decision, chat entry or visual token is introduced.
+- New complete, valid output follows Candidate → Review → explicit adoption/rejection even when its bytes equal the frozen input. The original adoption dialog explains that identical HTML still creates a formal version and archives only submitted requirements that were not edited again. Historical terminal v4 no-change remains an inactive, reopenable outcome; processing legacy completions receive current validation without rewriting completion bytes.
+- Node evidence: 72 focused finalizer/Bridge/submission/Promotion checks pass across normal/replay/restart, submitted-comment retention, stop fences, authority failures and seven Promotion commit failpoints for both changed and identical content. The initial sandbox run could not bind the Bridge loopback server; its first-failure log was retained and the same 15 Bridge tests then passed with local-listener permission. Architecture/type checking and four capability-context checks pass.
+- Real Electron cases in `tests/e2e/electron/ai-candidate-validation.spec.mjs` passed 2/2 with no retry, covering identical bytes, restart into the same Candidate, empty Review, adoption copy, explicit adoption/rejection, unchanged originals, version count and comment settlement.
+- The first run incorrectly expected the conversation sidebar to reopen automatically after restart. Its failure trace is retained; the test now uses the existing top-bar Review entry. Product behavior and persistence assertions were not changed to satisfy that test assumption.
+- Evidence: `output/playwright/wave2-identical-review-fixed/results/ai-candidate-validation-id-f5723-eview-and-explicit-adoption/identical-review.png` and `identical-adoption-confirmation.png`, plus the corresponding rejection-case images. All four images are 2880×1920. Root inspected the adoption Review and confirmation: the same-content notice occupies the existing directory row; both pages and the unchanged draft remain visible; the original confirmation explains version creation without new controls or overflow.
+- Final result: scoped Node and Electron flows passed. Final task-gate verification remains separate; these two pointer-driven cases do not claim exhaustive keyboard/focus acceptance.
+- Final task gate: `2026-09-12T08-19-22-536Z-task` completed all 10 steps against `origin/main` (`353fb6c3`). Targeted Node 1026, contract 16 and core 1872 checks passed; these sets overlap. Browser 34/34, Electron 43/43 and AI 25/25 passed with zero selected failures, skips, flaky tests or unexecuted tests. Builds, typecheck and lint passed. The frozen source matched before and after the run; this evidence includes inherited R1/A1/A2 changes. The private full-corpus baseline limitations recorded for the first-wave Draft PR remain unresolved; this is source-worktree verification, not installed or released verification.
+
+
+## 2026-09-12 — Review observes only optional outline evidence
+
+- Internal presentation coordination change; source facts, focus groups, comments and decisions retain their existing UI. Pure text, mixed text/style and empty results do not request visual observations. Only linked eligible pure-style outline candidates are observed; unavailable observation keeps the source result reviewable. Unused shell preparation and phase projections are retired.
+- Six focused source-Electron cases passed, followed by a frozen task gate with 10/10 steps: Node targeted 1040 / contract 16 / core 1880 (overlapping groups), Browser 34, Electron 43 and AI 28; no selected failures, skips, flaky or unexecuted tests. All six target cases were selected and executed.
+- Initial screenshots in the wide synthetic fixture clipped the style target. A separate three-case QA-only copy preserved every original assertion and used the existing Fit Canvas action plus target scrolling solely before capture. All three passed without retry; source, original tests/config and the successful gate fingerprint stayed unchanged. Root inspected real screenshots: confirmed pure style has one closed local outline per side; mixed text/style preserves text evidence without outlines; unverified style preserves the visible color change and local mask hole without an outline. Empty and text overviews retain zero masks/outlines. Both decision buttons remain enabled; actual decision persistence is exercised by the existing empty-result cases.
+- No new product mode or notice. Evidence is source Electron on macOS arm64 / Node v25.7.0, not a packaged or installed build. Local screenshots/reports are excluded from Git; no real vendor or additional private corpus run is claimed.
+## 2026-09-12 — Ordinary save journal retirement
+
+- Internal persistence change; existing save, version and recovery UI is retained. Committed save journals retire only after exact identity/source verification and durable recovery cleanup/publication. Uncertain sync retains the journal without adding a new recovery residue across later saves.
+- Final task gate passed all five selected steps, including 406 Node tests and 12 source-Electron AI Review tests, with no selected skips or unexecuted cases. The first gate exposed an omitted test-selection expected entry; its correction and the successful full rerun are retained in local evidence. Focused fault/restart coverage passed 46 tests; independent re-review found no remaining P0/P1. This is injected filesystem failure coverage, not physical power-loss testing.
+- The original private eight-file corpus ran once: four files passed and four failed, all originals unchanged. Fifty text-host attempts yielded 18 complete passes and 32 rejections; eight structure cycles and four files per preview/reload/reopen lifecycle completed. A missing copy button and whole-frame pending source revision assertions repeat failure categories already reproduced on representative clean-main fixtures. Full corpus acceptance remains incomplete. No private inputs, names, paths, logs or screenshots are committed.
+- Evidence is rebuilt source Electron on macOS arm64 / Node v25.7.0. No packaged or installed build is claimed.
+
+## 2026-09-12 — Review annotation overflow (R4)
+
+- Mode: DESIGN CHANGE + AI EXPERIENCE LENS, lightweight exception. Only the existing empty change-list slot changes: “变化标注暂不可用，可直接查看前后页面。” The same before/after pages and explicit adopt/discard actions remain available; no new mode, control, warning banner or automatic adoption is introduced.
+- Truth boundary: only the trusted 25th nonmergeable canonical fact may disable optional annotations. The temporary availability value does not describe Candidate validity or source equality. Identity, hash, path, cancellation, transport and unknown errors remain rejection boundaries.
+- Node evidence covers the real overflow class, clean reconstruction orchestration and cancellation. A synthetic Chromium case is prepared for real partial-marker cleanup, comments, paired interactions and formal bootstrap. This worker did not run Browser/Electron or inspect screenshots; visual and end-to-end decision verification remain pending with the parent tester.
+- Worker checks: 83/83 targeted Node checks, type/architecture and targeted lint passed (two existing Hook warnings). First failures were a sorted owner-list expectation (82/83) and Vite resolving the synthetic entry; both fixtures were corrected without changing production behavior or assertions. The Browser bundle now compiles in memory with no browser launched. Full first-failure and final logs remain under `/private/tmp/stemmio-review-fallback-*` for parent review.
+
+- Parent verification: both new real Browser cases passed, including partial-marker cleanup and exact-atom transport rejection. Both actual Electron annotation-capacity cases passed without retry: the real bounded accumulator overflowed, formal Review retained original/changed pages, and adoption or discard completed with persistence assertions. No production test hook or forged exception was added.
+- Root inspected the targeted `annotation-fallback.png`: the existing change-list explanation, two page panes, original comment, per-document unsent draft and explicit decisions are visible. The original 100% page width exceeds each pane; this is not a full-target fit screenshot.
+- First task gate stopped after 3/10 steps: type/lint passed; Node 1057/1058 passed, with the new Browser spec missing from the required risk ledger. The missing owner/oracle/stage entry is now present, and inventory plus impact-selection checks pass 49/49. Production source is unchanged. Full completion gate after this registration repair remains pending; original failure evidence is retained outside Git.
+
+- Final frozen-source task gate `2026-09-12T10-41-00-448Z-task` passed 10/10 steps: targeted Node 1058, contract 16 and core 1898 (overlapping groups); Browser 36/36, Electron 43/43 and AI/Review 30/30, with no selected failures, skips, flaky or missing tests. Both new Browser and both Electron fallback cases were selected and executed. Source fingerprints remained unchanged and all test processes exited. Only this QA result was added after the gate. Scope is synthetic rebuilt-source acceptance, not a private-corpus, vendor, packaged or installed-app result.

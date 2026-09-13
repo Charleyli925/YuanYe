@@ -23,6 +23,10 @@ export type VersionSessionSnapshot<TVersion = unknown> = VersionViewSnapshot & {
   restoredFromVersionId: string | null;
 };
 
+export function validateVersionSessionVersions<TVersion = unknown>(
+  versions: ReadonlyArray<TVersion> | unknown,
+): ReadonlyArray<TVersion>;
+
 export class VersionSession<TVersion = unknown> {
   setObserver(
     observer: ((snapshot: VersionSessionSnapshot<TVersion>) => void) | null,

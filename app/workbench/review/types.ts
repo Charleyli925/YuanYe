@@ -21,6 +21,9 @@ export type ReviewDiagnostic = {
   summary: string;
 };
 
+/** Disposable annotation outcome; never Candidate or adoption authority. */
+export type ReviewAnnotationAvailability = "available" | "unavailable";
+
 export type ReviewChange = {
   id: string;
   /** Stable-ID hosts that carry this source fact. One fact may span many hosts. */
@@ -44,6 +47,7 @@ export type ReviewOutlineItem = {
 };
 
 export type ReviewDocuments = {
+  annotationAvailability: ReviewAnnotationAvailability;
   before: string;
   after: string;
   bootstrapJavaScript: Record<ReviewSide, string>;

@@ -67,90 +67,108 @@ function cleanPublicId(value, fallback) {
   return /^[A-Za-z0-9_:-]{1,160}$/u.test(normalized) ? normalized : fallback;
 }
 
-function appendUpdate(updates, {
-  id,
-  groupId = null,
-  forceNew = false,
-  sequence,
-  text,
-}) {
-  const previous = updates.at(-1);
-  if (previous && groupId && previous.groupId === groupId) {
-    previous.text += text;
-    previous.sequence = sequence;
-    return;
-  }
-  if (
-    previous
-    && !forceNew
-    && !groupId
-    && !previous.groupId
-    && !SENTENCE_END.test(previous.text)
-  ) {
-    previous.text += text;
-    previous.sequence = sequence;
-    return;
-  }
-  updates.push({ id, groupId, sequence, text });
+function slicePublicText(text, limit) {
+  let end = Math.min(text.length, Math.max(0, limit));
+  // Do not expose half of a UTF-16 surrogate pair at the budget boundary.
+  if (end < text.length && /[\uD800-\uDBFF]/u.test(text[end - 1] || "")) end -= 1;
+  return text.slice(0, end);
 }
 
-function freezePublicUpdate(update) {
-  return Object.freeze({
-    id: update.id,
-    sequence: update.sequence,
-    text: safePublicAgentText(update.text),
-  });
+function publicParagraphs(message) {
+  if (message.groupId) return [{ ...message }];
+  const result = [];
+  let leading = "";
+  for (const [index, text] of message.text.split("\n\n").entries()) {
+    if (!text) {
+      if (result.length) result.at(-1).text += "\n\n";
+      else leading += "\n\n";
+      continue;
+    }
+    result.push({ id: `${message.id}:${index}`, sequence: message.sequence, text: leading + text });
+    leading = "";
+  }
+  if (!result.length && message.text) {
+    result.push({ id: `${message.id}:0`, sequence: message.sequence, text: message.text });
+  }
+  return result;
 }
 
 /**
- * Projects only the Agent's public words into stable display updates.
- *
- * Codex supplies an item id, so token deltas from one public message remain one
- * row. ACP providers without a message id are coalesced until a sentence or
- * paragraph boundary. No tool event, hidden reasoning, prompt or filesystem
- * detail crosses this projection.
+ * One bounded, process-private source for execution narration. Raw message
+ * fragments are assembled before redaction; diagnostic event retention does
+ * not determine which public words survive. Snapshot fields share one budget.
  */
-export function publicVisibleTextUpdates(events) {
-  const updates = [];
-  let remaining = 65536;
-  for (const event of Array.isArray(events) ? events : []) {
-    if (event?.kind !== "visible-text" || typeof event.text !== "string") continue;
-    const rawText = event.text
-      .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/gu, "").slice(0, remaining);
-    remaining -= rawText.length;
-    if (!rawText) continue;
-    const eventId = cleanPublicId(event.eventId, `visible-${Number(event.sequence) || 0}`);
-    const rawGroupId = cleanPublicId(event.messageId || event.segmentId, "");
-    const parts = rawGroupId ? [rawText] : rawText.split(/\n{2,}/u);
-    for (let index = 0; index < parts.length; index += 1) {
-      const text = parts[index];
-      if (!text.trim()) continue;
-      const groupId = rawGroupId ? `${rawGroupId}:${index}` : null;
-      appendUpdate(updates, {
-        id: groupId ? `message:${groupId}` : `${eventId}:${index}`,
-        groupId,
-        // A blank-line paragraph is an explicit public boundary even when the
-        // preceding paragraph is a heading or fragment without punctuation.
-        forceNew: !rawGroupId && index > 0,
-        sequence: Number.isSafeInteger(event.sequence) ? event.sequence : 0,
-        text,
+export function createPublicAgentTextAccumulator({ maxTextLength = 65536 } = {}) {
+  const messages = [];
+  const byGroup = new Map();
+  let rawLength = 0;
+  let truncated = false;
+  let exhausted = false;
+  let cached = null;
+  return Object.freeze({
+    append(event) {
+      if (event?.kind !== "visible-text" || typeof event.text !== "string" || !event.text) return;
+      if (exhausted) { truncated = true; cached = null; return; }
+      const raw = event.text.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/gu, "");
+      if (!raw) return;
+      const groupId = cleanPublicId(event.messageId || event.segmentId, "");
+      const previous = messages.at(-1);
+      let message = groupId ? byGroup.get(groupId) :
+        previous && !previous.groupId && (/\s$/u.test(previous.text) || /^\s/u.test(raw) || !SENTENCE_END.test(previous.text))
+          ? previous : null;
+      const separatorLength = !message && messages.length ? 2 : 0;
+      const text = slicePublicText(raw, maxTextLength - rawLength - separatorLength);
+      if (text.length < raw.length) { truncated = true; exhausted = true; }
+      if (text) {
+        if (!message) {
+          const eventId = cleanPublicId(event.eventId, `visible-${Number(event.sequence) || 0}`);
+          message = { id: groupId ? `message:${groupId}:0` : eventId,
+            groupId, sequence: 0, text: "" };
+          messages.push(message);
+          if (groupId) byGroup.set(groupId, message);
+          rawLength += separatorLength;
+        }
+        message.text += text;
+        message.sequence = Number.isSafeInteger(event.sequence) ? event.sequence : 0;
+        rawLength += text.length;
+      }
+      cached = null;
+    },
+    markTruncated() { truncated = true; cached = null; },
+    snapshot() {
+      if (cached) return cached;
+      // Redact whole messages before splitting display paragraphs. A credential
+      // or markup split over fragments must never be reassembled from redacted text.
+      const updates = messages.flatMap((message) => publicParagraphs({
+        ...message, text: safePublicAgentText(message.text),
+      }));
+      let remaining = maxTextLength;
+      let publicTruncated = truncated;
+      const bounded = [];
+      for (const update of updates) {
+        const separatorLength = bounded.length ? 2 : 0;
+        const text = slicePublicText(update.text, remaining - separatorLength);
+        if (text) {
+          bounded.push({ id: update.id, sequence: update.sequence, text });
+          remaining -= text.length + separatorLength;
+        }
+        if (text.length < update.text.length) { publicTruncated = true; break; }
+      }
+      if (bounded.length > MAX_VISIBLE_TEXT_UPDATES) {
+        const collapsed = bounded.splice(0, bounded.length - MAX_VISIBLE_TEXT_UPDATES + 1);
+        bounded.unshift({ id: `earlier:${collapsed[0].id}`,
+          sequence: collapsed.at(-1).sequence,
+          text: collapsed.map((update) => update.text).join("\n\n") });
+      }
+      const visibleTextUpdates = Object.freeze(bounded.map(Object.freeze));
+      cached = Object.freeze({
+        visibleText: visibleTextUpdates.map((update) => update.text).join("\n\n"),
+        visibleTextUpdates,
+        textTruncated: publicTruncated,
       });
-    }
-  }
-  if (updates.length <= MAX_VISIBLE_TEXT_UPDATES) {
-    return Object.freeze(updates.map(freezePublicUpdate));
-  }
-  const retained = updates.slice(-(MAX_VISIBLE_TEXT_UPDATES - 1));
-  const collapsed = updates.slice(0, updates.length - retained.length);
-  const first = collapsed[0];
-  return Object.freeze([
-    Object.freeze({
-      id: `earlier:${first.id}`,
-      sequence: collapsed.at(-1).sequence,
-      text: safePublicAgentText(collapsed.map((update) => update.text).join("\n")),
-    }),
-    ...retained.map(freezePublicUpdate),
-  ]);
+      return cached;
+    },
+  });
 }
 
 export function publicExecutionSession(entry) {

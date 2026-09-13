@@ -195,7 +195,12 @@ test("Desktop fails closed when the Working Copy is replaced between Bridge reco
       } catch (error) {
         return {
           resolved: false,
+          code: error?.code || null,
           message: String(error?.message || error || ""),
+          details: error?.details || null,
+          hasStack: "stack" in Object(error),
+          hasChannel: "channel" in Object(error),
+          hasInternalClass: "ProjectFileError" in Object(error),
         };
       }
     }, {
@@ -209,12 +214,19 @@ test("Desktop fails closed when the Working Copy is replaced between Bridge reco
       reason: "safe-action",
     });
 
-    // contextBridge strips custom error fields, so assert the dedicated
-    // fail-closed message plus the untouched state instead of the code.
-    expect(outcome).toEqual({
-      resolved: false,
-      message: "托管工作文件与已确认的项目内容不一致，当前文件没有切换。",
-    });
+    // The trusted IPC boundary exposes only the structured product DTO. It
+    // preserves the public code/details while redacting Main-process Error
+    // implementation fields before the value crosses contextBridge.
+    expect(outcome.resolved).toBe(false);
+    expect(outcome.code).toBe("MANAGED_WORKING_COPY_HASH_MISMATCH");
+    expect(outcome.message).toBe("托管工作文件与已确认的项目内容不一致，当前文件没有切换。");
+    expect(outcome.details).toEqual(expect.objectContaining({
+      expectedSha256,
+    }));
+    expect(outcome.details.actualSha256).toMatch(/^sha256:[a-f0-9]{64}$/u);
+    expect(outcome.hasStack).toBe(false);
+    expect(outcome.hasChannel).toBe(false);
+    expect(outcome.hasInternalClass).toBe(false);
 
     // The replacement must have landed inside the race window.
     expect(readFileSync(managedSourcePath, "utf8"))

@@ -281,8 +281,16 @@ export function createExternalFileOpenMailbox({
   platform = process.platform,
 } = {}) {
   const pending = [];
+  const acknowledged = new Map();
   let activationTail = Promise.resolve();
   let inFlight = null;
+
+  const rememberAcknowledged = (request) => {
+    acknowledged.set(request.requestId, request);
+    while (acknowledged.size > 32) {
+      acknowledged.delete(acknowledged.keys().next().value);
+    }
+  };
 
   const consume = (requestId) => {
     if (
@@ -324,10 +332,15 @@ export function createExternalFileOpenMailbox({
       return promise;
     },
     acknowledge(requestId) {
+      const replay = typeof requestId === "string"
+        ? acknowledged.get(requestId)
+        : null;
+      if (replay) return replay;
       if (inFlight && inFlight.requestId !== requestId) return null;
       const request = consume(requestId);
       if (!request) return null;
       inFlight = null;
+      rememberAcknowledged(request);
       return request;
     },
     consume,

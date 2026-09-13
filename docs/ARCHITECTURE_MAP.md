@@ -20,37 +20,66 @@ React views
         -> typed Bridge client
 ```
 
-Workbench renders a snapshot and dispatches product intent. It does not import
+Workbench renders the explicit stable `controller.shell` projection and dispatches
+product intent. Conversation and PROJECT.md regions subscribe their existing
+Controller reader facets; comments and runs retain their local facets. Full
+aggregate reads remain current for operations, but are not the shell render subscription. It does not import
 the Bridge client, construct Sessions, or own debounce, polling, or drain.
+
+The top mode switch owns its geometry and material states in `app/styles/top-toolbar.css`.
+Shared chrome tokens remain in `workbench-chrome.css`; earlier base/review layers
+do not override this component. `file-header-view.tsx` keeps the Review portal
+slot mounted, while `review-toolbar-controls.tsx` renders only current capabilities.
+Embedded Review keeps its narrow conversation overlay in
+`ai-review-workspace.module.css`; the one-column breakpoint must release the
+sidebar's Grid row and column before positioning it against the right edge.
 
 ## Capability domains
 
 | Domain | Fact owner | Operation owner | Entry |
 | --- | --- | --- | --- |
 | Navigation and tabs | `WorkbenchTabsSession`, `WorkbenchNavigationSession` | `WorkbenchNavigationWorkflow` | `workspace-controller-capabilities.d.ts` (`controller.navigation`), `workbench-navigation-container.tsx` |
-| Document save and detach protection | `DocumentSession` owns current bytes/durability; Main recovery journal owns crash bytes | `DocumentWorkflow` owns source write plus verified recovery/export evidence | `document-workflow.js`, `document/save-plan.js`, `verified-project-context.js`, `desktop/recovery-journal-store.mjs` |
+| Document save and detach protection | `DocumentSession` owns current bytes/durability; Main recovery journal owns crash bytes | `DocumentWorkflow` owns source write, operation-local leave checks and verified recovery/export evidence | `document-workflow.js`, `document/save-plan.js`, `verified-project-context.js`, `desktop/recovery-journal-store.mjs` |
 | Source element identity migration | `ProjectFileRepository` Working Copy state | `ProjectFileRepository` serialized migration transaction | `bridge/project-file-repository.mjs`, `bridge/project-file-repository/working-copy.mjs` |
 | Semantic source editing | immutable semantic document state, stable-ID operation intent and lineage | pure `SemanticOperationKernel`; SourcePatch is its internal materializer; Canvas owns only current-open invocation | `app/lib/semantic-operation-kernel.js`, `app/lib/source-structure-edit.js`, `app/lib/source-patch-engine.js`, `app/components/html-canvas-structure-commands.ts`, `schemas/semantic-operation.v1.schema.json` |
 | Comments | `CommentSession`; `sourceAnchor` is the only persistent source authority and resolves through `TargetResolver`; bounded `visualHint` is explanatory runtime context, including when `body` is only a safe fallback anchor | `CommentWorkflow` | `workspace-controller-capabilities.d.ts` (`controller.comments`), `comment-workflow.js`, `comment/commit-plan.js`, `target-resolver.js`, `runtime-comment-hint.js`, `comment-text-locator.js`, `comment-rail-container.tsx`, `comment-canvas-port.js`, `comment-rail-view.tsx` |
 | Attachments | Draft attachment repository; Request freeze owns independent byte copies and recovery staging | `CommentWorkflow` before send, `ProjectFileRepository` during Request preparation/publication | `comment-workflow.js` upload/read/delete, `bridge/project-file-repository/request-attachments.mjs`, `request-draft.mjs` |
 | Run and AI request | `RunSession` | `RunWorkflow` | `workspace-controller-capabilities.d.ts` (`controller.runs`), `run-workflow.js`, `run/text-locator-validation.js`, `run/submit-plan.js`, `run-conversation-outlet.tsx` |
-| Review and Candidate | Repository owns immutable Candidate HTML, runtime seal, source-identity report and bounded Stable-ID impact assessment with descendant scope closure; historical Version records may still store full-array impact, which `candidateAssessmentFromRecord` projects into the same bounded facts; `VersionSession` owns only the renderer projection | Repository validates/normalizes full-HTML Candidate; `VersionWorkflow` prepares Review and accepts; the explicit Review command starts cancellable source-fact analysis, then projects comments and the current session onto those facts and presents bounded warning-only impact context | `bridge/candidate-assessment.mjs`, `bridge/candidate-assessment-decoder.mjs`, `bridge/project-file-repository/candidate-identity.mjs`, `bridge/project-file-repository/version-candidate.mjs`, `app/domain/run-lifecycle.js`, `app/application/version-workflow.js`, `app/workbench/review-analysis.ts`, `app/workbench/review-document.ts`, `app/workbench/AiReviewWorkspace.tsx` |
+| Review and Candidate | Repository owns immutable Candidate HTML, runtime seal, source-identity report and bounded Stable-ID impact assessment with descendant scope closure; historical Version records may still store full-array impact, which `candidateAssessmentFromRecord` projects into the same bounded facts; `VersionSession` owns only the renderer projection | Repository validates/normalizes full-HTML Candidate; `VersionWorkflow` prepares Review and accepts; the explicit Review command starts cancellable source-fact analysis (only canonical-fact overflow disables optional annotations), then projects comments and the current session onto those facts and presents bounded warning-only impact context | `bridge/candidate-assessment.mjs`, `bridge/candidate-assessment-decoder.mjs`, `bridge/project-file-repository/candidate-identity.mjs`, `bridge/project-file-repository/version-candidate.mjs`, `app/domain/run-lifecycle.js`, `app/application/version-workflow.js`, `app/workbench/review-analysis.ts`, `app/workbench/review-document.ts`, `app/workbench/AiReviewWorkspace.tsx` |
 | Version and history | `VersionSession` owns immutable records and verified history preview bytes; `DocumentSession` remains the current working source | `VersionWorkflow` verifies history before publishing its read-only projection; return-current only clears it and observes external changes | `version-workflow.js`, `version/review-plan.js` |
 | Project context and version navigation | `ProjectSession`, `ProjectRulesSession`, `VersionSession` | `ProjectWorkflow`, `ProjectRulesWorkflow` | `workspace-controller-capabilities.d.ts` (`controller.projectCatalog`), `workbench-sidebar-container.tsx`, `WorkbenchChrome.tsx`, `project-rules-editor.tsx` |
 | Canvas edit runtime | `EditAuthorRuntimeSession` owns one scoped exact resource grant; Main's library store owns only verified immutable CDN bytes and reviewed same-version packaged pins; source HTML remains authoritative | `HtmlCanvasEditor` ends proven text/style/same-parent reorder projections in place, rejects element copy when the selected live subtree is not wholly source-backed, and rebuilds only resource, structural, program-identity or failed-projection boundaries; `DocumentWorkflow` persists complete HTML; test-only `runtime-continuity-probe.js` records frame/visual samples after enable | `edit-runtime-contract.js`, `HtmlCanvasEditor.tsx`, `runtime-continuity-probe.js`, `desktop/edit-runtime-protocol.mjs`, `desktop/edit-runtime-library-store.mjs`, `desktop/edit-runtime-bootstrap.mjs` |
 | Preview | disposable preview session | Desktop preview protocol | `desktop/` preview owner, `HtmlInteractionPreview` |
 | Project open / switch / close | `ProjectSession` | `ProjectWorkflow` | `project-workflow.js`, `project/open-intent.js`, `project/switch-plan.js`, `project/close-plan.js`, `project/source-locator-plan.js` |
-| External open | Main mailbox + `ExternalFileOpenSession` + `ProjectApplicationSession` | `ProjectWorkflow` | `desktop/prepared-html-open.mjs`, Workbench auto-confirm of `openConfirmation` |
+| External open | Main mailbox + `ExternalFileOpenSession` + `ProjectApplicationSession` | `ProjectWorkflow` | `desktop/prepared-html-open.mjs`; ProjectWorkflow drives ordinary Prepared opens through finalization/ACK in the same operation; Navigation waits for that settlement; Workbench only confirms explicit original deletion |
 | Close and drain | unique `DrainCoordinator`; tab layout is best-effort metadata | `ProjectWorkflow` close op and bounded Electron handshake | `app/application/project-workflow.js`, `desktop/close-recovery.mjs` |
 | Packaging and release | exact Git Tree | release workflows | `docs/RELEASING.md` |
-| Conversation handoff | `ConversationRepository` / `ConversationSession` | `ConversationWorkflow` | `app/workbench/AiConversationSidebar.tsx` |
+| Conversation handoff | `ConversationRepository` / `ConversationSession` | `ConversationWorkflow` | `controller.conversation`, `run-conversation-outlet.tsx`, `AiConversationSidebar.tsx`; root hook owns visibility/load lifecycle only |
 | Agent session Token | Coordinator owns the live session Token in process memory; Main `desktop/agent-session-credential-store.mjs` owns optional `safeStorage` ciphertext after an explicit remember | Catalog/Workbench persist or clear only through narrow IPC; never plaintext, logs, GET responses or `ui-preferences.json` | `desktop/agent-session-credential-store.mjs`, `shared/agent-vendor-key-url.mjs` |
+
+Repository catalog queries share one query-local census of candidate project
+identities and still validate each registered project's complete metadata. This
+only removes repeated identity discovery, not the remaining per-project checks;
+there is no long-lived cache or write authority in the census. Workspace recovery
+before source resolution is reused only for the same project/document/canonical
+root; a changed target is recovered independently before fresh metadata loading.
 
 Project identity, hydration, switch, rename and managed-source handoff stay
 with `ProjectSession` + `ProjectWorkflow`. Open/switch/close now have
 `ready | wait | reject` plans; the executor remains the unique
 `ProjectWorkflow`. Do not split that workflow for line budget, and do not
 add a second Controller.
+
+Ordinary save recovery and bounded retirement remain Repository operations in
+`bridge/project-file-repository.mjs`; `save-retirement.mjs` contains only the
+required-sync cleanup sequence. It owns no separate journal or background job.
+The deletion proof and retained-record cases are defined in `STATE_OWNERSHIP.md`.
+
+Native HTTP Agent input/attachment policy is shared in
+`shared/agent-input-policy.mjs`. RunWorkflow supplies candidate byte estimates;
+HTTP Runtime supplies verified frozen serialized bytes. Provider launch consumes
+the selected preflight ticket capability. No policy object owns source, Request,
+credentials or durable runtime state; see ADR 0069 for the estimation boundary.
 
 ## Workspace response ingress
 
@@ -64,9 +93,9 @@ records must not be silently filtered into a partial success.
 | Raw response / entry | Decoder | Published owners |
 | --- | --- | --- |
 | Ordinary open, reload, restart recovery: workspace Core + Supplemental | `decodeWorkspaceResponse` → `versionsFromWorkspace`, `draftAuthorityFromWorkspace`, comment/event codecs | Project, Document, Version, Draft, Comment Sessions |
-| Registration / canonical refresh: `ensureProject` | same decoder before registration publication | Project, Document, Version, Draft; CommentWorkflow reconciles its projection |
+| Registration / canonical refresh: `ensureProject` | same decoder before registration publication; Controller resumes an operation-bound staged publication receipt before fast paths | Project, Run, Document, Version, Draft, Comment and source-history owners |
 | Draft authority rebound: `workspace` | same decoder before replacing draft authority | Draft; CommentWorkflow reconciles Comment |
-| Continue editing history: activation receipt | same decoder before managed-source publication | Project, Document, Version, Draft, Comment Sessions |
+| Open a created historical Version | VersionWorkflow uses the same decoder before managed-source publication | Project, Document, Version, Draft, Comment Sessions |
 | AI adoption refresh | ProjectWorkflow workspace path above | same existing Session owners |
 
 Bridge/disk records keep `versionId`; decoded Version models keep `id`.
@@ -87,8 +116,8 @@ bypass hash, identity, scope or persistence checks, and do not serialize
 Runtime DOM as the save source.
 
 **Current fact.** `HtmlCanvasEditor.applySourceCommand()` materializes once
-for an accepted edit: it lowers the canvas command to a semantic operation,
-applies the kernel, and publishes that complete HTML/Hash plus the kernel's
+for an accepted edit: it receives a semantic operation, applies the kernel,
+and publishes that complete HTML/Hash plus the kernel's
 SourcePatch target mappings. SourcePatch remains the internal materializer
 inside the kernel; Canvas does not apply a second independent plan or compare
 two HTML results before publishing. Comment and selection tracking pass
@@ -110,11 +139,24 @@ refreshed. Comment-target geometry is still measured from the current layout on
 each overlay tick. Unused insertion-point React state is not a second layout
 owner. Geometry or outline failure still must not refuse edit entry.
 
-**Transitional.** Heuristic helpers may still exist in `target-resolver.js`,
-but the official entry does not call them and does not record fallback-only
-metrics. Canvas still constructs capability-specific SourcePatch commands
-beside kernel operations so it can recover island metadata before the single
-apply. Opt-in `edit-pipeline-counters.js` can count
+**Target resolution.** The official entry requires a valid unique Stable ID.
+Insertion resolution keeps exact boundaries and cross-hash prefix/suffix rebind
+inside that same parent; it has no ID-less parent search. Text-range context
+may similarly locate a range inside its identified host, never select a new host.
+Element styles, text-range styles and same-parent up/down commands directly
+construct `setStyle` and `moveElement` through the pure
+`html-canvas-source-commands` helpers. Native editable-island input likewise
+constructs `setText` with logical text and canonical content HTML through
+`editableIslandTextOperation`; it carries no line-break IDs at entry. Canvas
+uses the kernel's `materialization.planType`, exact patches and returned
+allocation evidence for projection and save evidence; it does not pre-plan
+commands or infer semantic intent from inverse metadata. The Kernel chooses a
+fresh editable-island plan when IDs are absent, or replays sealed IDs for undo,
+redo and persistence verification. Range layout safety inspects that same
+materialization before publication. `reconcileAllocatedLineBreakIds()` only
+copies Kernel-sealed IDs into the live DOM under its expected-mutation guard;
+it is not a second source owner.
+Opt-in `edit-pipeline-counters.js` can count
 full-document index builds, full patch applies and insertion-point full-tree
 scans in tests; it is not a Session and has no production stream. Undo/redo
 restores the open-document history tuple and is not a new `fullPatchApply`. Live
@@ -190,6 +232,12 @@ intents; it never owns comment facts. Workbench's aggregate
 subscription may suppress composer-text and edit-text-only revisions; saved
 comments, attachment structure, persistence errors and every non-comment
 capability still invalidate the composition root.
+Saved and historical comments have one writable `sourceAnchor` in the renderer model.
+The existing injected `comment-model` codec alone reads the old `target` alias and
+writes compatible Draft/Request records; application workflows never synchronize a
+second target. `commentVisualTarget` derives Canvas/card presentation from that anchor
+and the bounded hint. Unknown record extensions survive the codec without preserving
+known legacy target fields as a second authority.
 Persistent `sourceAnchor.elementId`, refreshed expected source Hash and optional text locator are
 Comment/Draft facts; `TargetResolver` maps a complete managed Working Copy only by that ID
 and never consults disposable geometry or Runtime DOM. The old heuristic resolver is not an
@@ -223,6 +271,24 @@ iframe. The repository may continue to persist the rules in its internal
 `PROJECT.md` file without exposing that filename in the UI.
 
 ## Run and navigation render boundaries
+
+RunSession keeps locator-scoped run, result, handoff, copied/recovered and
+outcome facts in one aggregate entry. Active presentation retains locator keys
+only and projects from that same entry; it is not a second fact store. A new
+Request/Attempt on one locator replaces its attempt facts atomically, while late
+writers must still match the current attempt. Repository `sourceWorkingCopyId`
+reaches both Bridge active-Run projections and the domain decoder; missing legacy
+origin stays unknown. Pending submissions use the existing token, and
+rename/managed-source transition rebind only the exact old locator. See
+`STATE_OWNERSHIP.md` for the distinction between Request origin and the
+post-Promotion display target.
+
+Locator revisions/tombstones are coordination metadata, not a second public
+fact store. Hydration carries a locator revision, per-query sequence and
+ProjectSession epoch across its Bridge await. Source rebinds reserve both
+ProjectSession and RunSession, then publish observers only after both CAS
+commits succeed; host activation that cannot be locally proven is surfaced as
+unknown/recovery-required.
 
 ```text
 RunSession + RunWorkflow
@@ -312,3 +378,10 @@ Codex execution transport: `bridge/agent/runtimes/codex-client-tools.mjs` adapts
 verified native client tools into the shared ACP host; lifecycle remains in
 `acp-process.mjs`, authority in `hosts/execution-host.mjs`. See ADR 0053's
 2026-09-09 client-tool execution section.
+
+Legacy `historyActivation` records remain Repository/Runtime facts. The retired
+continue-editing Renderer command and its response decoder are removed. The old
+HTTP continuation route only replays a matching persisted receipt; it cannot
+create one. Replay and confirmation reject mismatches before any Workspace or
+external-source coordination. Ordinary hydration and generic Desktop managed
+source activation retain compatibility with already active historical files.

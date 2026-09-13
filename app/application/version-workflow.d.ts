@@ -107,8 +107,6 @@ export type VersionWorkflowConstruction = Readonly<{
     "workspace" | "createVersionFromHistory" | "queryHistoryCreation" | "confirmHistoryCreationOpened" | "versionFile"
       | "source"
       | "activateReadyVersion"
-      | "continueEditingHistoryVersion"
-      | "confirmEditingHistoryVersion"
   >;
   projectSession: ProjectSession;
   documentSession: DocumentSession;
@@ -160,10 +158,5 @@ export class VersionWorkflow {
   restoreHistoryCreation(input: { operationId: string; context: ProjectContext }): Promise<void>;
   openCreatedHistoryVersion(input: { operationId: string; context?: ProjectContext | null }): Promise<VersionWorkflowOutcome<HistoryCreationResult>>;
   queryHistoryCreation(input: { operationId: string; context?: ProjectContext | null }): Promise<VersionWorkflowOutcome<HistoryCreationResult>>;
-  continueEditingHistoryVersion(input?: {
-    versionId?: string | null;
-    context?: ProjectContext | null;
-    fromDeferred?: boolean;
-  }): Promise<VersionWorkflowOutcome<Record<string, unknown>>>;
   dispose(): void;
 }

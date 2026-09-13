@@ -1,3 +1,7 @@
+import { writeLegacyNoChangeOutcome } from "./helpers/legacy-v4-no-change.mjs";
+
+import { loadWorkbenchModel } from "./helpers/workbench-model-loader.mjs";
+const { commentsFromRecords, persistedComment } = await loadWorkbenchModel("comment-model");
 import { submissionRequestMatches } from "../bridge/project-file-repository/submission.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -96,17 +100,30 @@ test("execution facts replay exactly once and restart preserves uncertain Reques
   assert.equal(conversation.messages.filter((message) => message.text === "已开始执行本轮修改。").length, 1);
 });
 
-test("durable no-change outcome ends the Turn and remains stable after restart", async (t) => {
+test("historical v4 no-change remains terminal with its receipt and outbox unchanged", async (t) => {
   const value = await setup(t);
   const receipt = await prepareRecordedRequest(value);
-  const html = await readFile(value.target.exactSourcePath, "utf8");
-  const ended = await value.repository.completeRequest({ target: value.target, requestId: receipt.requestId, attemptId: receipt.attemptId, html });
-  assert.equal(ended.status, "no-change");
+  const legacy = await writeLegacyNoChangeOutcome({ projectRoot: value.target.projectRootPath, requestId: receipt.requestId });
   const restarted = new ProjectFileRepository({ projectsRoot: value.projects });
   await restarted.initialize();
+  await restarted.initialize();
+  const statusInput = { target: value.target, requestId: receipt.requestId, attemptId: receipt.attemptId };
+  assert.equal((await restarted.requestStatus(statusInput)).status, "no-change");
+  assert.equal((await restarted.completeRequest({ ...statusInput,
+    html: await readFile(value.target.exactSourcePath, "utf8") })).status, "no-change");
+  const workspace = await restarted.workspace({ sourcePath: value.target.exactSourcePath });
+  assert.equal(workspace.activeRequest, null);
+  assert.equal(workspace.activeCandidate, null);
+  assert.equal(workspace.manifest.versions.length, 1);
+  const runtime = JSON.parse(await readFile(path.join(value.target.projectRootPath, ".pageroot", "runtime-state.json"), "utf8"));
+  assert.deepEqual(runtime.lastAiTask, legacy.runtime.lastAiTask);
+  assert.equal(runtime.activeRequest, null);
+  assert.equal(runtime.activeCandidateId, null);
+  assert.deepEqual(await Promise.all(legacy.files.map((file) => readFile(file, "utf8"))), legacy.bytes);
   const conversation = await ensureCurrentConversation({ projectRoot: path.join(value.target.projectRootPath, ".pageroot"), projectId: value.target.projectId, documentId: value.target.documentId });
   assert.equal(conversation.turns[0].status, "completed");
   assert.equal(conversation.messages.filter((message) => message.text.startsWith("本轮没有产生修改")).length, 1);
+  assert.equal(conversation.messages.some((message) => message.text === "修改已准备好，尚未采用。"), false);
   await restarted.recordSubmission({ ...value, operationId: "submission_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" });
 });
 
@@ -123,7 +140,10 @@ test("crash after authoritative outcome write replays history without repeating 
   await restarted.initialize();
   const conversation = await ensureCurrentConversation({ projectRoot: path.join(value.target.projectRootPath, ".pageroot"), projectId: value.target.projectId, documentId: value.target.documentId });
   assert.equal(conversation.turns[0].status, "completed");
-  assert.equal(conversation.messages.filter((message) => message.text.startsWith("本轮没有产生修改")).length, 1);
+  assert.equal(conversation.messages.filter((message) => message.text === "修改已准备好，尚未采用。").length, 1);
+  const workspace = await restarted.workspace({ sourcePath: value.target.exactSourcePath });
+  assert.equal(workspace.activeCandidate.requestId, receipt.requestId);
+  assert.equal(workspace.manifest.versions.length, 1);
 });
 
 
@@ -154,7 +174,8 @@ test("a candidate that won before stop is retained until an explicit discard", a
 });
 
 
-test("adoption consumes only unchanged submitted comments and replays its decision once", async (t) => {
+for (const sameContent of [false, true]) {
+test(`adoption consumes only unchanged submitted comments and replays once (same content: ${sameContent})`, async (t) => {
   const value = await setup(t);
   const unchanged = { ...value.input.comments[0], commentId: "comment_unchanged" };
   value.input.comments.push(unchanged);
@@ -163,15 +184,19 @@ test("adoption consumes only unchanged submitted comments and replays its decisi
   const added = { ...unchanged, commentId: "comment_added", text: "Next round" };
   await value.repository.saveDraft({ target: value.target, operationId: "draftop_retention_00001",
     expectedDraftRevision: 0, comments: [edited, unchanged, added], changeEvents: [] });
-  const html = (await readFile(value.target.exactSourcePath, "utf8")).replaceAll(">V1<", ">V2<");
+  const sourceHtml = await readFile(value.target.exactSourcePath, "utf8");
+  const html = sameContent ? sourceHtml : sourceHtml.replaceAll(">V1<", ">V2<");
   const ready = await value.repository.completeRequest({ target: value.target, requestId: receipt.requestId, attemptId: receipt.attemptId, html });
   const candidateId = ready.candidate.candidateId;
   await assert.rejects(value.repository.promoteCandidate({ target: value.target, candidateId, decisionOperationId: "promote_other" }), { code: "DECISION_IDENTITY_MISMATCH" });
-  await assert.rejects(value.repository.promoteCandidate({ target: value.target, candidateId, expectedSourceSha256: "0".repeat(64) }), { code: "SOURCE_HASH_CONFLICT" });
+  await assert.rejects(value.repository.promoteCandidate({ target: value.target, candidateId, decisionOperationId: `promote_${candidateId}`, expectedSourceSha256: "0".repeat(64) }), { code: "SOURCE_HASH_CONFLICT" });
   const input = { target: value.target, candidateId, decisionOperationId: `promote_${candidateId}`, expectedSourceSha256: value.target.sourceSha256 };
   const result = await value.repository.promoteCandidate(input);
   const replayed = await value.repository.promoteCandidate(input);
   assert.equal(replayed.version.versionId, result.version.versionId);
+  assert.equal(replayed.target.workingCopyId, result.target.workingCopyId);
+  assert.equal(await readFile(result.target.exactSourcePath, "utf8"), html);
+  assert.equal(await readFile(value.target.exactSourcePath, "utf8"), sourceHtml);
   const workspace = await value.repository.workspace({ sourcePath: result.target.exactSourcePath });
   assert.deepEqual(workspace.draft.comments.map((comment) => comment.commentId), [edited.commentId, added.commentId]);
   const restarted = new ProjectFileRepository({ projectsRoot: value.projects });
@@ -180,7 +205,11 @@ test("adoption consumes only unchanged submitted comments and replays its decisi
   assert.equal(conversation.messages.filter((message) => message.text === "已采用本次修改。").length, 1);
   const restored = await restarted.workspace({ sourcePath: result.target.exactSourcePath });
   assert.deepEqual(restored.draft.comments, workspace.draft.comments);
+  assert.equal(restored.manifest.versions.length, 2);
+  assert.equal(restored.manifest.workingCopies.length, 2);
+  assert.equal((await restarted.promoteCandidate(input)).version.versionId, result.version.versionId);
 });
+}
 
 
 test("bounded progress exposes truncation while keeping the terminal outcome", async (t) => {
@@ -197,7 +226,7 @@ test("bounded progress exposes truncation while keeping the terminal outcome", a
   const final = JSON.parse(await readFile(file, "utf8"));
   assert.equal(final.eventsTruncated, true);
   assert.equal(final.events.filter((event) => event.kind === "reading-task").length, 64);
-  assert.equal(final.events.filter((event) => event.kind === "no-change").length, 1);
+  assert.equal(final.events.filter((event) => event.kind === "candidate-ready").length, 1);
   const conversation = await ensureCurrentConversation({ projectRoot: path.join(value.target.projectRootPath, ".pageroot"), projectId: value.target.projectId, documentId: value.target.documentId });
   assert.equal(conversation.messages.filter((message) => message.text.includes("早期过程已省略")).length, 1);
   assert.equal(conversation.turns[0].status, "completed");
@@ -254,7 +283,8 @@ for (const boundary of ["messages", "contexts", "bytes"]) {
       requestId: receipt.requestId, attemptId: receipt.attemptId, html: fixtureHtml("V2") });
     assert.equal(candidate.status, "candidate-ready");
     const adopted = await value.repository.promoteCandidate({ target: value.target,
-      candidateId: candidate.candidate.candidateId });
+      candidateId: candidate.candidate.candidateId,
+      decisionOperationId: `promote_${candidate.candidate.candidateId}` });
     assert.equal(adopted.promoted, true);
     const restarted = new ProjectFileRepository({ projectsRoot: value.projects });
     await restarted.initialize();
@@ -309,4 +339,39 @@ test("execution tools belong to the Agent while preparation and validation belon
   }
   const conversation = await ensureCurrentConversation({ projectRoot: path.join(value.target.projectRootPath, '.pageroot'), projectId: value.target.projectId, documentId: value.target.documentId });
   assert.deepEqual(conversation.messages.filter(message => message.messageId.startsWith('message_owner_')).map(message => message.actor), ['pageroot','agent','agent','agent','pageroot','pageroot']);
+});
+
+test("canonical renderer comments keep frozen compatibility and newer requirements through adoption and restart", async (t) => {
+  const value = await setup(t);
+  const raw = value.input.comments[0];
+  raw.target.futureTarget = { retained: true };
+  raw.futureComment = "retained";
+  const submitted = commentsFromRecords([raw, { ...raw, commentId: "comment_unchanged" }]);
+  assert.ok(submitted.every((comment) => !Object.hasOwn(comment, "target")));
+  value.input.comments = submitted.map(persistedComment);
+  value.input.targets = value.input.comments.map((comment) => comment.target);
+  const receipt = await prepareRecordedRequest(value);
+  const annotationsPath = path.join(value.target.projectRootPath, ".pageroot", "requests", receipt.requestId, "input", "annotations", "records.json");
+  const frozenAnnotations = await readFile(annotationsPath, "utf8");
+  const decodedAgain = commentsFromRecords(JSON.parse(JSON.stringify(value.input.comments)));
+  const edited = { ...decodedAgain[0], text: "Keep later edit", updatedAt: "2026-09-12T00:00:00.000Z" };
+  const added = { ...decodedAgain[1], commentId: "comment_next_round", text: "New requirement" };
+  await value.repository.saveDraft({ target: value.target, operationId: "draftop_codec_retention_0001",
+    expectedDraftRevision: 0, comments: [edited, decodedAgain[1], added].map(persistedComment), changeEvents: [] });
+  const html = (await readFile(value.target.exactSourcePath, "utf8")).replaceAll(">V1<", ">V2<");
+  const ready = await value.repository.completeRequest({ target: value.target, requestId: receipt.requestId, attemptId: receipt.attemptId, html });
+  const result = await value.repository.promoteCandidate({ target: value.target, candidateId: ready.candidate.candidateId,
+    decisionOperationId: `promote_${ready.candidate.candidateId}`, expectedSourceSha256: value.target.sourceSha256 });
+  const restarted = new ProjectFileRepository({ projectsRoot: value.projects });
+  await restarted.initialize();
+  const workspace = await restarted.workspace({ sourcePath: result.target.exactSourcePath });
+  const retained = commentsFromRecords(workspace.draft.comments);
+  assert.deepEqual(retained.map((comment) => comment.commentId), [edited.commentId, added.commentId]);
+  assert.ok(retained.every((comment) => !Object.hasOwn(comment, "target")));
+  assert.ok(retained.every((comment) => comment.futureComment === "retained"));
+  assert.deepEqual(persistedComment(retained[0]).target.futureTarget, { retained: true });
+  assert.equal(await readFile(annotationsPath, "utf8"), frozenAnnotations);
+  const archivedComments = JSON.parse(frozenAnnotations).comments;
+  assert.equal(archivedComments.length, 2);
+  assert.ok(archivedComments.every((comment) => comment.target && comment.sourceAnchor));
 });

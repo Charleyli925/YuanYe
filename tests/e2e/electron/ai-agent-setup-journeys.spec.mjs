@@ -17,7 +17,7 @@ test("non-default DeepSeek saves high through restart and sends high, with compa
   const codexCommand = createCodexAcpE2ECommand(fixture.sourceDirectory);
   let finish;
   const complete = new Promise((resolve) => { finish = resolve; });
-  const httpAgent = await startPagerootHttpAgent({ beforeStreamComplete: () => complete, streamDelayMs: 100 });
+  const httpAgent = await startPagerootHttpAgent({ beforeStreamComplete: () => complete, streamDelayMs: 1_000 });
   const injectedEnv = {
     PAGEROOT_CODEX_ACP_ALLOW_TEST_COMMAND: "1",
     PAGEROOT_CODEX_ACP_COMMAND: codexCommand,
@@ -88,12 +88,49 @@ test("non-default DeepSeek saves high through restart and sends high, with compa
     const narration = sidebar.getByTestId("ai-conversation-narration-message");
     await expect(narration.getByTestId("ai-conversation-execution-status")).toBeVisible();
     await expect(narration).toContainText("我会先检查页面结构");
+    await expect(narration).not.toContainText("标题与配色已调整");
+    const draft = sidebar.getByRole("textbox", { name: "修改要求草稿" });
+    await draft.fill("下一轮再调整");
+    await draft.press("End");
+    await draft.evaluate((element) => {
+      window.__draftCompositionTextarea = element;
+      window.__draftCompositionEvents = [];
+      for (const type of ["compositionstart", "compositionend"]) {
+        element.addEventListener(type, () => window.__draftCompositionEvents.push(type));
+      }
+    });
+    const draftCdp = await launched.page.context().newCDPSession(launched.page);
+    await draftCdp.send("Input.imeSetComposition", { text: "yejiaojianju", selectionStart: 11, selectionEnd: 11 });
     await expect(narration).toContainText("标题与配色已调整");
+    expect(await draft.evaluate((element) => ({
+      sameElement: element === window.__draftCompositionTextarea,
+      focused: document.activeElement === element,
+      events: window.__draftCompositionEvents,
+    }))).toEqual({
+      sameElement: true,
+      focused: true,
+      events: ["compositionstart"],
+    });
+    await draftCdp.send("Input.insertText", { text: "页脚间距" });
+    await expect(draft).toHaveValue("下一轮再调整页脚间距");
+    expect(await draft.evaluate((element) => ({
+      sameElement: element === window.__draftCompositionTextarea,
+      focused: document.activeElement === element,
+      caret: element.selectionStart,
+      end: element.selectionEnd,
+      length: element.value.length,
+      events: window.__draftCompositionEvents,
+    }))).toEqual({
+      sameElement: true,
+      focused: true,
+      caret: "下一轮再调整页脚间距".length,
+      end: "下一轮再调整页脚间距".length,
+      length: "下一轮再调整页脚间距".length,
+      events: ["compositionstart", "compositionend"],
+    });
+    await draftCdp.detach();
     await expect(narration).not.toContainText("fixture-hidden");
     await expect(narration).not.toContainText("<!DOCTYPE");
-    const draft = sidebar.getByRole("textbox", { name: "修改要求草稿" });
-    await draft.fill("下一轮再调整页脚间距");
-    await expect(draft).toHaveValue("下一轮再调整页脚间距");
     await expect(sidebar.getByTestId("ai-turn-process").first().locator("li").first()).toBeVisible();
     await expect(sidebar.getByTestId("ai-conversation-run-summary")).toHaveCount(0);
     await expect(sidebar.getByText("Thinking", { exact: true })).toHaveCount(0);

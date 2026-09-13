@@ -24,6 +24,34 @@ function snapshot(overrides = {}) {
   };
 }
 
+for (const finish of ["cancelConfirmation", "completeConfirmation"]) {
+  test(`late awaiting result cannot resurrect a head after ${finish}`, async () => {
+    const session = new ExternalFileOpenSession();
+    const order = [];
+    let release;
+    const execute = async (value) => {
+      order.push(value.requestId);
+      session.presentConfirmation(value.requestId, { requestId: value.requestId, classification: "new-external" });
+      if (value.requestId === "external_first") {
+        await new Promise((resolve) => { release = resolve; });
+      }
+      return "awaiting-confirmation";
+    };
+    session.enqueue(request("first"), execute);
+    session.enqueue(request("second"), execute);
+    assert.equal(session[finish]("external_first"), true);
+    release();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(order, ["external_first", "external_second"]);
+    assert.equal(session.snapshot.activeRequestId, "external_second");
+    assert.equal(session.snapshot.status, "awaiting-confirmation");
+    assert.equal(session[finish]("external_second"), true);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(session.snapshot.status, "idle");
+    session.dispose();
+  });
+}
+
 test("external file session preserves every queued request in FIFO order", async () => {
   const session = new ExternalFileOpenSession();
   let releaseFirst;

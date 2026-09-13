@@ -6,6 +6,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type ClipboardEvent,
   type CSSProperties,
 } from "react";
@@ -71,7 +72,7 @@ import {
 } from "./application/workspace-controller.js";
 import type {
   WorkspaceController,
-  WorkspaceControllerSnapshot,
+  WorkspaceShellCommentSnapshot,
 } from "./application/workspace-controller.js";
 import type {
   NavigationControllerCapability,
@@ -92,7 +93,14 @@ import {
 import { createWorkspaceControllerCodecs } from "./application/workspace-controller-codecs.js";
 import { createDesktopRecoveryJournalPort } from "./workbench/desktop-recovery-journal-port";
 import type { CommentSessionSnapshot } from "./application/comment-session.js";
-import type { DocumentSessionSnapshot } from "./application/document-session.js";
+import {
+  sameSourceReceipt,
+} from "./application/document-session.js";
+import type {
+  DocumentCanvasRenderObservation,
+  DocumentSessionSnapshot,
+  DocumentSourceReceipt,
+} from "./application/document-session.js";
 import { runLocalUserAction } from "./application/local-action-outcomes.js";
 import {
   ReviewAnalysisCancelledError,
@@ -100,7 +108,6 @@ import {
 } from "./application/review-analysis-session.js";
 import type { PageViewContext } from "./lib/page-view-context.js";
 import type { ProjectSessionSnapshot } from "./application/project-session.js";
-import type { ProjectRulesSnapshot } from "./application/project-rules-session.js";
 import type { RunSessionSnapshot } from "./application/run-session.js";
 import type { VersionSessionSnapshot } from "./application/version-session.js";
 import {
@@ -153,8 +160,8 @@ import {
   attachmentFromRecord,
   canLocateTarget,
   canSaveCommentTarget,
-  commentSourceAnchor,
   commentVisualHintForSelection,
+  commentVisualTarget,
   commentEditSessionHasChanges,
   commentHasContent,
   commentsFromRecords,
@@ -185,9 +192,6 @@ import {
   type CommentRailContainerContext,
   type CommentRailHostActions,
 } from "./workbench/comment-rail-contract";
-import {
-  sameWorkbenchRenderSnapshot,
-} from "./workbench/workspace-render-snapshot.js";
 import {
   WorkbenchHeaderView,
 } from "./workbench/file-header-view";
@@ -225,7 +229,6 @@ import {
 } from "./workbench/document-surface-presentation";
 import { markDocumentSurfacePrewarmed, markProjectApplied, markProjectHydrationStage, RendererStartupPerformance } from "./workbench/performance-timeline";
 import {
-  pageSourceOnlyReviewDiagnostics,
   type ReviewDocuments,
 } from "./workbench/review-document";
 import type { ReviewPresentationSnapshot } from "./workbench/review-state";
@@ -331,18 +334,6 @@ const INITIAL_PROJECT_SESSION_SNAPSHOT: ProjectSessionSnapshot = {
   documentId: "",
   registered: false,
 };
-const INITIAL_PROJECT_RULES_SNAPSHOT: ProjectRulesSnapshot = {
-  open: false,
-  path: "PROJECT.md",
-  content: "",
-  savedContent: "",
-  loading: false,
-  error: "",
-  saving: false,
-  saveError: "",
-  compositionActive: false,
-  editorGeneration: 0,
-};
 const INITIAL_VERSION_SNAPSHOT: VersionSessionSnapshot<Version> = {
   versions: [],
   latestVersionId: null,
@@ -358,6 +349,7 @@ const INITIAL_DOCUMENT_SNAPSHOT: DocumentSessionSnapshot = {
   persistedSourceSha256: null,
   workingHtmlSha256: null,
   canvasGeneration: 0,
+  sourceReceipt: null,
   canvasAuthority: {
     status: "idle",
     generation: 0,
@@ -400,6 +392,7 @@ type ReadyReviewSession = {
   sessionId: string;
   documents: ReviewDocuments;
   beforeHtml: string;
+  sourceContentEqual: boolean;
   sourcePath: string;
   beforeLabel: string;
   afterLabel: string;
@@ -430,6 +423,7 @@ function requiredWorkspaceController(
 type DocumentEditOutcome = DocumentWorkflowOutcome<{
   revision: number;
   queued: boolean;
+  receipt: DocumentSourceReceipt | null;
 }>;
 
 function documentEditFailureReason(outcome: DocumentEditOutcome): string {
@@ -439,6 +433,9 @@ function documentEditFailureReason(outcome: DocumentEditOutcome): string {
   }
   return outcome.reason;
 }
+
+const emptyShellSnapshot = () => null;
+const subscribeEmptyShell = () => () => {};
 
 export default function Workbench() {
   const [globalSidebarOpen, setGlobalSidebarOpen] = useState(false);
@@ -517,8 +514,9 @@ export default function Workbench() {
     expectedHtml: string,
     expectedSha256: string,
     context?: ProjectContext,
+    receipt?: DocumentSourceReceipt | null,
     previousFrameGeneration?: number | null,
-  ) => Promise<void>>(async () => {
+  ) => Promise<DocumentCanvasRenderObservation>>(async () => {
     throw new Error("画布核对尚未完成初始化。");
   });
   const sourceTransitioningRef = useRef(false);
@@ -538,23 +536,24 @@ export default function Workbench() {
   const pendingSidebarHistoryRef = useRef<ProjectVersionSummary | null>(null);
   const overlayReturnFocusRef = useRef<HTMLElement | null>(null);
 
-  const [workspaceControllerSnapshot, setWorkspaceControllerSnapshotState] =
-    useState<WorkspaceControllerSnapshot | null>(null);
   const [workspaceController, setWorkspaceController] =
     useState<WorkspaceController | null>(null);
+  const shellSnapshot = useSyncExternalStore(
+    workspaceController?.shell.subscribe ?? subscribeEmptyShell,
+    workspaceController?.shell.getSnapshot ?? emptyShellSnapshot,
+    emptyShellSnapshot,
+  );
   const runCapability = workspaceController
     ? workspaceController.runs as RunControllerCapability
     : null;
   const navigationCapability = workspaceController
     ? workspaceController.navigation as NavigationControllerCapability
     : null;
-  const workbenchTabsSnapshot = workspaceControllerSnapshot?.workbenchTabs
+  const workbenchTabsSnapshot = shellSnapshot?.workbenchTabs
     ?? INITIAL_WORKBENCH_TABS_SNAPSHOT;
   const activeWorkbenchTab = workbenchTabsSnapshot.tabs.find(
     (tab) => tab.tabId === workbenchTabsSnapshot.activeTabId,
   ) || workbenchTabsSnapshot.tabs[0];
-  const projectRulesSnapshot = workspaceControllerSnapshot?.projectRules
-    ?? INITIAL_PROJECT_RULES_SNAPSHOT;
   const settingsPageActive = activeWorkbenchTab?.kind === "settings";
   const startPageActive = activeWorkbenchTab?.kind === "start"
     && desktopHostReady
@@ -563,7 +562,7 @@ export default function Workbench() {
   const documentRuntimeTabId = activeWorkbenchTab?.kind === "document"
     ? activeWorkbenchTab.tabId
     : workbenchTabsSnapshot.runtimeOwnerTabId;
-  const documentSurfaceCacheSnapshot = workspaceControllerSnapshot?.documentSurfaceCache
+  const documentSurfaceCacheSnapshot = shellSnapshot?.documentSurfaceCache
     ?? INITIAL_DOCUMENT_SURFACE_CACHE_SNAPSHOT;
   const [importedCanvasBase, setImportedCanvasBase] = useState<{
     managedSourcePath: string;
@@ -598,24 +597,21 @@ export default function Workbench() {
     () => currentControllerSnapshot()?.runSession ?? INITIAL_RUN_SNAPSHOT,
     [currentControllerSnapshot],
   );
-  const documentSnapshot = workspaceControllerSnapshot?.document
+  const documentSnapshot = shellSnapshot?.document
     ?? INITIAL_DOCUMENT_SNAPSHOT;
   const externalFileOpenSnapshot =
-    workspaceControllerSnapshot?.project?.externalOpen
+    shellSnapshot?.project?.externalOpen
     ?? INITIAL_EXTERNAL_FILE_OPEN_SNAPSHOT;
   const openConfirmation =
-    workspaceControllerSnapshot?.project?.openConfirmation || null;
+    shellSnapshot?.project?.openConfirmation || null;
   useEffect(() => {
-    if (!workspaceController || !openConfirmation || openConfirmation.busy) return;
-    if (autoConfirmedOpenRequestRef.current === openConfirmation.requestId) return;
-    autoConfirmedOpenRequestRef.current = openConfirmation.requestId;
-    if (openConfirmation.deleteOriginal === true) {
-      if (!window.confirm("成功导入后会将原文件移至废纸篓。确定继续吗？")) {
-        void workspaceController.cancelExternalOpen({
-          requestId: openConfirmation.requestId,
-        });
-        return;
-      }
+    if (!workspaceController || !openConfirmation || openConfirmation.busy
+      || openConfirmation.deleteOriginal !== true) return;
+    if (confirmedOriginalDeletionRef.current === openConfirmation.requestId) return;
+    confirmedOriginalDeletionRef.current = openConfirmation.requestId;
+    if (!window.confirm("成功导入后会将原文件移至废纸篓。确定继续吗？")) {
+      void workspaceController.cancelExternalOpen({ requestId: openConfirmation.requestId });
+      return;
     }
     void workspaceController.confirmExternalOpen({
       requestId: openConfirmation.requestId,
@@ -626,9 +622,10 @@ export default function Workbench() {
     });
   }, [openConfirmation, workspaceController]);
   const projectApplicationSnapshot =
-    workspaceControllerSnapshot?.project?.projectApplication
+    shellSnapshot?.project?.projectApplication
     ?? INITIAL_PROJECT_APPLICATION_SNAPSHOT;
   const html = documentSnapshot.html;
+  const sourceReceipt = documentSnapshot.sourceReceipt;
   const sourceSha256 = documentSnapshot.persistedSourceSha256;
   const canvasGeneration = documentSnapshot.canvasGeneration;
   const editRevision = documentSnapshot.editRevision;
@@ -636,7 +633,7 @@ export default function Workbench() {
   const persistState = documentSnapshot.persistState;
   const persistError = documentSnapshot.persistError;
   const [projectName, setProjectName] = useState(WELCOME_PROJECT.name);
-  const projectSnapshot = workspaceControllerSnapshot?.projectSession
+  const projectSnapshot = shellSnapshot?.projectSession
     ?? INITIAL_PROJECT_SESSION_SNAPSHOT;
   const { sourcePath, projectId, documentId } = projectSnapshot;
   // The first durable import changes the ProjectSession source from the
@@ -651,38 +648,21 @@ export default function Workbench() {
   )
     ? importedCanvasBase.externalSourcePath
     : sourcePath || undefined;
-  const commentCapabilitySnapshot = workspaceController
-    ? (workspaceController.comments as CommentRailCapability).getSnapshot()
-    : null;
-  const commentSnapshot = (
-    commentCapabilitySnapshot?.workingCopy
-    ?? workspaceControllerSnapshot?.commentSession as CommentSessionSnapshot<
-      CommentItem,
-      DirectEditEvent,
-      CommentAttachment,
-      HtmlCanvasSelection,
-      CommentEditSession
-    > | null
-  ) ?? INITIAL_COMMENT_SNAPSHOT;
-  const draftTarget = commentSnapshot.composerTarget;
-  const draft = commentSnapshot.composerDraft;
-  const draftCommentId = commentSnapshot.composerCommentId;
-  const draftAttachments = commentSnapshot.composerAttachments;
-  const comments = commentSnapshot.comments;
-  const changeEvents = commentSnapshot.changeEvents;
-  const commentEditSession = commentSnapshot.editSession;
+  const commentSnapshot = shellSnapshot?.commentSession as WorkspaceShellCommentSnapshot<
+    CommentItem, DirectEditEvent, CommentAttachment, HtmlCanvasSelection
+  > | null;
+  const draftTarget = commentSnapshot?.composerTarget ?? null;
+  const draftCommentId = commentSnapshot?.composerCommentId ?? null;
+  const draftAttachments = commentSnapshot?.composerAttachments ?? INITIAL_COMMENT_SNAPSHOT.composerAttachments;
+  const comments = commentSnapshot?.comments ?? INITIAL_COMMENT_SNAPSHOT.comments;
+  const changeEvents = commentSnapshot?.changeEvents ?? INITIAL_COMMENT_SNAPSHOT.changeEvents;
+  const commentEditSession = commentSnapshot?.editSession ?? null;
   const [attachmentObjectUrls, setAttachmentObjectUrls] = useState<Record<string, string>>({});
-  const attachmentUploadCount =
-    commentCapabilitySnapshot?.persistence?.attachmentUploadCount
-    ?? workspaceControllerSnapshot?.comment?.attachmentUploadCount
-    ?? 0;
-  const draftPersistError =
-    commentCapabilitySnapshot?.persistence?.draft.error
-    ?? workspaceControllerSnapshot?.comment?.draft.error
-    ?? "";
-  const runSnapshot = workspaceControllerSnapshot?.runSession
+  const attachmentUploadCount = shellSnapshot?.comment?.attachmentUploadCount ?? 0;
+  const draftPersistError = shellSnapshot?.comment?.draftError ?? "";
+  const runSnapshot = shellSnapshot?.runSession
     ?? INITIAL_RUN_SNAPSHOT;
-  const agentCatalogSnapshot = workspaceControllerSnapshot?.run?.agentCatalog ?? null;
+  const agentCatalogSnapshot = shellSnapshot?.run?.agentCatalog ?? null;
   const catalogDisplaySelection = agentCatalogSnapshot?.displaySelection
     ?? agentCatalogSnapshot?.selected
     ?? null;
@@ -749,7 +729,7 @@ export default function Workbench() {
       selection: provider.selection,
     }),
   );
-  const qoderAvailability = workspaceControllerSnapshot?.run?.qoderAvailability
+  const qoderAvailability = shellSnapshot?.run?.qoderAvailability
     ?? INITIAL_QODER_AVAILABILITY;
   const agentCards = agentProviderCardsFromCatalog(agentCatalogSnapshot);
   const workspacePreferencesController = useWorkspacePreferences(
@@ -760,11 +740,11 @@ export default function Workbench() {
   const workspacePreferences = workspacePreferencesSnapshot.workspace;
   const [previewAttachment, setPreviewAttachment] = useState<CommentAttachment | null>(null);
   const [historyCreationConfirmation, setHistoryCreationConfirmation] = useState<string | null>(null);
-  const historyCreation = workspaceControllerSnapshot?.version?.creation;
+  const historyCreation = shellSnapshot?.version?.creation;
   const [handoffPreviewOpen, setHandoffPreviewOpen] = useState(false);
   const [projectRegistrationError, setProjectRegistrationError] = useState("");
   const versionSnapshot = (
-    workspaceControllerSnapshot?.versionSession as VersionSessionSnapshot<Version> | null
+    shellSnapshot?.versionSession as VersionSessionSnapshot<Version> | null
   ) ?? INITIAL_VERSION_SNAPSHOT;
   const versions = versionSnapshot.versions;
   const latestVersionId = versionSnapshot.latestVersionId;
@@ -797,8 +777,7 @@ export default function Workbench() {
   }, []);
   const aiConversation = useAiConversation({
     controllerRef: workspaceControllerRef,
-    conversation: workspaceControllerSnapshot?.conversation ?? null,
-    draftReadOnly: ["preparing", "ready"].includes(workspaceControllerSnapshot?.project?.close.phase || ""),
+    draftReadOnly: ["preparing", "ready"].includes(shellSnapshot?.project?.close.phase || ""),
     qoderAvailability,
     agentDisplayName,
     executionDisplayName,
@@ -816,9 +795,6 @@ export default function Workbench() {
     reasoningChoices: [],
     selectedReasoningId,
     // The header's mode comes from Request authority, not from a local guess.
-    activeRun: runSnapshot.activeRun,
-    activeHandoff: runSnapshot.activeHandoff,
-    submissionPending: runSnapshot.submissionPending,
     // Review is the same workbench with a different Canvas: the thread stays
     // docked and read-only instead of disappearing and coming back.
     reviewing: Boolean(presentedReadyReviewSession),
@@ -842,7 +818,7 @@ export default function Workbench() {
     onOpenAgentSettings: openAgentSettings,
   });
   const revealAiConversation = aiConversation.reveal;
-  const editRuntimeSnapshot = workspaceControllerSnapshot?.editRuntime ?? null;
+  const editRuntimeSnapshot = shellSnapshot?.editRuntime ?? null;
   const {
     runtimePhase: editRuntimePhase,
     runtimeRenderPending: editRuntimeRenderPending,
@@ -893,9 +869,9 @@ export default function Workbench() {
     || versionTransitioningRef.current
     || renameTransitioningRef.current
   ), []);
-  const versionTransitioning = (workspaceControllerSnapshot?.version?.navigation.phase || "idle") !== "idle";
+  const versionTransitioning = (shellSnapshot?.version?.navigation.phase || "idle") !== "idle";
   const renameTransitioning =
-    workspaceControllerSnapshot?.project?.rename?.phase === "renaming";
+    shellSnapshot?.project?.rename?.phase === "renaming";
   const viewTransitioning = sourceTransitioning || versionTransitioning || renameTransitioning;
   const bridgeConnectionReady = useRuntimeBridgeConnectionReady();
   useEffect(() => {
@@ -1008,11 +984,12 @@ export default function Workbench() {
           errorMessage: productErrorMessage,
         }),
         canvas: {
-          verifyRendered: (expectedHtml, expectedSha256, context) => (
+          verifyRendered: (expectedHtml, expectedSha256, context, receipt) => (
             verifyCanvasRenderedRef.current(
               expectedHtml,
               expectedSha256,
               context as ProjectContext | undefined,
+              receipt,
             )
           ),
           freeze: (reason) => fenceAndFreezeCurrentCanvasRef.current(reason),
@@ -1109,10 +1086,12 @@ export default function Workbench() {
               expectedHtml: string,
               expectedSha256: string,
               context?: ProjectContext,
+              receipt?: DocumentSourceReceipt | null,
             ) => verifyCanvasRenderedRef.current(
               expectedHtml,
               expectedSha256,
               context,
+              receipt,
             ),
             showCommitBlocked: (reason: string) => (
               editorRef.current?.showCommitBlocked(reason)
@@ -1194,6 +1173,7 @@ export default function Workbench() {
               return rollback(requestId);
             },
             activateGeneratedVersion: async (input: {
+              operationId?: string;
               previousSourcePath: string;
               nextSourcePath: string;
               expectedSha256: string;
@@ -1345,7 +1325,9 @@ export default function Workbench() {
             expectedHtml: string,
             expectedSha256: string,
             context?: ProjectContext,
-          ) => verifyCanvasRenderedRef.current(expectedHtml, expectedSha256, context),
+            receipt?: DocumentSourceReceipt | null,
+          ) => verifyCanvasRenderedRef.current(expectedHtml, expectedSha256, context, receipt)
+            .then(() => undefined),
           invalidateRenderAcks: invalidateCanvasRenderAcks,
           unlock: () => editorRef.current?.unlockNow?.(),
           requestFrame: (callback: () => void) => window.requestAnimationFrame(callback),
@@ -1358,7 +1340,6 @@ export default function Workbench() {
     });
     workspaceControllerRef.current = controller;
     setWorkspaceController(controller);
-    setWorkspaceControllerSnapshotState(controller.getSnapshot());
     return () => {
       if (workspaceControllerRef.current === controller) {
         workspaceControllerRef.current = null;
@@ -1380,32 +1361,25 @@ export default function Workbench() {
     ));
   }, []);
   const acknowledgeCanvasRender = useCallback((
-    surface: CanvasMode,
-    generation: number,
-    sha256: string | null,
+    observation: DocumentCanvasRenderObservation,
   ): boolean => {
-    if (generation !== currentDocumentSessionSnapshot().canvasGeneration) return false;
-    if (surface === "edit") {
-      if (!sha256) return false;
-      const acknowledged = workspaceControllerRef.current?.acknowledgeEditCanvas({
-        generation,
-        renderedSha256: sha256,
-      }) === true;
-      return acknowledged;
-    }
-    setCanvasRenderAcks((current) => ({
-      ...current,
-      preview: sha256 ? { generation, sha256 } : null,
-    }));
-    return true;
+    const current = currentDocumentSessionSnapshot();
+    if (
+      observation.receipt.canvasGeneration !== current.canvasGeneration
+      || !sameSourceReceipt(observation.receipt, current.sourceReceipt)
+    ) return false;
+    return workspaceControllerRef.current?.acknowledgeEditCanvas(observation) === true;
   }, [currentDocumentSessionSnapshot]);
   const renderedContentSha256 =
     canvasRenderAcks.edit?.generation === canvasGeneration
       ? canvasRenderAcks.edit.sha256
       : null;
   const handlePreviewReady = useCallback((sha256: string | null) => {
-    acknowledgeCanvasRender("preview", canvasGeneration, sha256);
-  }, [acknowledgeCanvasRender, canvasGeneration]);
+    setCanvasRenderAcks((current) => ({
+      ...current,
+      preview: sha256 ? { generation: canvasGeneration, sha256 } : null,
+    }));
+  }, [canvasGeneration]);
   const activeRun = runSnapshot.activeRun;
   const recentRunOutcome = runSnapshot.recentOutcome;
   const projectLocked = runSnapshot.activeLocked;
@@ -1422,13 +1396,13 @@ export default function Workbench() {
     && !projectRegistrationError,
   );
   const projectHydrating =
-    workspaceControllerSnapshot?.project?.hydration.phase === "hydrating"
-    || workspaceControllerSnapshot?.project?.open.phase === "opening"
+    shellSnapshot?.project?.hydration.phase === "hydrating"
+    || shellSnapshot?.project?.open.phase === "opening"
     || projectApplicationSnapshot.status !== "idle"
     || projectRegistrationPending;
   const projectLoadError =
-    workspaceControllerSnapshot?.project?.hydration.phase === "failed"
-      ? workspaceControllerSnapshot.project.hydration.error
+    shellSnapshot?.project?.hydration.phase === "failed"
+      ? shellSnapshot.project.hydration.error
       : projectRegistrationError || null;
   const [startupIssue, setStartupIssue] = useState<StartupIssue | null>(null);
   const [workspaceIssue, setWorkspaceIssue] = useState<WorkspaceIssue | null>(null);
@@ -1451,7 +1425,7 @@ export default function Workbench() {
   const [pendingExit, setPendingExit] = useState(false);
   const [fileStatusNotice, setFileStatusNotice] = useState<string | null>(null);
   const [openHtmlError, setOpenHtmlError] = useState<string | null>(null);
-  const autoConfirmedOpenRequestRef = useRef<string | null>(null);
+  const confirmedOriginalDeletionRef = useRef<string | null>(null);
   const [interruption, setInterruption] = useState<GlobalInterruption | null>(null);
   const [pausedNoticeIdentity, setPausedNoticeIdentity] =
     useState<string | null>(null);
@@ -1474,16 +1448,6 @@ export default function Workbench() {
   );
   useEffect(() => {
     if (!workspaceController) return undefined;
-    const setWorkspaceControllerSnapshot = (
-      snapshot: WorkspaceControllerSnapshot,
-    ) => {
-      setWorkspaceControllerSnapshotState((current) => (
-        sameWorkbenchRenderSnapshot(current, snapshot) ? current : snapshot
-      ));
-    };
-    const unsubscribeSnapshot = workspaceController.subscribe(
-      setWorkspaceControllerSnapshot,
-    );
     const unsubscribe = workspaceController.subscribeEvents((event) => {
       if (event.type === "registration-published") {
         const registrationEvent = event as Readonly<{
@@ -1527,6 +1491,23 @@ export default function Workbench() {
         return;
       }
       if (event.type === "external-open-ack-failed") {
+        const ackEvent = event as Readonly<{
+          confirmation?: boolean;
+          requestId?: unknown;
+          reason?: unknown;
+        }>;
+        const requestId = typeof ackEvent.requestId === "string"
+          ? ackEvent.requestId
+          : "";
+        if (ackEvent.confirmation === true && requestId) {
+          setInterruption({
+            kind: "project-open-failed",
+            detail: String(
+              ackEvent.reason || "HTML 已完成打开，但下一个 Finder 请求尚未解锁。",
+            ),
+            requestId,
+          });
+        }
         return;
       }
       if (event.type === "external-open-canvas-failed") {
@@ -1839,6 +1820,9 @@ export default function Workbench() {
           kind: "project-open-failed",
           detail: message,
           recent: projectEvent.kind === "recent",
+          ...(typeof projectEvent.requestId === "string" && projectEvent.requestId
+            ? { requestId: projectEvent.requestId }
+            : {}),
         });
         return;
       }
@@ -1914,7 +1898,6 @@ export default function Workbench() {
     });
     return () => {
       unsubscribe();
-      unsubscribeSnapshot();
     };
   }, [
     commentCanvasPort,
@@ -2384,7 +2367,7 @@ export default function Workbench() {
     viewMode === "current"
     && !interactionLocked
     && draftTarget
-    && (draft.trim() || draftAttachments.length > 0),
+    && (commentSnapshot?.composerHasText || draftAttachments.length > 0),
   );
   const composerOpen = commentCanvasPort.getSnapshot().composerOpen;
   useEffect(() => {
@@ -2423,12 +2406,9 @@ export default function Workbench() {
       hasDraft?: boolean;
     }>();
     for (const comment of visibleCommentItems) {
-      const sourceTarget = commentSourceAnchor(comment) || comment.target;
-      const visualHint = comment.visualHint
-        || commentVisualHintForSelection(comment.target);
-      const markerTarget = visualHint
-        ? { ...sourceTarget, visualHint }
-        : sourceTarget;
+      const sourceTarget = comment.sourceAnchor;
+      const visualHint = comment.visualHint;
+      const markerTarget = commentVisualTarget(comment);
       const markerKey = commentMarkerGroupKey(markerTarget);
       const current = grouped.get(markerKey);
       if (current) {
@@ -2454,9 +2434,7 @@ export default function Workbench() {
     if ((hasCommentDraft || composerOpen) && draftTarget) {
       const sourceTarget = draftTarget.commentAnchor ?? draftTarget;
       const visualHint = commentVisualHintForSelection(draftTarget);
-      const markerTarget = visualHint
-        ? { ...sourceTarget, visualHint }
-        : sourceTarget;
+      const markerTarget = visualHint ? { ...sourceTarget, visualHint } : sourceTarget;
       const markerKey = commentMarkerGroupKey(markerTarget);
       const current = grouped.get(markerKey);
       if (current) {
@@ -2598,11 +2576,21 @@ export default function Workbench() {
     expectedHtml: string,
     expectedSha256: string,
     context?: ProjectContext,
+    receipt?: DocumentSourceReceipt | null,
     previousFrameGeneration?: number | null,
-  ): Promise<void> => {
+    previousFrameDocument?: Document | null,
+  ): Promise<DocumentCanvasRenderObservation> => {
     performance.mark("pageroot:canvas:verify-start");
     let expectedGeneration = currentDocumentSessionSnapshot().canvasGeneration;
-    const waitForCurrentGeneration = async (): Promise<boolean> => {
+    let expectedReceipt = receipt || currentDocumentSessionSnapshot().sourceReceipt;
+    const initialFrameDocument = previousFrameDocument
+      || editorRef.current?.getRenderedFrameDocument()
+      || null;
+    const requirePhysicalReload = Boolean(
+      expectedReceipt?.origin === "authority"
+      && initialFrameDocument,
+    );
+    const waitForCurrentGeneration = async (): Promise<DocumentCanvasRenderObservation | null> => {
       let attemptLimit = 40;
       const runtimeAttemptLimit = Math.ceil(
         EDIT_AUTHOR_RUNTIME_VERIFICATION_DEADLINE_MS / 25,
@@ -2628,27 +2616,45 @@ export default function Workbench() {
         ) {
           throw new Error("画布核对期间当前文档已经切换。");
         }
+        const currentReceipt = currentDocumentSessionSnapshot().sourceReceipt;
+        if (
+          expectedReceipt
+          && (!currentReceipt
+            || !sameSourceReceipt(currentReceipt, expectedReceipt))
+        ) {
+          throw new Error("画布核对期间当前源码回执已经切换。");
+        }
         const renderedSource = editorRef.current?.getRenderedSourceHtml();
         if (renderedSource !== expectedHtml) continue;
-        if (previousFrameGeneration != null
-          && editorRef.current?.getRenderedFrameGeneration() === previousFrameGeneration) {
+        const frameGeneration = editorRef.current?.getRenderedFrameGeneration();
+        const frameDocument = editorRef.current?.getRenderedFrameDocument() || null;
+        if (
+          (previousFrameGeneration != null && frameGeneration === previousFrameGeneration)
+          || (requirePhysicalReload && frameDocument === initialFrameDocument)
+        ) {
           // Same bytes in the old frame are not a reload receipt. Let the new
           // author candidate finish; only a settled failure/static state needs
           // the bounded rebuild below, which must not cancel a healthy load.
-          if (!runtimePending) return false;
+          if (!runtimePending) return null;
           continue;
         }
         const renderedSha256 = await browserSha256(renderedSource);
         if (renderedSha256 !== expectedSha256) {
           throw new Error("画布已载入内容的 Hash 与源 HTML 不一致。");
         }
-        acknowledgeCanvasRender("edit", expectedGeneration, renderedSha256);
+        if (!currentReceipt || frameGeneration == null) continue;
         performance.mark("pageroot:canvas:verify-ack");
-        return true;
+        return Object.freeze({
+          receipt: currentReceipt,
+          renderedHtml: renderedSource,
+          renderedSha256,
+          frameGeneration,
+        });
       }
-      return false;
+      return null;
     };
-    if (await waitForCurrentGeneration()) return;
+    const firstObservation = await waitForCurrentGeneration();
+    if (firstObservation) return firstObservation;
 
     // A missing acknowledgement is a disposable-Canvas failure, not a user
     // conflict. Rebuild exactly once from the authoritative Document snapshot.
@@ -2656,12 +2662,13 @@ export default function Workbench() {
     expectedGeneration = requiredWorkspaceController(
       workspaceControllerRef.current,
     ).reloadDocumentCanvas().canvasGeneration;
+    expectedReceipt = currentDocumentSessionSnapshot().sourceReceipt;
     invalidateCanvasRenderAcks();
     editorRef.current?.rebuildActiveFrame();
-    if (await waitForCurrentGeneration()) return;
+    const rebuiltObservation = await waitForCurrentGeneration();
+    if (rebuiltObservation) return rebuiltObservation;
     throw new Error("画布没有在时限内确认载入目标 HTML。");
   }, [
-    acknowledgeCanvasRender,
     currentControllerSnapshot,
     currentDocumentSessionSnapshot,
     invalidateCanvasRenderAcks,
@@ -2677,6 +2684,7 @@ export default function Workbench() {
     let cancelled = false;
     const expectedHtml = html;
     const expectedGeneration = canvasGeneration;
+    const expectedReceipt = currentDocumentSessionSnapshot().sourceReceipt;
     const verifyInitialRender = async () => {
       for (let attempt = 0; attempt < 40; attempt += 1) {
         await new Promise<void>((resolve) => window.setTimeout(resolve, 25));
@@ -2689,7 +2697,19 @@ export default function Workbench() {
           && currentDocumentSessionSnapshot().canvasGeneration === expectedGeneration
           && currentDocumentSessionSnapshot().workingHtmlSha256 === renderedSha256
         ) {
-          acknowledgeCanvasRender("edit", expectedGeneration, renderedSha256);
+          const currentReceipt = currentDocumentSessionSnapshot().sourceReceipt;
+          const frameGeneration = editorRef.current?.getRenderedFrameGeneration();
+          if (
+            currentReceipt
+            && expectedReceipt
+            && sameSourceReceipt(currentReceipt, expectedReceipt)
+            && frameGeneration != null
+          ) acknowledgeCanvasRender(Object.freeze({
+            receipt: currentReceipt,
+            renderedHtml: expectedHtml,
+            renderedSha256,
+            frameGeneration,
+          }));
         }
         return;
       }
@@ -2707,6 +2727,7 @@ export default function Workbench() {
     editRuntimeRenderPending,
     html,
     sourceSha256,
+    sourceReceipt,
   ]);
 
   const clearAutosaveTimer = useCallback(() => {
@@ -2769,6 +2790,7 @@ export default function Workbench() {
     epochOverride?: number,
     fromDeferred = false,
     sourceTransitionToken?: number,
+    authorityReceiptContinuation?: DocumentSourceReceipt | null,
   ) => {
     if (!workspaceController) return;
     await workspaceController.refreshProject({
@@ -2776,6 +2798,7 @@ export default function Workbench() {
       epoch: epochOverride,
       fromDeferred,
       sourceTransitionToken,
+      authorityReceiptContinuation,
     });
   }, [workspaceController]);
   useEffect(() => {
@@ -3346,7 +3369,7 @@ export default function Workbench() {
     nextHtml: string,
     mutation?: HtmlCanvasMutation,
     sourceTransaction?: HtmlCanvasSourceTransaction,
-  ): boolean => {
+  ): DocumentSourceReceipt | false => {
     const currentRun = currentRunSessionSnapshot();
     const currentDocument = currentDocumentSessionSnapshot();
     if (
@@ -3360,6 +3383,7 @@ export default function Workbench() {
     // A published history projection can accept the next source transaction
     // while its save receipt drains. The history chain validates its base;
     // an in-flight receipt alone must not revoke visible editability.
+    let acceptedReceipt: DocumentSourceReceipt | null = null;
     try {
       const enqueued = enqueueAutosave(nextHtml, mutation, sourceTransaction);
       if (enqueued.status !== "succeeded") {
@@ -3372,6 +3396,8 @@ export default function Workbench() {
         });
         return false;
       }
+      acceptedReceipt = enqueued.value.receipt;
+      if (!acceptedReceipt) return false;
     } catch (cause) {
       reportInternalFailure({
         area: "history",
@@ -3405,7 +3431,7 @@ export default function Workbench() {
     const settledComments = currentCommentSessionSnapshot();
     const activeTargets = [
       ...settledComments.comments.map((comment) => (
-        commentSourceAnchor(comment) || comment.target
+        comment.sourceAnchor
       )),
       ...settledComments.changeEvents.map((event) => event.target),
       ...(settledComments.composerTarget
@@ -3439,16 +3465,8 @@ export default function Workbench() {
       };
       const nextComments = settledComments.comments.map((comment) => ({
         ...comment,
-        target: (() => {
-          const sourceTarget = refreshedTarget(
-            commentSourceAnchor(comment) || comment.target,
-          );
-          const visualHint = comment.visualHint
-            || commentVisualHintForSelection(comment.target);
-          return visualHint ? { ...sourceTarget, visualHint } : sourceTarget;
-        })(),
         sourceAnchor: refreshedTarget(
-          commentSourceAnchor(comment) || comment.target,
+          comment.sourceAnchor,
         ),
       }));
       const nextEvents = settledComments.changeEvents.map((event) => ({
@@ -3471,19 +3489,28 @@ export default function Workbench() {
           : {}),
       });
     }
-    const renderGeneration = currentDocument.canvasGeneration;
+    const renderGeneration = acceptedReceipt.canvasGeneration;
     void browserSha256(nextHtml).then((renderedSha256) => {
       const settledDocument = currentDocumentSessionSnapshot();
+      const settledReceipt = settledDocument.sourceReceipt;
       if (
         settledDocument.html === nextHtml
         && settledDocument.canvasGeneration === renderGeneration
+        && sameSourceReceipt(settledReceipt, acceptedReceipt)
         && editorRef.current?.getRenderedSourceHtml() === nextHtml
       ) {
-        acknowledgeCanvasRender("edit", renderGeneration, renderedSha256);
+        const frameGeneration = editorRef.current?.getRenderedFrameGeneration();
+        if (frameGeneration == null || !settledReceipt) return;
+        acknowledgeCanvasRender(Object.freeze({
+          receipt: settledReceipt,
+          renderedHtml: nextHtml,
+          renderedSha256,
+          frameGeneration,
+        }));
       }
     });
     workspaceController?.clearCompletedRun();
-    return true;
+    return acceptedReceipt;
   }, [
     acknowledgeCanvasRender,
     currentCommentSessionSnapshot,
@@ -3642,6 +3669,7 @@ export default function Workbench() {
     const operationId = beginSourceTransition();
     if (operationId === null) return false;
     const previousFrameGeneration = editorRef.current?.getRenderedFrameGeneration() ?? null;
+    const previousFrameDocument = editorRef.current?.getRenderedFrameDocument() || null;
     let restored = false;
     try {
       const outcome = await requiredWorkspaceController(workspaceController)
@@ -3658,14 +3686,28 @@ export default function Workbench() {
       if (outcome.status !== "succeeded") {
         throw new Error(outcome.reason);
       }
-      await refreshWorkspace(context.sourcePath, context.epoch);
+      const authorityReceiptContinuation = currentDocumentSessionSnapshot().sourceReceipt;
+      await refreshWorkspace(
+        context.sourcePath,
+        context.epoch,
+        false,
+        undefined,
+        authorityReceiptContinuation,
+      );
       if (
         sourceTransitionOperationRef.current !== operationId
         || !isCurrentProjectContext(context)
       ) return false;
       setFileStatusNotice("已重新读取文件，正在恢复页面…");
       const reloadedDocument = currentDocumentSessionSnapshot();
-      await verifyCanvasRendered(reloadedDocument.html, reloadedDocument.workingHtmlSha256 || await browserSha256(reloadedDocument.html), context, previousFrameGeneration);
+      await verifyCanvasRendered(
+        reloadedDocument.html,
+        reloadedDocument.workingHtmlSha256 || await browserSha256(reloadedDocument.html),
+        context,
+        reloadedDocument.sourceReceipt,
+        previousFrameGeneration,
+        previousFrameDocument,
+      );
       if (sourceTransitionOperationRef.current !== operationId || !isCurrentProjectContext(context)) return false;
       restored = true;
     } catch (cause) {
@@ -4026,7 +4068,7 @@ export default function Workbench() {
       const comment = currentComments.comments.find(
         (item) => item.commentId === itemId,
       );
-      if (comment) queueReviewPairReveal(comment.target, itemId);
+      if (comment) queueReviewPairReveal(commentVisualTarget(comment), itemId);
     }
   }, [
     commentCanvasPort,
@@ -4336,11 +4378,11 @@ export default function Workbench() {
     const comment = (outcome.value as { comment: CommentItem }).comment;
     commentCanvasPort.setComposerOpen(false);
     updateFocusedComment(comment.commentId);
-    queueReviewPairReveal(comment.target, comment.commentId);
+    queueReviewPairReveal(commentVisualTarget(comment), comment.commentId);
     captureUsageEvent("comment_saved", {
-      target_level: comment.target.level === "insertion"
+      target_level: comment.sourceAnchor.level === "insertion"
         ? "insertion"
-        : comment.target.level === "part" ? "part" : "module",
+        : comment.sourceAnchor.level === "part" ? "part" : "module",
       has_text: Boolean(comment.text),
       attachment_count: countBucket((comment.attachments ?? []).length),
       has_image: (comment.attachments ?? []).some((attachment) => attachment.kind === "image"),
@@ -4404,7 +4446,7 @@ export default function Workbench() {
     // Move focus first. The presentation port is observed synchronously, so
     // publishing `editingCommentId` while the previously focused card is still
     // current can make the clean-edit guard retire this brand-new session.
-    queueReviewCommentFocus(comment.target, comment.commentId);
+    queueReviewCommentFocus(commentVisualTarget(comment), comment.commentId);
     commentCanvasPort.setEditingCommentId(comment.commentId);
     if (focusText) {
       commentCanvasPort.requestCommentEditFocus(
@@ -4442,7 +4484,7 @@ export default function Workbench() {
       forgetAttachmentObjectUrl(attachment.attachmentId);
     }
     if (revealComment && current) {
-      queueReviewCommentFocus(current.target, current.commentId);
+      queueReviewCommentFocus(commentVisualTarget(current), current.commentId);
     }
   }, [
     attachmentUploadCount,
@@ -4468,15 +4510,15 @@ export default function Workbench() {
       return;
     }
     const located = editorRef.current?.select(
-      current.target,
+      commentVisualTarget(current),
       { showToolbar: false },
     );
-    const nextTarget = located || current.target;
+    const nextTarget = located || commentVisualTarget(current);
     commentCanvasPort.setSelection(nextTarget);
     const targetLayouts = commentCanvasPort.getSnapshot().targetLayouts;
     const targetVisible = (
-      current.target.tagName === "body"
-      || targetLayouts[current.target.id]?.status === "visible"
+      current.sourceAnchor.tagName === "body"
+      || targetLayouts[current.sourceAnchor.id]?.status === "visible"
     );
     commentEditResumePendingRef.current = targetVisible
       ? null
@@ -4519,7 +4561,7 @@ export default function Workbench() {
     for (const attachment of removedAttachments) {
       forgetAttachmentObjectUrl(attachment.attachmentId);
     }
-    queueReviewCommentFocus(current.target, current.commentId);
+    queueReviewCommentFocus(commentVisualTarget(current), current.commentId);
   }, [
     attachmentUploadCount,
     cancelCommentEdit,
@@ -4547,7 +4589,7 @@ export default function Workbench() {
     }
     if (deleted) {
       updateFocusedComment(null);
-      queueReviewPairReveal(deleted.target, "");
+      queueReviewPairReveal(commentVisualTarget(deleted), "");
     }
   }, [
     commentCanvasPort,
@@ -4573,7 +4615,7 @@ export default function Workbench() {
       return () => window.cancelAnimationFrame(frame);
     }
     const targetStatus = commentCanvasPort.getSnapshot()
-      .targetLayouts[editedComment.target.id]?.status;
+      .targetLayouts[editedComment.sourceAnchor.id]?.status;
     const presentation = commentCanvasPort.getSnapshot();
     const leftEditingContext = (
       canvasMode !== "edit"
@@ -4622,13 +4664,13 @@ export default function Workbench() {
       return;
     }
     const targetVisible = (
-      current.target.tagName === "body"
-      || commentCanvasPort.getSnapshot().targetLayouts[current.target.id]?.status === "visible"
+      current.sourceAnchor.tagName === "body"
+      || commentCanvasPort.getSnapshot().targetLayouts[current.sourceAnchor.id]?.status === "visible"
     );
     if (!targetVisible) return;
     commentEditResumePendingRef.current = null;
     commentCanvasPort.setEditingCommentId(current.commentId);
-    queueReviewCommentFocus(current.target, current.commentId);
+    queueReviewCommentFocus(commentVisualTarget(current), current.commentId);
     commentCanvasPort.requestCommentEditFocus(current.commentId);
   }, [
     canvasMode,
@@ -4648,15 +4690,15 @@ export default function Workbench() {
     );
     if (!current) return;
     const presentation = commentCanvasPort.getSnapshot();
-    const targetStatus = presentation.targetLayouts[current.target.id]?.status;
+    const targetStatus = presentation.targetLayouts[current.sourceAnchor.id]?.status;
     const pendingId = commentEditResumePendingRef.current;
     if (
       pendingId === session.commentId
-      && (current.target.tagName === "body" || targetStatus === "visible")
+      && (current.sourceAnchor.tagName === "body" || targetStatus === "visible")
     ) {
       commentEditResumePendingRef.current = null;
       commentCanvasPort.setEditingCommentId(current.commentId);
-      queueReviewCommentFocus(current.target, current.commentId);
+      queueReviewCommentFocus(commentVisualTarget(current), current.commentId);
       commentCanvasPort.requestCommentEditFocus(current.commentId);
       return;
     }
@@ -4716,15 +4758,14 @@ export default function Workbench() {
     const sourceTarget = target.commentAnchor ?? target;
     const visualHint = commentVisualHintForSelection(target);
     const matchesTarget = (comment: CommentItem) => {
-      const commentAnchor = commentSourceAnchor(comment) || comment.target;
+      const commentAnchor = comment.sourceAnchor;
       const sourceMatches = Boolean(
         commentAnchor.elementId
         && sourceTarget.elementId
         && commentAnchor.elementId === sourceTarget.elementId,
       );
       if (!sourceMatches) return false;
-      const commentHint = comment.visualHint
-        || commentVisualHintForSelection(comment.target);
+      const commentHint = comment.visualHint;
       if (!visualHint || !commentHint) return !visualHint && !commentHint;
       return visualHint.kind === commentHint.kind
         && visualHint.relativePath === commentHint.relativePath;
@@ -4734,7 +4775,7 @@ export default function Workbench() {
       (comment) => comment.commentId === currentFocusedId && matchesTarget(comment),
     );
     const nextComment = focusedMatch || visibleCommentItems.find(matchesTarget);
-    if (!nextComment || !canLocateTarget(commentSourceAnchor(nextComment) || nextComment.target)) {
+    if (!nextComment || !canLocateTarget(nextComment.sourceAnchor)) {
       updateFocusedComment(null);
       return;
     }
@@ -4793,7 +4834,7 @@ export default function Workbench() {
         const firstUnsafe = unsafeTargets[0];
         if (firstUnsafe) {
           updateFocusedComment(firstUnsafe.commentId);
-          queueReviewPairReveal(firstUnsafe.target, firstUnsafe.commentId);
+          queueReviewPairReveal(commentVisualTarget(firstUnsafe), firstUnsafe.commentId);
         }
         return;
       }
@@ -5013,7 +5054,7 @@ export default function Workbench() {
     } catch (cause) {
       return {
         status: "rejected",
-        reason: cause instanceof Error ? cause.message : "无法打开获取 API Key 页面。",
+        reason: productErrorMessage(cause, "无法打开获取 API Key 页面。"),
       };
     }
   }, []);
@@ -5219,16 +5260,6 @@ export default function Workbench() {
       ) {
         throw new Error("当前冻结 HTML 已发生变化，无法开始安全对比。");
       }
-      const sourceOnlyDiagnostics = pageSourceOnlyReviewDiagnostics(
-        frozenHtml,
-        candidate.content,
-      );
-      if (sourceOnlyDiagnostics) {
-        reviewAnalysisSession.clear();
-        setReadyReviewSession(null);
-        setInterruption({ kind: "review-no-visible-change" });
-        return;
-      }
       const externalBootstrap = Boolean(window.htmlAIPreview);
       const sessionId = `review-${Date.now().toString(36)}-${++reviewSessionSequenceRef.current}`;
       const beforeLabel = run.basedOnVersionId
@@ -5253,11 +5284,6 @@ export default function Workbench() {
         || activeRunOperationKey(analyzedRun) !== operationKey
         || !isCurrentProjectContext(reviewContext)
       ) return;
-      if (!preparedReview.documents.changes.length) {
-        setReadyReviewSession(null);
-        setInterruption({ kind: "review-no-visible-change" });
-        return;
-      }
       revealAiConversation();
       setInterruption(null);
       const session: ReadyReviewSession = {
@@ -5267,6 +5293,7 @@ export default function Workbench() {
         sessionId: preparedReview.sessionId,
         documents: preparedReview.documents,
         beforeHtml: frozenHtml,
+        sourceContentEqual: candidate.sha256 === candidate.baseSnapshotSha256,
         sourcePath: preparedReview.sourcePath,
         beforeLabel,
         afterLabel,
@@ -5708,7 +5735,7 @@ export default function Workbench() {
     && typeof window !== "undefined"
     && window.htmlAIProjects?.openInDefaultBrowser,
   );
-  const hasDocumentHistoryAction = Boolean(workspaceController?.hasDocumentHistoryAction);
+  const hasDocumentHistoryAction = Boolean(shellSnapshot?.hasDocumentHistoryAction);
   const presentation = useMemo(() => deriveWorkbenchPresentation({
     project: { projectId, documentId, sourcePath }, version: versionSnapshot,
     activeTab: activeWorkbenchTab || null, runtimeOwnerTabId: workbenchTabsSnapshot.runtimeOwnerTabId, canvasMode: displayedCanvasMode,
@@ -5748,6 +5775,24 @@ export default function Workbench() {
   const handleInterruptionAction = () => {
     const actionId = presentedInterruption?.actionId;
     const current = interruptionRef.current;
+    if (
+      actionId === "retry-project-open"
+      && presentedInterruption?.actionRequestId
+      && workspaceController
+    ) {
+      const requestId = presentedInterruption.actionRequestId;
+      void workspaceController.retryExternalOpen({ requestId }).then((outcome) => {
+        const latest = interruptionRef.current;
+        if (
+          outcome?.status === "succeeded"
+          && latest?.kind === "project-open-failed"
+          && latest.requestId === requestId
+        ) {
+          setInterruption(null);
+        }
+      });
+      return;
+    }
     setInterruption(null);
     switch (actionId) {
       case "reveal-imported-project":
@@ -5790,7 +5835,7 @@ export default function Workbench() {
             const comment = currentComments.comments.find(
               (item) => item.commentId === current.target.commentId,
             );
-            if (comment) focusCommentTarget(comment.target, comment.commentId);
+            if (comment) focusCommentTarget(commentVisualTarget(comment), comment.commentId);
           }
         }
         return;
@@ -5971,7 +6016,7 @@ export default function Workbench() {
   const agentAccess = {
     cards: agentCards,
     documentId: documentId ?? "",
-    recovery: workspaceControllerSnapshot?.run?.accessRepair ?? null,
+    recovery: shellSnapshot?.run?.accessRepair ?? null,
     bindings: {
       onCopyGuidance: copyAgentGuidance,
       onStartLogin: startAgentLogin,
@@ -6043,6 +6088,8 @@ export default function Workbench() {
       sidebar={aiConversation.visible && runCapability ? (
         <RunConversationOutlet
           capability={runCapability}
+          conversationCapability={workspaceController!.conversation}
+          conversationContext={aiConversation.context}
           sidebarProps={{
             ...aiConversation.sidebarProps,
             onAction: handleAiDecision,
@@ -6593,7 +6640,7 @@ export default function Workbench() {
           onRemoveRememberedKey={(selection) => manageAgentAccess("remove-key", selection)}
           onReconnectProvider={(selection) => manageAgentAccess("reconnect", selection)}
           onOpenVendorApiKeyPage={openVendorApiKeyPage}
-          providerAccessImpact={workspaceControllerSnapshot?.run?.providerAccessImpact ?? {}}
+          providerAccessImpact={shellSnapshot?.run?.providerAccessImpact ?? {}}
           onSelectAgentModel={selectSettingsAgentModel}
           onSelectAgentReasoning={selectSettingsAgentReasoning}
         />
@@ -6609,7 +6656,7 @@ export default function Workbench() {
       {projectRulesPageActive ? (
         <ProjectRulesEditorPage
           activeTabId={activeWorkbenchTab.tabId}
-          snapshot={projectRulesSnapshot}
+          capability={workspaceController!.projectRules}
           runLocked={runSnapshot.activeLocked || runInProgress}
           onChange={updateProjectRules}
           onBeginComposition={beginProjectRulesComposition}
@@ -6682,6 +6729,7 @@ export default function Workbench() {
                   key={`editor-authority-${documentRuntimeTabId || "none"}`}
                   ref={editorRef}
                   html={html}
+                  sourceReceipt={documentSnapshot.sourceReceipt}
                   semanticRevision={editRevision}
                   sourcePath={canvasSourcePath}
                   height="var(--comment-canvas-height, 760px)"
@@ -6800,6 +6848,8 @@ export default function Workbench() {
             />
             <RunConversationOutlet
               capability={runCapability}
+              conversationCapability={workspaceController!.conversation}
+              conversationContext={aiConversation.context}
               sidebarProps={{
                 ...aiConversation.sidebarProps,
                 onAction: handleAiDecision,

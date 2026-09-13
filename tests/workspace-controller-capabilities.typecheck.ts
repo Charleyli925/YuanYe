@@ -81,3 +81,20 @@ void reviewView;
 void runsView;
 void runSubmissionView;
 void snapshotView;
+
+
+// Local draft/message facts do not exist in the shell projection.
+// @ts-expect-error conversation is owned by its own reader facet.
+controller.shell.getSnapshot().conversation;
+// @ts-expect-error shell cannot supply stale full composer text.
+controller.shell.getSnapshot().commentSession?.composerDraft;
+// @ts-expect-error shell cannot supply stale full edit draft text.
+controller.shell.getSnapshot().commentSession?.editSession?.draftText;
+// @ts-expect-error shell cannot supply stale PROJECT.md text.
+controller.shell.getSnapshot().projectRules?.content;
+// @ts-expect-error streaming narration belongs to the runs facet.
+controller.shell.getSnapshot().runSession?.activeHandoff?.visibleText;
+// @ts-expect-error reader facets cannot mutate source or other capabilities.
+controller.conversation.flushDocument();
+void controller.conversation.getSnapshot()?.draftText;
+void controller.projectRules.getSnapshot()?.content;

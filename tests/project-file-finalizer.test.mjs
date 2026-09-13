@@ -137,6 +137,48 @@ test("project-file finalizer freezes a Candidate output without publishing a Ver
   );
 });
 
+for (const legacyCompletion of [false, true]) {
+  test(`identical HTML finalization retains one Candidate across replay and restart (legacy completion: ${legacyCompletion})`, async (t) => {
+    const { repository, imported, request, requestRoot } = await preparedRequest(t, "req_identical_finalizer");
+    const controlRoot = path.join(imported.target.projectRootPath, ".pageroot");
+    const record = JSON.parse(await readFile(path.join(requestRoot, "request.json"), "utf8"));
+    const input = await readFile(path.join(controlRoot, record.inputRelativePath), "utf8");
+    const outputPath = path.join(controlRoot, request.outputRelativePath);
+    await writeFile(outputPath, input);
+    const finalizerInput = { projectRoot: imported.target.projectRootPath,
+      requestId: request.requestId, attemptId: request.attemptId };
+    const finalized = await finalizeProjectFileAttempt(finalizerInput);
+    assert.equal(finalized.status, "completed");
+    assert.equal(finalized.outputSha256, request.expectedSourceSha256);
+    const completionPath = path.join(requestRoot, "attempts", request.attemptId, "completion.json");
+    if (legacyCompletion) {
+      // Old finalizer output with a still-processing Request; this is not a
+      // historical terminal Request and must still receive current validation.
+      const oldCompletion = JSON.parse(await readFile(completionPath, "utf8"));
+      oldCompletion.status = "no-change";
+      await writeFile(completionPath, `${JSON.stringify(oldCompletion, null, 2)}\n`);
+    }
+    const completionBytes = await readFile(completionPath, "utf8");
+    const replayed = await finalizeProjectFileAttempt(finalizerInput);
+    assert.equal(replayed.replayed, true);
+    assert.equal(replayed.status, legacyCompletion ? "no-change" : "completed");
+    assert.equal(await readFile(completionPath, "utf8"), completionBytes);
+    const statusInput = { target: imported.target, requestId: request.requestId, attemptId: request.attemptId };
+    const ready = await repository.requestStatus(statusInput);
+    assert.equal(ready.status, "candidate-ready");
+    assert.equal(ready.candidate.candidateId, request.candidateId);
+    assert.equal((await repository.requestStatus(statusInput)).candidate.candidateId, request.candidateId);
+    const restarted = new ProjectFileRepository({ projectsRoot: path.dirname(imported.target.projectRootPath) });
+    const reopened = await restarted.workspace({ sourcePath: imported.target.exactSourcePath });
+    assert.equal(reopened.activeCandidate.candidateId, request.candidateId);
+    assert.equal((await restarted.requestStatus(statusInput)).candidate.candidateId, request.candidateId);
+    assert.equal(reopened.manifest.versions.length, 1);
+    assert.equal(await readFile(path.join(requestRoot, "candidate.html"), "utf8"), input);
+    assert.equal(await readFile(imported.target.exactSourcePath, "utf8"), input);
+    assert.equal(await readFile(completionPath, "utf8"), completionBytes);
+  });
+}
+
 test("project-file finalizer refreshes Registry identity only after every Candidate check succeeds", async (t) => {
   const { imported, request } = await preparedRequest(t, "req_registry_refresh_order");
   const projectsRoot = path.dirname(imported.target.projectRootPath);

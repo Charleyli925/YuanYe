@@ -33,7 +33,23 @@ function sameRun(left, right) {
   if (!left || !right) return false;
   return left.requestId === right.requestId
     && left.attemptId === right.attemptId
+    && (!left.projectId || !right.projectId || left.projectId === right.projectId)
+    && (!left.documentId || !right.documentId || left.documentId === right.documentId)
+    && sameKnownWorkingCopy(left, right)
+    && samePendingSubmission(left, right)
     && samePath(left.sourcePath, right.sourcePath);
+}
+
+function sameKnownWorkingCopy(left, right) {
+  return !left.sourceWorkingCopyId || !right.sourceWorkingCopyId
+    || left.sourceWorkingCopyId === right.sourceWorkingCopyId;
+}
+
+function samePendingSubmission(left, right) {
+  if (left.requestId !== "pending") return true;
+  return left.submissionToken || right.submissionToken
+    ? left.submissionToken === right.submissionToken
+    : samePath(left.sourcePath, right.sourcePath);
 }
 
 function sameAttempt(left, right) {
@@ -41,13 +57,72 @@ function sameAttempt(left, right) {
     left
     && right
     && left.requestId === right.requestId
-    && left.attemptId === right.attemptId,
+    && left.attemptId === right.attemptId
+    && String(left.projectId || "") === String(right.projectId || "")
+    && String(left.documentId || "") === String(right.documentId || "")
+    && sameKnownWorkingCopy(left, right)
+    && samePendingSubmission(left, right)
+    && (
+      samePath(left.sourcePath, right.sourcePath)
+      // A registered Request origin or the exact pending token survives a
+      // locator rebind. Legacy records with a missing origin never do.
+      || Boolean(
+        left.projectId
+        && right.projectId
+        && left.documentId
+        && right.documentId
+        && (
+          (
+            left.sourceWorkingCopyId
+            && right.sourceWorkingCopyId
+            && left.sourceWorkingCopyId === right.sourceWorkingCopyId
+          )
+          || (
+            left.requestId === "pending"
+            && left.submissionToken
+            && left.submissionToken === right.submissionToken
+          )
+        )
+      )
+    ),
   );
 }
 
-function frozenEntries(map) {
+function locatorKey(value) {
+  return comparablePath(value) || null;
+}
+
+function emptyEntry(sourcePath) {
+  return Object.freeze({
+    sourcePath: normalizedPath(sourcePath),
+    run: null,
+    runTracked: false,
+    result: null,
+    handoff: null,
+    copied: false,
+    recovered: false,
+    outcome: null,
+  });
+}
+
+function hasEntryFacts(entry) {
+  return Boolean(
+    entry?.run
+    || entry?.result
+    || entry?.handoff
+    || entry?.copied
+    || entry?.recovered
+    || entry?.outcome,
+  );
+}
+
+function frozenBackgroundResults(entries) {
   return Object.freeze(
-    [...map.entries()].map(([key, value]) => Object.freeze([key, value])),
+    [...entries.values()].flatMap((entry) => (
+      entry.result
+        ? [Object.freeze([entry.sourcePath, entry.result])]
+        : []
+    )),
   );
 }
 
@@ -65,6 +140,8 @@ const OPERATION_KINDS = Object.freeze([
   "resolve",
   "poll",
 ]);
+
+export const RUN_SESSION_COORDINATION = Symbol("RunSession coordination");
 
 function runDelivery(run) {
   try {
@@ -114,23 +191,21 @@ function recoveredAgentHandoff(run) {
 export class RunSession {
   #activeSourcePath;
 
-  #activeRun = null;
+  #entries = new Map();
 
-  #activeHandoff = null;
+  // Locator revisions are deliberately kept outside the public snapshot. A
+  // recent-run read may complete after the locator has gone through an
+  // absent -> occupied -> absent ABA cycle, so the absence itself needs a
+  // durable monotonic tombstone.
+  #locatorRevisions = new Map();
 
-  #activeOutcome = null;
+  #revisionSequence = 0;
 
-  #runs = new Map();
+  // Active presentation keeps only aggregate locator keys. The facts live in
+  // #entries and a new attempt at the same locator replaces the old one.
+  #presentedRunKey = null;
 
-  #results = new Map();
-
-  #handoffs = new Map();
-
-  #copiedHandoffs = new Map();
-
-  #recoveredRuns = new Map();
-
-  #outcomes = new Map();
+  #presentedHandoffKey = null;
 
   #submission = null;
 
@@ -146,6 +221,20 @@ export class RunSession {
 
   constructor({ sourcePath = null } = {}) {
     this.#activeSourcePath = normalizedPath(sourcePath);
+    Object.defineProperty(this, RUN_SESSION_COORDINATION, {
+      enumerable: false,
+      configurable: false,
+      writable: false,
+      value: Object.freeze({
+        locatorKey: (value) => locatorKey(value),
+        locatorRevision: (value) => this.#locatorRevision(value),
+        prepareRebaseSource: (value) => this.#prepareRebaseSource(value),
+        rebaseReservationCurrent: (value) => this.#rebaseReservationCurrent(value),
+        commitRebaseSource: (value, options) => this.#commitRebaseSource(value, options),
+        rollbackRebaseSource: (value, options) => this.#rollbackRebaseSource(value, options),
+        publish: () => this.#publish(),
+      }),
+    });
   }
 
   setObserver(observer) {
@@ -179,59 +268,94 @@ export class RunSession {
   #matchesSubmission(submission) {
     return Boolean(
       this.#submission
-      && submission?.token === this.#submission.token
-      && samePath(submission?.sourcePath, this.#submission.sourcePath),
+      && submission?.token === this.#submission.token,
     );
   }
 
   #setSubmission(submission) {
+    const previousSourcePath = this.#submission?.sourcePath || null;
+    const nextSourcePath = submission?.sourcePath || null;
     this.#submission = submission && Object.freeze(submission);
+    this.#advanceLocator(locatorKey(previousSourcePath));
+    this.#advanceLocator(locatorKey(nextSourcePath));
     this.#emit();
     return this.#submission;
   }
 
-  #findBySource(map, sourcePath) {
-    if (!sourcePath) return null;
-    if (map.has(sourcePath)) return map.get(sourcePath) ?? null;
-    for (const [trackedPath, value] of map) {
-      const valueSourcePath = value?.sourcePath;
-      if (
-        samePath(trackedPath, sourcePath)
-        || samePath(valueSourcePath, sourcePath)
-      ) return value;
+  #advanceLocator(key) {
+    if (!key) return 0;
+    const revision = ++this.#revisionSequence;
+    this.#locatorRevisions.set(key, revision);
+    return revision;
+  }
+
+  #locate(sourcePath) {
+    const key = locatorKey(sourcePath);
+    return Object.freeze({
+      key,
+      entry: key ? this.#entries.get(key) || null : null,
+    });
+  }
+
+  #writeEntry(key, entry) {
+    if (!key) return null;
+    this.#advanceLocator(key);
+    if (!hasEntryFacts(entry)) {
+      this.#entries.delete(key);
+      if (this.#presentedRunKey === key) this.#presentedRunKey = null;
+      if (this.#presentedHandoffKey === key) this.#presentedHandoffKey = null;
+      return null;
     }
-    return null;
+    const frozen = Object.freeze(entry);
+    this.#entries.set(key, frozen);
+    return frozen;
   }
 
-  #deleteBySource(map, sourcePath) {
-    let changed = false;
-    for (const [trackedPath, value] of map) {
-      if (
-        samePath(trackedPath, sourcePath)
-        || samePath(value?.sourcePath, sourcePath)
-      ) {
-        map.delete(trackedPath);
-        changed = true;
-      }
+  #currentAttempt(entry) {
+    return entry?.run || entry?.outcome || entry?.handoff || null;
+  }
+
+  #startEntryAttempt(entry, run, { tracked }) {
+    return Object.freeze({
+      ...entry,
+      run,
+      runTracked: tracked,
+      result: null,
+      handoff: null,
+      copied: false,
+      recovered: false,
+      outcome: null,
+    });
+  }
+
+  #releasePresentedRun() {
+    const key = this.#presentedRunKey;
+    const entry = key ? this.#entries.get(key) || null : null;
+    this.#advanceLocator(key);
+    this.#presentedRunKey = null;
+    if (!entry || entry.runTracked) return;
+    this.#writeEntry(key, { ...entry, run: null });
+  }
+
+  #attemptExistsElsewhere(run, excludedKey) {
+    if (!run?.requestId || !run?.attemptId) return false;
+    for (const [key, entry] of this.#entries) {
+      if (key === excludedKey) continue;
+      const attempt = this.#currentAttempt(entry);
+      if (sameAttempt(attempt, run)) return true;
     }
-    return changed;
-  }
-
-  #matchesTrackedRun(map, run) {
-    return sameRun(this.#findBySource(map, run?.sourcePath), run);
-  }
-
-  #clearRunScopedState(sourcePath) {
-    const copied = this.#deleteBySource(this.#copiedHandoffs, sourcePath);
-    const recovered = this.#deleteBySource(this.#recoveredRuns, sourcePath);
-    return copied || recovered;
+    return false;
   }
 
   activate(sourcePath) {
+    const previousKey = locatorKey(this.#activeSourcePath);
+    this.#releasePresentedRun();
     this.#activeSourcePath = normalizedPath(sourcePath);
-    this.#activeRun = this.runForSource(this.#activeSourcePath);
-    this.#activeHandoff = this.handoffForSource(this.#activeSourcePath);
-    this.#activeOutcome = this.outcomeForSource(this.#activeSourcePath);
+    const { key, entry } = this.#locate(this.#activeSourcePath);
+    this.#presentedRunKey = entry?.runTracked ? key : null;
+    this.#presentedHandoffKey = entry?.handoff ? key : null;
+    this.#advanceLocator(previousKey);
+    this.#advanceLocator(key);
     this.#emit();
     return this.snapshot;
   }
@@ -295,58 +419,88 @@ export class RunSession {
 
   setActiveRun(run) {
     run = this.#preservePendingAdoption(run);
-    if (
-      run?.sourcePath
-      && !sameRun(this.#activeRun, run)
-      && !this.#matchesTrackedRun(this.#runs, run)
-    ) {
-      this.#clearRunScopedState(run.sourcePath);
+    if (!run?.sourcePath) {
+      this.#releasePresentedRun();
+      this.#emit();
+      return null;
     }
-    this.#activeRun = run || null;
+
+    const located = this.#locate(run.sourcePath);
+    const key = located.key;
+    const entry = located.entry || emptyEntry(run.sourcePath);
+    const sameEntryAttempt = sameRun(this.#currentAttempt(entry), run);
+    if (this.#presentedRunKey !== key) {
+      this.#releasePresentedRun();
+    }
+    let nextEntry;
+    if (sameEntryAttempt) {
+      nextEntry = Object.freeze({ ...entry, run });
+    } else {
+      nextEntry = this.#startEntryAttempt(entry, run, { tracked: false });
+      if (this.#presentedHandoffKey === key) this.#presentedHandoffKey = null;
+    }
+    this.#writeEntry(key, nextEntry);
+    this.#presentedRunKey = key;
     this.#emit();
-    return this.#activeRun;
+    return this.activeRun;
   }
 
   trackRun(run, { activate = "if-current", recovered = false } = {}) {
     if (!run?.sourcePath) return null;
     run = this.#preservePendingAdoption(run);
-    const previous = this.runForSource(run.sourcePath);
-    const sameTrackedRun = sameRun(previous, run);
+    const located = this.#locate(run.sourcePath);
+    const key = located.key;
+    const entry = located.entry || emptyEntry(run.sourcePath);
+    const sameEntryAttempt = sameRun(this.#currentAttempt(entry), run);
+    const sameTrackedRun = entry.runTracked && sameRun(entry.run, run);
     const recoveredHandoff = recovered && !sameTrackedRun
       ? recoveredAgentHandoff(run)
       : null;
-    if (!sameTrackedRun) this.#clearRunScopedState(run.sourcePath);
-    if (recovered && !sameTrackedRun) {
-      this.#deleteBySource(this.#recoveredRuns, run.sourcePath);
-      this.#recoveredRuns.set(run.sourcePath, run);
+    let nextEntry = sameEntryAttempt
+      ? Object.freeze({
+          ...entry,
+          run,
+          runTracked: true,
+          ...(!sameTrackedRun ? { copied: false, recovered: false } : {}),
+          ...(recovered && !sameTrackedRun ? { recovered: true } : {}),
+          ...(recoveredHandoff ? { handoff: recoveredHandoff } : {}),
+        })
+      : this.#startEntryAttempt(entry, run, { tracked: true });
+    if (!sameEntryAttempt && recovered) {
+      nextEntry = Object.freeze({
+        ...nextEntry,
+        recovered: true,
+        ...(recoveredHandoff ? { handoff: recoveredHandoff } : {}),
+      });
     }
-    this.#deleteBySource(this.#runs, run.sourcePath);
-    this.#runs.set(run.sourcePath, run);
-    if (
+    this.#writeEntry(key, nextEntry);
+
+    const shouldActivate = (
       activate === "always"
       || (
         activate !== "never"
         && samePath(this.#activeSourcePath, run.sourcePath)
       )
-    ) {
-      this.#activeRun = run;
-    }
+    );
+    if (shouldActivate) this.#presentedRunKey = key;
+    else if (this.#presentedRunKey === key && !sameEntryAttempt) this.#presentedRunKey = null;
     if (recoveredHandoff) {
-      this.#deleteBySource(this.#handoffs, run.sourcePath);
-      this.#handoffs.set(run.sourcePath, recoveredHandoff);
       if (
         samePath(this.#activeSourcePath, run.sourcePath)
-        && sameRun(this.#activeRun, recoveredHandoff)
+        && sameRun(this.activeRun, recoveredHandoff)
       ) {
-        this.#activeHandoff = recoveredHandoff;
+        this.#presentedHandoffKey = key;
       }
+    } else if (this.#presentedHandoffKey === key && !sameEntryAttempt) {
+      this.#presentedHandoffKey = null;
     }
     this.#emit();
     return run;
   }
 
   runForSource(sourcePath) {
-    return this.#findBySource(this.#runs, sourcePath);
+    const entry = this.#locate(sourcePath).entry;
+    return entry?.runTracked ? entry.run : null;
   }
 
   hasRun(run) {
@@ -357,15 +511,20 @@ export class RunSession {
   removeRun(run, { clearActive = true } = {}) {
     if (!run) return false;
     let changed = false;
-    for (const [trackedPath, tracked] of this.#runs) {
-      if (sameAttempt(tracked, run)) {
-        this.#runs.delete(trackedPath);
-        this.#clearRunScopedState(trackedPath);
-        changed = true;
-      }
-    }
-    if (clearActive && sameAttempt(this.#activeRun, run)) {
-      this.#activeRun = null;
+    for (const [key, entry] of this.#entries) {
+      const trackedMatches = entry.runTracked && sameAttempt(entry.run, run);
+      const presentedMatches = this.#presentedRunKey === key
+        && sameAttempt(entry.run, run);
+      if (!trackedMatches && !(clearActive && presentedMatches)) continue;
+      if (clearActive && presentedMatches) this.#presentedRunKey = null;
+      const keepRun = presentedMatches && !clearActive;
+      this.#writeEntry(key, {
+        ...entry,
+        run: keepRun ? entry.run : null,
+        runTracked: false,
+        copied: false,
+        recovered: false,
+      });
       changed = true;
     }
     if (changed) this.#emit();
@@ -373,15 +532,24 @@ export class RunSession {
   }
 
   clearActiveRun() {
-    if (!this.#activeRun) return false;
-    this.#activeRun = null;
+    if (!this.activeRun) return false;
+    this.#releasePresentedRun();
     this.#emit();
     return true;
   }
 
   publishHandoff(state) {
     if (!state?.sourcePath) return false;
-    const previous = this.handoffForSource(state.sourcePath);
+    const located = this.#locate(state.sourcePath);
+    const key = located.key;
+    const entry = located.entry || emptyEntry(state.sourcePath);
+    const currentAttempt = this.#currentAttempt(entry);
+    if (
+      (currentAttempt && !sameRun(currentAttempt, state))
+      || this.#attemptExistsElsewhere(state, key)
+    ) return false;
+
+    const previous = entry.handoff;
     const beginsDelivery = state.status === "copying" || state.status === "starting";
     if (
       !beginsDelivery
@@ -391,192 +559,267 @@ export class RunSession {
         || previous.attemptId !== state.attemptId
       )
     ) return false;
-    const copyAlreadyConfirmed = this.#matchesTrackedRun(
-      this.#copiedHandoffs,
-      state,
-    );
-    if (beginsDelivery && !copyAlreadyConfirmed) {
-      this.#deleteBySource(this.#copiedHandoffs, state.sourcePath);
-    }
+    const copyAlreadyConfirmed = entry.copied;
+    let copied = beginsDelivery && !copyAlreadyConfirmed ? false : entry.copied;
     if (["copied", "starting", "running", "cancelling"].includes(state.status)) {
-      this.#deleteBySource(this.#copiedHandoffs, state.sourcePath);
-      this.#copiedHandoffs.set(state.sourcePath, state);
+      copied = true;
     } else if (
       state.mode === MANAGED_AGENT_MODE
       && ["completed", "failed", "interrupted", "cancelled"].includes(state.status)
     ) {
-      this.#deleteBySource(this.#copiedHandoffs, state.sourcePath);
+      copied = false;
     }
-    this.#deleteBySource(this.#handoffs, state.sourcePath);
-    this.#handoffs.set(state.sourcePath, state);
+    this.#writeEntry(key, { ...entry, handoff: state, copied });
     if (
       samePath(this.#activeSourcePath, state.sourcePath)
-      && sameRun(this.#activeRun, state)
+      && sameRun(this.activeRun, state)
     ) {
-      this.#activeHandoff = state;
+      this.#presentedHandoffKey = key;
     }
     this.#emit();
     return true;
   }
 
   handoffForSource(sourcePath) {
-    return this.#findBySource(this.#handoffs, sourcePath);
+    return this.#locate(sourcePath).entry?.handoff || null;
   }
 
   clearHandoff(sourcePath) {
-    const changed = this.#deleteBySource(this.#handoffs, sourcePath);
-    this.#deleteBySource(this.#copiedHandoffs, sourcePath);
-    if (samePath(this.#activeHandoff?.sourcePath, sourcePath)) {
-      this.#activeHandoff = null;
-    }
+    const { key, entry } = this.#locate(sourcePath);
+    const changed = Boolean(entry?.handoff);
+    if (!entry || (!entry.handoff && !entry.copied)) return false;
+    this.#writeEntry(key, { ...entry, handoff: null, copied: false });
+    if (this.#presentedHandoffKey === key) this.#presentedHandoffKey = null;
     if (changed) this.#emit();
     return changed;
   }
 
   clearActiveHandoff() {
-    if (!this.#activeHandoff) return false;
-    this.#deleteBySource(
-      this.#copiedHandoffs,
-      this.#activeHandoff.sourcePath,
-    );
-    this.#activeHandoff = null;
+    const key = this.#presentedHandoffKey;
+    const entry = key ? this.#entries.get(key) || null : null;
+    if (!entry?.handoff) return false;
+    this.#presentedHandoffKey = null;
+    this.#writeEntry(key, { ...entry, copied: false });
     this.#emit();
     return true;
   }
 
   rememberOutcome(run) {
     if (!run?.sourcePath) return null;
-    this.#deleteBySource(this.#outcomes, run.sourcePath);
-    this.#outcomes.set(run.sourcePath, run);
-    if (samePath(this.#activeSourcePath, run.sourcePath)) {
-      this.#activeOutcome = run;
-    }
+    const located = this.#locate(run.sourcePath);
+    const key = located.key;
+    const entry = located.entry || emptyEntry(run.sourcePath);
+    const currentAttempt = this.#currentAttempt(entry);
+    if (
+      (currentAttempt && !sameRun(currentAttempt, run))
+      || this.#attemptExistsElsewhere(run, key)
+    ) return null;
+    this.#writeEntry(key, { ...entry, outcome: run });
     this.#emit();
     return run;
   }
 
   forgetOutcome(sourcePath) {
-    const changed = this.#deleteBySource(this.#outcomes, sourcePath);
-    if (samePath(this.#activeOutcome?.sourcePath, sourcePath)) {
-      this.#activeOutcome = null;
-    }
-    if (changed) this.#emit();
-    return changed;
+    const { key, entry } = this.#locate(sourcePath);
+    if (!entry?.outcome) return false;
+    this.#writeEntry(key, { ...entry, outcome: null });
+    this.#emit();
+    return true;
   }
 
   outcomeForSource(sourcePath) {
-    return this.#findBySource(this.#outcomes, sourcePath);
+    return this.#locate(sourcePath).entry?.outcome || null;
   }
 
   markResult(sourcePath, result) {
     const activeSourcePath = normalizedPath(sourcePath);
     if (!activeSourcePath || !result) return false;
-    this.#deleteBySource(this.#results, activeSourcePath);
-    this.#results.set(activeSourcePath, result);
+    const { key, entry: located } = this.#locate(activeSourcePath);
+    const entry = located || emptyEntry(activeSourcePath);
+    this.#writeEntry(key, { ...entry, result });
     this.#emit();
     return true;
   }
 
   clearResult(sourcePath) {
-    const changed = this.#deleteBySource(this.#results, sourcePath);
-    if (changed) this.#emit();
-    return changed;
+    const { key, entry } = this.#locate(sourcePath);
+    if (!entry?.result) return false;
+    this.#writeEntry(key, { ...entry, result: null });
+    this.#emit();
+    return true;
   }
 
   resultForSource(sourcePath) {
-    return this.#findBySource(this.#results, sourcePath);
+    return this.#locate(sourcePath).entry?.result || null;
   }
 
-  rebaseSource({
+  #locatorRevision(sourcePath) {
+    const key = locatorKey(sourcePath);
+    return key ? this.#locatorRevisions.get(key) || 0 : 0;
+  }
+
+  #prepareRebaseSource({
     previousSourcePath,
     sourcePath,
     projectId = "",
+    documentId = "",
   }) {
     const nextSourcePath = normalizedPath(sourcePath);
     if (!previousSourcePath || !nextSourcePath) return false;
 
-    const trackedRun = this.runForSource(previousSourcePath)
-      || (
-        projectId
-          ? [...this.#runs.values()].find(
-            (run) => run.projectId === projectId,
-          ) || null
-          : null
-      );
-    for (const [trackedPath, run] of this.#runs) {
-      if (
-        samePath(trackedPath, previousSourcePath)
-        || (
-          projectId
-          && run.projectId === projectId
-        )
-      ) this.#runs.delete(trackedPath);
-    }
-    const nextRun = trackedRun
-      ? { ...trackedRun, sourcePath: nextSourcePath }
-      : null;
-    if (nextRun) this.#runs.set(nextSourcePath, nextRun);
+    const previous = this.#locate(previousSourcePath);
+    const nextKey = locatorKey(nextSourcePath);
+    const entry = previous.entry;
+    if ([entry?.run, entry?.handoff, entry?.outcome].some((run) => run && (
+      (projectId && run.projectId && run.projectId !== projectId)
+      || (documentId && run.documentId && run.documentId !== documentId)
+    ))) return false;
+    if (
+      previous.key !== nextKey
+      && this.#entries.has(nextKey)
+    ) return null;
 
-    const trackedHandoff = this.handoffForSource(previousSourcePath);
-    this.#deleteBySource(this.#handoffs, previousSourcePath);
-    const nextHandoff = trackedHandoff
-      ? { ...trackedHandoff, sourcePath: nextSourcePath }
-      : null;
-    if (nextHandoff) this.#handoffs.set(nextSourcePath, nextHandoff);
+    return Object.freeze({
+      previousSourcePath: normalizedPath(previousSourcePath),
+      sourcePath: nextSourcePath,
+      previousKey: previous.key,
+      nextKey,
+      projectId: String(projectId || ""),
+      documentId: String(documentId || ""),
+      previousRevision: this.#locatorRevision(previousSourcePath),
+      nextRevision: this.#locatorRevision(nextSourcePath),
+      previousEntry: entry,
+      nextEntry: this.#entries.get(nextKey) || null,
+      activeSourcePath: this.#activeSourcePath,
+      presentedRunKey: this.#presentedRunKey,
+      presentedHandoffKey: this.#presentedHandoffKey,
+      submission: this.#submission,
+    });
+  }
 
-    const copiedHandoff = this.#findBySource(
-      this.#copiedHandoffs,
-      previousSourcePath,
+  #rebaseReservationCurrent(reservation) {
+    if (!reservation || typeof reservation !== "object") return false;
+    const sameOptionalPath = (left, right) => (
+      (!left && !right) || samePath(left, right)
     );
-    this.#deleteBySource(this.#copiedHandoffs, previousSourcePath);
-    if (copiedHandoff) {
-      this.#copiedHandoffs.set(nextSourcePath, {
-        ...copiedHandoff,
+    const entryForKey = (key) => this.#entries.get(key) || null;
+    if (
+      this.#locatorRevision(reservation.previousSourcePath)
+        !== reservation.previousRevision
+      || this.#locatorRevision(reservation.sourcePath) !== reservation.nextRevision
+      || entryForKey(reservation.previousKey) !== reservation.previousEntry
+      || entryForKey(reservation.nextKey) !== reservation.nextEntry
+      || !sameOptionalPath(this.#activeSourcePath, reservation.activeSourcePath)
+      || this.#presentedRunKey !== reservation.presentedRunKey
+      || this.#presentedHandoffKey !== reservation.presentedHandoffKey
+      || this.#submission !== reservation.submission
+    ) return false;
+    return reservation.previousKey === reservation.nextKey
+      || !this.#entries.has(reservation.nextKey);
+  }
+
+  #applyRebaseSource(reservation) {
+    const {
+      previousSourcePath,
+      sourcePath: nextSourcePath,
+      previousKey,
+      nextKey,
+    } = reservation;
+    const entry = this.#entries.get(previousKey) || null;
+
+    // Rename, initial managed binding and Promotion move one aggregate locator.
+    // The immutable Request-origin Working Copy inside its run is unchanged.
+    if (entry) {
+      const rebased = Object.freeze({
+        ...entry,
+        sourcePath: nextSourcePath,
+        run: entry.run ? { ...entry.run, sourcePath: nextSourcePath } : null,
+        handoff: entry.handoff
+          ? { ...entry.handoff, sourcePath: nextSourcePath }
+          : null,
+        outcome: entry.outcome
+          ? { ...entry.outcome, sourcePath: nextSourcePath }
+          : null,
+      });
+      if (previousKey !== nextKey) {
+        this.#advanceLocator(previousKey);
+        this.#entries.delete(previousKey);
+      }
+      this.#writeEntry(nextKey, rebased);
+      if (this.#presentedRunKey === previousKey) this.#presentedRunKey = nextKey;
+      if (this.#presentedHandoffKey === previousKey) this.#presentedHandoffKey = nextKey;
+    } else {
+      this.#advanceLocator(previousKey);
+      if (previousKey !== nextKey) this.#advanceLocator(nextKey);
+    }
+    if (samePath(this.#submission?.sourcePath, previousSourcePath)) {
+      this.#submission = Object.freeze({
+        ...this.#submission,
         sourcePath: nextSourcePath,
       });
     }
-
-    const recoveredRun = this.#findBySource(
-      this.#recoveredRuns,
-      previousSourcePath,
-    );
-    this.#deleteBySource(this.#recoveredRuns, previousSourcePath);
-    if (recoveredRun) {
-      this.#recoveredRuns.set(nextSourcePath, {
-        ...recoveredRun,
-        sourcePath: nextSourcePath,
-      });
-    }
-
-    const trackedResult = this.resultForSource(previousSourcePath);
-    this.#deleteBySource(this.#results, previousSourcePath);
-    if (trackedResult) this.#results.set(nextSourcePath, trackedResult);
-
-    const trackedOutcome = this.outcomeForSource(previousSourcePath);
-    this.#deleteBySource(this.#outcomes, previousSourcePath);
-    const nextOutcome = trackedOutcome
-      ? { ...trackedOutcome, sourcePath: nextSourcePath }
-      : null;
-    if (nextOutcome) this.#outcomes.set(nextSourcePath, nextOutcome);
-
     if (samePath(this.#activeSourcePath, previousSourcePath)) {
       this.#activeSourcePath = nextSourcePath;
-      this.#activeRun = nextRun;
-      this.#activeHandoff = nextHandoff;
-      this.#activeOutcome = nextOutcome;
-    } else {
-      if (samePath(this.#activeRun?.sourcePath, previousSourcePath)) {
-        this.#activeRun = nextRun;
-      }
-      if (samePath(this.#activeHandoff?.sourcePath, previousSourcePath)) {
-        this.#activeHandoff = nextHandoff;
-      }
-      if (samePath(this.#activeOutcome?.sourcePath, previousSourcePath)) {
-        this.#activeOutcome = nextOutcome;
-      }
     }
-    this.#emit();
     return true;
+  }
+
+  #commitRebaseSource(reservation, { publish = true } = {}) {
+    if (!this.#rebaseReservationCurrent(reservation)) return false;
+    this.#applyRebaseSource(reservation);
+    if (publish) this.#emit();
+    return true;
+  }
+
+  #rollbackRebaseSource(reservation, { publish = true } = {}) {
+    if (!reservation || typeof reservation !== "object") return false;
+    const currentEntry = this.#entries.get(reservation.nextKey) || null;
+    if (
+      (reservation.previousKey !== reservation.nextKey
+        && this.#entries.has(reservation.previousKey))
+      || (reservation.previousKey === reservation.nextKey
+        && currentEntry === reservation.previousEntry)
+    ) return false;
+    const expectedActiveSourcePath = samePath(
+      reservation.activeSourcePath,
+      reservation.previousSourcePath,
+    ) ? reservation.sourcePath : reservation.activeSourcePath;
+    if (
+      (!expectedActiveSourcePath && this.#activeSourcePath)
+      || (expectedActiveSourcePath && !samePath(
+        this.#activeSourcePath,
+        expectedActiveSourcePath,
+      ))
+    ) return false;
+    if (reservation.previousEntry && !currentEntry) return false;
+    if (!reservation.previousEntry && currentEntry) return false;
+    if (reservation.previousKey !== reservation.nextKey) {
+      this.#entries.delete(reservation.nextKey);
+      this.#advanceLocator(reservation.nextKey);
+    }
+    if (reservation.previousEntry) {
+      this.#entries.set(reservation.previousKey, reservation.previousEntry);
+      this.#advanceLocator(reservation.previousKey);
+    } else {
+      this.#entries.delete(reservation.previousKey);
+      this.#advanceLocator(reservation.previousKey);
+    }
+    this.#activeSourcePath = reservation.activeSourcePath;
+    this.#presentedRunKey = reservation.presentedRunKey;
+    this.#presentedHandoffKey = reservation.presentedHandoffKey;
+    this.#submission = reservation.submission;
+    if (publish) this.#emit();
+    return true;
+  }
+
+  rebaseSource(value) {
+    const reservation = this.#prepareRebaseSource(value);
+    return Boolean(reservation && this.#commitRebaseSource(reservation));
+  }
+
+  #publish() {
+    this.#emit();
+    return this.snapshot;
   }
 
   beginOperation(kind, key) {
@@ -598,40 +841,45 @@ export class RunSession {
   }
 
   get activeRun() {
-    return this.#activeRun;
+    return this.#entries.get(this.#presentedRunKey)?.run || null;
   }
 
   get activeHandoff() {
-    return this.#activeHandoff;
+    return this.#entries.get(this.#presentedHandoffKey)?.handoff || null;
   }
 
   get activeHandoffMayBeRunning() {
-    if (!this.#activeRun) return false;
-    if (this.#activeHandoff?.mode === MANAGED_AGENT_MODE) {
-      return sameRun(this.#activeHandoff, this.#activeRun) && (
-        ["starting", "running", "cancelling"].includes(this.#activeHandoff.status)
+    const activeRun = this.activeRun;
+    const activeHandoff = this.activeHandoff;
+    const entry = this.#entries.get(this.#presentedRunKey) || null;
+    if (!activeRun || !entry) return false;
+    if (activeHandoff?.mode === MANAGED_AGENT_MODE) {
+      return sameRun(activeHandoff, activeRun) && (
+        ["starting", "running", "cancelling"].includes(activeHandoff.status)
         || (
           (
-            this.#activeHandoff.status === "interrupted"
-            || this.#activeHandoff.errorCode === "AGENT_RESTART_RECOVERY_REQUIRED"
+            activeHandoff.status === "interrupted"
+            || activeHandoff.errorCode === "AGENT_RESTART_RECOVERY_REQUIRED"
           )
-          && this.#matchesTrackedRun(this.#recoveredRuns, this.#activeRun)
+          && entry.recovered
         )
       );
     }
-    return this.#matchesTrackedRun(this.#copiedHandoffs, this.#activeRun)
+    return entry.copied
       || (
-        this.#activeRun.status === "processing"
-        && this.#matchesTrackedRun(this.#recoveredRuns, this.#activeRun)
+        activeRun.status === "processing"
+        && entry.recovered
       );
   }
 
   get activeHandoffManaged() {
+    const activeRun = this.activeRun;
+    const activeHandoff = this.activeHandoff;
     return Boolean(
-      this.#activeRun
-      && this.#activeHandoff?.mode === MANAGED_AGENT_MODE
-      && ["starting", "running", "cancelling"].includes(this.#activeHandoff.status)
-      && sameRun(this.#activeHandoff, this.#activeRun),
+      activeRun
+      && activeHandoff?.mode === MANAGED_AGENT_MODE
+      && ["starting", "running", "cancelling"].includes(activeHandoff.status)
+      && sameRun(activeHandoff, activeRun),
     );
   }
 
@@ -650,26 +898,30 @@ export class RunSession {
     return Boolean(
       this.activeSubmission
       && this.activeSubmission.phase !== "preparing",
-    ) || isLockedLifecycleState(this.#activeRun?.status);
+    ) || isLockedLifecycleState(this.activeRun?.status);
   }
 
   get runs() {
-    return Object.freeze([...this.#runs.values()]);
+    return Object.freeze(
+      [...this.#entries.values()].flatMap((entry) => (
+        entry.runTracked && entry.run ? [entry.run] : []
+      )),
+    );
   }
 
   get snapshot() {
     return Object.freeze({
       activeSourcePath: this.#activeSourcePath,
-      activeRun: this.#activeRun,
-      activeHandoff: this.#activeHandoff,
+      activeRun: this.activeRun,
+      activeHandoff: this.activeHandoff,
       activeHandoffMayBeRunning: this.activeHandoffMayBeRunning,
       activeHandoffManaged: this.activeHandoffManaged,
       activeSubmission: this.activeSubmission,
       submissionPending: this.submissionPending,
       activeLocked: this.activeLocked,
       operationKeys: frozenOperationKeys(this.#busy),
-      recentOutcome: this.#activeOutcome,
-      backgroundResults: frozenEntries(this.#results),
+      recentOutcome: this.outcomeForSource(this.#activeSourcePath),
+      backgroundResults: frozenBackgroundResults(this.#entries),
     });
   }
 }
