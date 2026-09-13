@@ -3,9 +3,12 @@ import test from "node:test";
 
 import {
   assertElectronClipboardSnapshotRestorable,
+  assertElectronRichClipboardSnapshotRestorable,
   restoreElectronClipboard,
+  restoreElectronRichClipboard,
   snapshotElectronClipboard,
   waitForElectronClipboardText,
+  withRichElectronClipboard,
   withRestoredElectronClipboard,
 } from "./e2e/electron/helpers/clipboard-snapshot.mjs";
 
@@ -19,6 +22,11 @@ function clipboardApp(initial) {
       clear: () => state.clear(),
       writeText: text => { state.clear(); state.set("text/plain", Buffer.from(text)); },
       writeBuffer: (format, buffer) => { state.clear(); state.set(format, Buffer.from(buffer)); },
+      write: payload => {
+        state.clear();
+        if (payload?.text != null) state.set("text/plain", Buffer.from(payload.text));
+        if (payload?.html != null) state.set("text/html", Buffer.from(payload.html));
+      },
     };
     return fn({ clipboard }, value);
   } };
@@ -30,6 +38,34 @@ test("snapshot and restore preserve the exact supported plain-text payload", asy
   app.state.clear(); app.state.set("text/plain", Buffer.from("changed"));
   await restoreElectronClipboard(app, snapshot);
   assert.equal(app.state.get("text/plain").toString(), "before");
+});
+
+test("rich paste lane accepts controlled input and preserves an empty/plain prior clipboard", async () => {
+  const app = clipboardApp([]);
+  const result = await withRichElectronClipboard(app, { text: "plain", html: "<strong>rich</strong>" }, async () => {
+    assert.deepEqual([...app.state.keys()].sort(), ["text/html", "text/plain"]);
+    return "ok";
+  });
+  assert.equal(result, "ok");
+  assert.deepEqual([...app.state], []);
+  assert.deepEqual(assertElectronRichClipboardSnapshotRestorable({ formats: [], payloads: [] }), {
+    empty: true,
+    solePlainText: false,
+  });
+});
+
+test("rich paste lane fails closed when the prior clipboard already has rich formats", async () => {
+  const app = clipboardApp([["text/plain", Buffer.from("before")], ["text/html", Buffer.from("<b>before</b>")]]);
+  await assert.rejects(withRichElectronClipboard(app, { text: "x", html: "<b>x</b>" }, async () => "unreachable"),
+    error => error?.code === "CLIPBOARD_RICH_PRIOR_UNSUPPORTED");
+  assert.deepEqual([...app.state.keys()].sort(), ["text/html", "text/plain"]);
+  await assert.rejects(restoreElectronRichClipboard(app, {
+    formats: ["text/html", "text/plain"],
+    payloads: [
+      { format: "text/html", base64: Buffer.from("<b>x</b>").toString("base64") },
+      { format: "text/plain", base64: Buffer.from("x").toString("base64") },
+    ],
+  }), error => error?.code === "CLIPBOARD_RICH_PRIOR_UNSUPPORTED");
 });
 
 test("multi-format clipboard fails before the action and before any clipboard mutation", async () => {
