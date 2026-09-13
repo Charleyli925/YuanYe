@@ -655,7 +655,14 @@ test("Electron sidebar opens an imported historical version in the existing proj
     await setTextSelection(createdFrame, "list-item", 0, 3);
     await launched.page.keyboard.insertText("HISTORY_V9_SAVED");
     await launched.page.keyboard.press(keyShortcut("S"));
-    await expect.poll(() => readFileSync(createdPath, "utf8")).toContain("HISTORY_V9_SAVED");
+    await expect.poll(() => {
+      try {
+        return readFileSync(createdPath, "utf8");
+      } catch (cause) {
+        if (cause?.code === "ENOENT") return null;
+        throw cause;
+      }
+    }).toContain("HISTORY_V9_SAVED");
     expect((await repository.readVersionFile({ target, versionId: "ver_0003" })).content).toBe(historicalBytes.content);
     expect(readFileSync(target.exactSourcePath, "utf8")).toBe(protectedWorkingBytes);
     await launched.page.screenshot({ path: test.info().outputPath("history-created-v9.png") });
