@@ -13,6 +13,43 @@ import {
 
 export const CANDIDATE_ASSESSMENT_SCHEMA_VERSION = "1.0.0";
 
+function emptyCandidateImpactCounters() {
+  return {
+    snapshotBuilds: 0,
+    snapshotElementVisits: 0,
+    retainedElementVisits: 0,
+    topologySiblingVisits: 0,
+    signatureBuilds: 0,
+    comparisonVisits: 0,
+    scopeVisits: 0,
+    outsideChecks: 0,
+  };
+}
+
+let candidateImpactCountersEnabled = false;
+let candidateImpactCounters = emptyCandidateImpactCounters();
+
+function recordCandidateImpactWork(kind, count = 1) {
+  if (!candidateImpactCountersEnabled) return;
+  candidateImpactCounters[kind] += count;
+}
+
+// Deterministic test/benchmark counters. They are disabled by default and
+// record traversal quantities only, never source HTML or element identities.
+export function enableCandidateImpactCounters() {
+  candidateImpactCountersEnabled = true;
+  candidateImpactCounters = emptyCandidateImpactCounters();
+}
+
+export function readCandidateImpactCounters() {
+  return { ...candidateImpactCounters };
+}
+
+export function disableCandidateImpactCounters() {
+  candidateImpactCountersEnabled = false;
+  candidateImpactCounters = emptyCandidateImpactCounters();
+}
+
 const IGNORED_TEXT_ELEMENTS = new Set([
   "script",
   "style",
@@ -286,6 +323,7 @@ export function isPageTargetReference(value) {
 }
 
 function stableElementSnapshot(source) {
+  recordCandidateImpactWork("snapshotBuilds");
   let inspection;
   try {
     inspection = inspectSourceElementIdentity(source);
@@ -311,6 +349,7 @@ function stableElementSnapshot(source) {
     (element) => element.parentElementIndex,
   );
   for (const [elementIndex, element] of inspection.elements.entries()) {
+    recordCandidateImpactWork("snapshotElementVisits");
     const id = element.pagerootId;
     if (!isValidPagerootElementId(id)) continue;
     if (byId.has(id)) return null;
@@ -367,35 +406,41 @@ function topologySignatures(snapshot, retainedIds) {
   for (const siblings of snapshot.siblingGroups.values()) {
     let previous = null;
     for (const sibling of siblings) {
+      recordCandidateImpactWork("topologySiblingVisits");
       previousRetainedSiblingId.set(sibling.id, previous);
       if (retainedIds.has(sibling.id)) previous = sibling.id;
     }
     let next = null;
     for (let index = siblings.length - 1; index >= 0; index -= 1) {
       const sibling = siblings[index];
+      recordCandidateImpactWork("topologySiblingVisits");
       nextRetainedSiblingId.set(sibling.id, next);
       if (retainedIds.has(sibling.id)) next = sibling.id;
     }
   }
-  return new Map(snapshot.elements.map((element) => [
-    element.id,
-    JSON.stringify({
-      namespaceURI: element.namespaceURI,
-      tagName: element.tagName,
-      startTag: element.startTag,
-      endTag: element.endTag,
-      parentId: element.parentId,
-      previousRetainedSiblingId: previousRetainedSiblingId.get(element.id) || null,
-      nextRetainedSiblingId: nextRetainedSiblingId.get(element.id) || null,
-      directText: element.directText,
-    }),
-  ]));
+  return new Map(snapshot.elements.map((element) => {
+    recordCandidateImpactWork("signatureBuilds");
+    return [
+      element.id,
+      JSON.stringify({
+        namespaceURI: element.namespaceURI,
+        tagName: element.tagName,
+        startTag: element.startTag,
+        endTag: element.endTag,
+        parentId: element.parentId,
+        previousRetainedSiblingId: previousRetainedSiblingId.get(element.id) || null,
+        nextRetainedSiblingId: nextRetainedSiblingId.get(element.id) || null,
+        directText: element.directText,
+      }),
+    ];
+  }));
 }
 
 function scopeIds(snapshot, roots) {
   const scopedBySourceIndex = new Map();
   const result = new Set();
   for (let sourceIndex = 0; sourceIndex < snapshot.sourceElementIds.length; sourceIndex += 1) {
+    recordCandidateImpactWork("scopeVisits");
     const id = snapshot.sourceElementIds[sourceIndex];
     const parentIndex = snapshot.sourceParentElementIndices[sourceIndex];
     const parentScoped = Number.isInteger(parentIndex)
@@ -448,18 +493,23 @@ function candidateImpact(
   const changed = base && output
     ? (() => {
       const retained = new Set(
-        [...base.byId.keys()].filter((id) => output.byId.has(id)),
+        [...base.byId.keys()].filter((id) => {
+          recordCandidateImpactWork("retainedElementVisits");
+          return output.byId.has(id);
+        }),
       );
       const baseSignatures = topologySignatures(base, retained);
       const outputSignatures = topologySignatures(output, retained);
       const changed = [];
       const seen = new Set();
       for (const element of base.elements) {
+        recordCandidateImpactWork("comparisonVisits");
         if (baseSignatures.get(element.id) === outputSignatures.get(element.id)) continue;
         changed.push(element.id);
         seen.add(element.id);
       }
       for (const element of output.elements) {
+        recordCandidateImpactWork("comparisonVisits");
         if (seen.has(element.id)) continue;
         if (baseSignatures.get(element.id) === outputSignatures.get(element.id)) continue;
         changed.push(element.id);
@@ -478,9 +528,12 @@ function candidateImpact(
     new Set(requested),
     requestedTargetIsPage === true,
   );
-  const outside = changed.filter((id) => output.byId.has(id)
-    ? !scopes.output.has(id)
-    : !scopes.base.has(id));
+  const outside = changed.filter((id) => {
+    recordCandidateImpactWork("outsideChecks");
+    return output.byId.has(id)
+      ? !scopes.output.has(id)
+      : !scopes.base.has(id);
+  });
   return boundedImpact(changed, outside, count);
 }
 
