@@ -1800,8 +1800,11 @@ test("overlapping edits promote only the latest Runtime without losing charts or
       "data-edit-runtime-phase",
     )).toBe("settled");
     await expect(page.getByTestId("edit-runtime-static-fallback")).toHaveCount(0);
+    await expect.poll(async () => {
+      const activeFrame = await currentEditorFrame(page);
+      return activeFrame.locator('[data-native-case="runtime-supersession"]').count();
+    }).toBe(3);
     frame = await currentEditorFrame(page);
-    await expect(frame.locator('[data-native-case="runtime-supersession"]')).toHaveCount(3);
     await expect(frame.locator("#supersession-proof")).toHaveText("运行时卡片 3");
     await expect(frame.locator("#supersession-chart canvas")).toHaveCount(1);
 
