@@ -198,7 +198,10 @@ test("output without the mandatory finalizer never creates or opens a version", 
     await expect(launched.page.getByTestId("ai-conversation-action-bar")
     .getByText("任务已复制，等你的 AI 改完", { exact: true }))
       .toBeVisible();
-    expect(workingHtmlFiles(launched.workspace, request.changeRequest.projectId)).toHaveLength(1);
+    await expect.poll(
+      () => workingHtmlFiles(launched.workspace, request.changeRequest.projectId).length,
+      { timeout: 20_000 },
+    ).toBe(1);
     expect(readFileSync(fixture.sourcePath).equals(fixture.original)).toBe(true);
   } finally {
     await stopPageRoot(launched.electronApp, launched.isolatedUserData);
@@ -231,7 +234,10 @@ test("a malformed AI HTML return is rejected before completion or opening", asyn
     await expect(launched.page.getByTestId("ai-conversation-action-bar")
     .getByText("任务已复制，等你的 AI 改完", { exact: true }))
       .toBeVisible();
-    expect(workingHtmlFiles(launched.workspace, request.changeRequest.projectId)).toHaveLength(1);
+    await expect.poll(
+      () => workingHtmlFiles(launched.workspace, request.changeRequest.projectId).length,
+      { timeout: 20_000 },
+    ).toBe(1);
     expect(readFileSync(fixture.sourcePath).equals(fixture.original)).toBe(true);
   } finally {
     await stopPageRoot(launched.electronApp, launched.isolatedUserData);
@@ -259,7 +265,10 @@ test("an AI return cannot drop a retained source identity", { tag: ["@smoke-revi
     const requestRecord = JSON.parse(readFileSync(path.join(request.requestRoot, "request.json"), "utf8"));
     expect(requestRecord.status).not.toBe("error");
     expect(existsSync(path.join(request.requestRoot, "candidate.json"))).toBe(false);
-    expect(workingHtmlFiles(launched.workspace, request.changeRequest.projectId)).toHaveLength(1);
+    await expect.poll(
+      () => workingHtmlFiles(launched.workspace, request.changeRequest.projectId).length,
+      { timeout: 20_000 },
+    ).toBe(1);
     expect(readFileSync(fixture.sourcePath).equals(fixture.original)).toBe(true);
     // The same copied task can be corrected without exposing a terminal ID error.
     writeAiOutput(request.requestRoot, (base) => base.replace(ORIGINAL_TEXT, UPDATED_TEXT));
@@ -292,7 +301,10 @@ test("an AI return cannot replace a retained source identity with a forged ID", 
     const requestRecord = JSON.parse(readFileSync(path.join(request.requestRoot, "request.json"), "utf8"));
     expect(requestRecord.status).not.toBe("error");
     expect(existsSync(path.join(request.requestRoot, "candidate.json"))).toBe(false);
-    expect(workingHtmlFiles(launched.workspace, request.changeRequest.projectId)).toHaveLength(1);
+    await expect.poll(
+      () => workingHtmlFiles(launched.workspace, request.changeRequest.projectId).length,
+      { timeout: 20_000 },
+    ).toBe(1);
     expect(readFileSync(fixture.sourcePath).equals(fixture.original)).toBe(true);
     // The same copied task can be corrected without exposing a terminal ID error.
     writeAiOutput(request.requestRoot, (base) => base.replace(ORIGINAL_TEXT, UPDATED_TEXT));
