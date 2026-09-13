@@ -42,7 +42,7 @@ export function previewCommentMarkerGroups(sourceIndex, comments) {
   for (const comment of comments) {
     const text = commentBodyText(comment);
     if (!text) continue;
-    const target = comment?.target;
+    const target = comment?.sourceAnchor;
     if (!target || isGlobalTarget(target)) continue;
     const sourceElement = resolveReviewCommentSourceElement(sourceIndex, target);
     // Preview DOM is addressed by Stable ID. An ephemeral parse nodeId cannot
