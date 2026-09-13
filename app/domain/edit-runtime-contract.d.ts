@@ -71,6 +71,20 @@ export type EditRuntimeScript = Readonly<{
   reason: string | null;
 }>;
 
+export type EditRuntimeDocumentAnalysis = Readonly<{
+  source: string;
+  scripts: readonly EditRuntimeScript[];
+  executableScripts: readonly EditRuntimeScript[];
+  unsupportedReason: string | null;
+  documentBase: Readonly<{
+    href: string;
+    openingTag: string;
+  }> | null;
+  programIdentity: string | null;
+}>;
+
+export function analyzeEditRuntimeDocument(html: string): EditRuntimeDocumentAnalysis;
+
 export function collectEditRuntimeScripts(html: string): Readonly<{
   scripts: readonly EditRuntimeScript[];
   executableScripts: readonly EditRuntimeScript[];

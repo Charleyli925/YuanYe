@@ -534,7 +534,11 @@ must revalidate the live DOM object, its registered stable ID and its current
 SourceIndex mapping; cached selection state is never mutation authority. A runtime descendant is
 display-only and resolves to the nearest still-proven source host for comments;
 it cannot become a semantic source edit. Element duplication proves the complete
-selected live subtree against the current SourceIndex; generated descendants,
+selected live subtree against one detached canonical parse cached only by the
+exact immutable SourceIndex. Geometry-only React renders reuse that canonical
+side, while command execution always revalidates the current live target and
+private Runtime proof. Adjacent browser Text nodes compare as one continuous
+text run; their object partition is not HTML content. Generated descendants,
 opaque runtime surfaces and authored programs reject the entire selected subtree
 at both toolbar and command boundaries without disabling independent source-backed
 siblings. Every supported semantic source change materializes complete HTML. A
@@ -550,9 +554,13 @@ and the `preparing → positioning → terminal` decision for every disposable
 candidate. Stable state contains one active loaded slot and one empty inert
 slot; it never allocates a third iframe or moves a keyed iframe between React
 positions.
-When a newer source edit replaces an in-flight frame using the same resource
-session, the older frame settles as `superseded`, not as an authored-program
-failure. Every load, activation, deadline, animation-frame, microtask and
+When a newer source edit arrives while a Candidate owns the inactive slot, it
+replaces only the deferred latest request. The current Candidate first settles
+and retires; if its source has become stale it settles as `superseded`, then the
+latest request starts against the now-empty slot. It is not an authored-program
+failure, and two revisions never concurrently reuse one inactive browsing
+context or registration capability. Every load, activation, deadline,
+animation-frame, microtask and
 positioning result must prove the current candidate identity before changing
 state; only the latest candidate may publish `ready`, `rejected` or `failed`.
 The coordinator also owns the last-known-good frame identity and the native-edit
@@ -627,6 +635,9 @@ last-known-good iframe exists. It reports that settlement fact to
 caches its own boolean. The Canvas freeze contract reports the latest complete
 working-source Hash separately from the visible verified-projection Hash and a
 stale-projection flag. A preserved older iframe never advances the latter.
+Only successful exact Candidate promotion or a proved in-place synchronization
+publishes the newer rendered identity and `data-render-verified`; merely ending
+a Native Edit cannot do so.
 Canvas acknowledgement is presentation/cache authority only; it is not
 authorization for save, export, AI freeze, project switch or close. Those
 boundaries use the complete Working HTML plus exact persistence or recovery
@@ -695,6 +706,11 @@ stable-element-ID selection when each target remains valid. Every completed
 operation first materializes complete HTML and enters the ordinary Hash/CAS,
 atomic-save and recovery boundary; close/reopen must reproduce source edits
 from that HTML. Author Script then regenerates runtime presentation.
+Host acceptance of that complete HTML is irreversible within the Canvas command
+result: a later live-session rebase or projection failure keeps the accepted
+source/history result and enters the existing recovery path. It cannot return
+the pre-acceptance rejection outcome. Acceptance still does not claim either a
+current visible projection or a successful persistence receipt.
 These phase deadlines bound an unfinished wait. A settled current Candidate that
 already passed its identity and readiness checks remains usable when reported
 elapsed time exceeds a performance target; a cancelled, terminated, superseded
@@ -709,6 +725,9 @@ contenteditable host, Selection, caret and focus, and never start a Runtime
 candidate merely to acknowledge persistence. On an editable static fallback,
 the same checkpoint updates the Session's next retry input only after the
 revision is persisted; it still does not execute Script. A hard leave ends native editing.
+An in-place text Undo/Redo that proves every byte outside the editable island and
+rebinds the mounted source surface is also terminal for projection work; it does
+not leave a deferred whole-page Runtime refresh.
 Text-range formatting always allocates any persistent wrapper through
 SourcePatch, updates the current iframe in place and resumes the logical range;
 only nodes imported by that trusted patch may extend Runtime's private source

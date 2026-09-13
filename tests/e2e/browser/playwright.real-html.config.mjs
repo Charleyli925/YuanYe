@@ -10,7 +10,7 @@ const productRoot = path.resolve(currentDirectory, "../../..");
 export default defineConfig({
   ...browserConfig,
   testMatch: /real-complex-html\.gate\.mjs/,
-  outputDir: path.join(productRoot, "output/playwright/real-complex-html/results"),
+  outputDir: path.join(productRoot, "output/playwright/dom-editing-compatibility/results"),
   fullyParallel: true,
   workers: 4,
   retries: 0,
@@ -19,7 +19,7 @@ export default defineConfig({
     ["list"],
     ["html", {
       open: "never",
-      outputFolder: path.join(productRoot, "output/playwright/real-complex-html/report"),
+      outputFolder: path.join(productRoot, "output/playwright/dom-editing-compatibility/report"),
     }],
   ],
 });

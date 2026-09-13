@@ -21,7 +21,7 @@ export const PRODUCT_SOURCE_STEP_NAMES = Object.freeze(new Set([
   "Run shard-1-of-3",
   "Run shard-2-of-3",
   "Run shard-3-of-3",
-  "Run real-html",
+  "Run dom-editing-compatibility",
 ]));
 
 export const TRUSTED_TRIAGE_ASSOCIATIONS = Object.freeze(new Set([

@@ -149,12 +149,14 @@ test("SourceHistorySession applies undo and redo locally with exact HTML evidenc
   const undone = session.apply(context, "undo", "b", 2);
   assert.equal(undone.html, "a");
   assert.equal(undone.sourceSha256, sourceSha256("a"));
+  assert.equal(undone.kind, "text");
   assert.equal(session.capabilities.canUndo, false);
   acknowledgePending(session, context, "a");
   assert.equal(session.capabilities.canRedo, true);
 
   const redone = session.apply(context, "redo", "a", 3);
   assert.equal(redone.html, "b");
+  assert.equal(redone.kind, "text");
   acknowledgePending(session, context, "b");
   assert.equal(session.capabilities.canUndo, true);
   assert.equal(session.capabilities.canRedo, false);

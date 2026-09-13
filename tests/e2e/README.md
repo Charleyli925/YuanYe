@@ -121,29 +121,45 @@ A DOM serialization that merely renders the same page is a failure.
 Playwright traces, screenshots, videos and reports are written only below
 `output/playwright/`.
 
-## Automated real-file gate
+## DOM editing compatibility scan
 
 The gate uses `tests/fixtures/native-dom/complex-layout.html` by default, so it
 is deterministic and unattended:
 
 ```sh
-npm run test:real-html
+npm run test:dom-editing-compatibility
 ```
 
 An absolute local sample can optionally replace that input without changing
 the test logic:
 
 ```sh
-PAGEROOT_REAL_HTML_PATH='/absolute/path/to/complex-page.html' npm run test:real-html
+PAGEROOT_REAL_HTML_PATH='/absolute/path/to/complex-page.html' npm run test:dom-editing-compatibility
 ```
 
 An override path must be an absolute existing `.html` file. The test reads it into a
 Buffer and opens those bytes through the simulated Desktop host; it never
 writes the original file. The config has `retries: 0`, uses only
 `real-complex-html.gate.mjs`, and writes its artifacts under
-`output/playwright/real-complex-html/`. A missing safe editable target or an
+`output/playwright/dom-editing-compatibility/`. A missing safe editable target or an
 explicit `select-comment`/`comment-only` target fails with candidate
 diagnostics instead of weakening the assertions.
+
+`npm run test:real-html` remains a compatibility alias. This Browser lane
+dispatches synthetic DOM input events and is reported only as a **DOM editing
+compatibility scan**; it is not real mouse/keyboard acceptance. The fixed
+Electron sample in `electron-native-input.spec.mjs` owns real click/dblclick,
+keyboard input, Backspace, Delete and Enter. Private
+corpus acceptance remains `PAGEROOT_REAL_HTML_DIR=... npm run
+test:real-html:electron` and reports A text, B structure and C Runtime/iframe
+as separate file/stage/operation rows. Operations execute and report in the
+same order; every A mutation freezes and checks its own source baseline. The
+private report binds HEAD plus staged, unstaged and untracked source bytes.
+The private deterministic paste probe requires an empty system clipboard and verifies that it is
+empty again afterward. Any non-empty clipboard marks only Paste as
+`NOT_APPLICABLE` before mutation; lossless preservation of system clipboard
+formats belongs to a separate acceptance lane and does not suppress later
+operations in the same file.
 
 The current capability manifest contains 23 cases. If `cases.json` changes,
 the release report must use the count from that final file rather than copying

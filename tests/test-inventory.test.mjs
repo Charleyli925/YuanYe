@@ -35,6 +35,9 @@ test("Playwright inventory stays aligned with the repository and E2E README", as
   assert.ok(inventory.specFiles.includes("tests/e2e/electron/electron-runtime-continuity.spec.mjs"));
   assert.ok(inventory.specFiles.includes("tests/e2e/electron/electron-seeded-faults.spec.mjs"));
   assert.ok(inventory.gateFiles.includes("tests/e2e/browser/real-complex-html.gate.mjs"));
+  assert.ok(inventory.execution.lanes.some(
+    (lane) => lane.id === "browser-dom-editing-compatibility",
+  ));
   assert.ok(inventory.execution.filesByStage["on-demand"].includes(
     "tests/e2e/electron/review-annotation-clarity.spec.mjs",
   ));

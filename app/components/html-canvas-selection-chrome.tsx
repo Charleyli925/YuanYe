@@ -48,6 +48,8 @@ export const HtmlCanvasSelectionChrome = memo(function HtmlCanvasSelectionChrome
     isEditing,
     toolbarStyle,
     selectedPagePresentationAction,
+    activeFrameGeneration,
+    currentNativeDomGeneration,
     readOnly,
     selectedNativeEditAvailable,
     selectedStyle,
@@ -134,6 +136,11 @@ export const HtmlCanvasSelectionChrome = memo(function HtmlCanvasSelectionChrome
             className={styles.hoverHint}
             data-testid="canvas-capability-hint"
             data-placement={hoverHintPlacement?.placement}
+            data-capability-target-id={hoverCapability.selection.elementId}
+            data-capability-target-key={hoverCapability.targetKey}
+            data-capability-target-dom-generation={String(hoverCapability.generation)}
+            data-capability-current-dom-generation={String(currentNativeDomGeneration)}
+            data-capability-active-frame-generation={String(activeFrameGeneration)}
             data-html-canvas-preserve-selection="true"
             style={hoverHintStyle}
             role="button"

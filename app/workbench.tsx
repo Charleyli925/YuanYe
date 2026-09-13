@@ -1016,7 +1016,7 @@ export default function Workbench() {
             )
           ),
           freeze: (reason) => fenceAndFreezeCurrentCanvasRef.current(reason),
-          adoptHistorySource: (nextHtml, target, textSelection) => {
+          adoptHistorySource: (nextHtml, target, textSelection, operation) => {
             editorRef.current?.adoptHistorySource(
               nextHtml,
               target as HtmlCanvasSelection | null,
@@ -1025,6 +1025,7 @@ export default function Workbench() {
                 focus: number;
                 affinity: "left" | "right";
               } | null,
+              operation,
             );
           },
         },

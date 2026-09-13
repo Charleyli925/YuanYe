@@ -1,8 +1,7 @@
 import {
   EDIT_AUTHOR_RUNTIME_BUDGET,
   EDIT_AUTHOR_RUNTIME_CONTRACT_VERSION,
-  collectEditRuntimeScripts,
-  editRuntimeProgramIdentity,
+  analyzeEditRuntimeDocument,
   isEditRuntimeDocumentBasePath,
   isEditRuntimeSourceSha256,
   unsupportedEditRuntimeProgramReason,
@@ -372,8 +371,8 @@ export class EditAuthorRuntimeSession {
       });
       return this.#snapshot;
     }
-    const scriptContract = collectEditRuntimeScripts(identity.html);
-    const programIdentity = editRuntimeProgramIdentity(identity.html);
+    const scriptContract = analyzeEditRuntimeDocument(identity.html);
+    const programIdentity = scriptContract.programIdentity;
     const unsupportedProgram = scriptContract.executableScripts.some((script) => (
       unsupportedEditRuntimeProgramReason(script.inline)
     ));

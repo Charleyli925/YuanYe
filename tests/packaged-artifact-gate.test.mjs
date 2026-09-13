@@ -124,7 +124,7 @@ test("release commands use one automated artifact lane with full tests and packa
     "browser-full",
     "electron-full",
     "ai-closed-loop",
-    "real-html",
+    "dom-editing-compatibility",
     "package-build",
     "packaged-runtime",
     "packaged-verify",

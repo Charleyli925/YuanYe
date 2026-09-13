@@ -157,10 +157,23 @@ test("caption selection promotes rich children to one canonical visual host", as
   });
   const first = frame.locator(caseSelector("rich-child-a"));
   const second = frame.locator(caseSelector("rich-child-b"));
+  const canonicalTarget = frame.locator(caseSelector("selected-overlay-target"));
   const hint = editor.getByTestId("canvas-capability-hint");
 
   await first.hover();
   await expect(hint).toBeVisible();
+  const canonicalTargetId = await canonicalTarget.getAttribute("data-pageroot-id");
+  const activeGeneration = await editor
+    .locator('iframe[data-runtime-slot-role="active"]')
+    .getAttribute("data-frame-generation");
+  await expect(hint).toHaveAttribute("data-capability-target-id", canonicalTargetId || "");
+  await expect(hint).toHaveAttribute("data-capability-target-key", `element:${canonicalTargetId}`);
+  await expect(hint).toHaveAttribute("data-capability-active-frame-generation", activeGeneration || "");
+  const targetDomGeneration = await hint.getAttribute("data-capability-target-dom-generation");
+  await expect(hint).toHaveAttribute(
+    "data-capability-current-dom-generation",
+    targetDomGeneration || "",
+  );
   await second.evaluate((element) => {
     const rect = element.getBoundingClientRect();
     element.dispatchEvent(new PointerEvent("pointermove", {
@@ -391,6 +404,66 @@ test("source structure toolbar duplicates with fresh IDs and deletes only the se
   const exported = (await exportCurrentHtml(page)).toString("utf8");
   expect(exported).toContain(duplicatedIds[0]);
   expect(exported).not.toContain(duplicatedIds[1]);
+});
+
+test("style copy equivalence accepts only exact source or an empty live residue", async ({ page }) => {
+  const source = Buffer.from(`<!doctype html>
+<html><head><title>Style copy equivalence</title></head><body>
+  <h1 data-native-case="style-missing">Source has no style</h1>
+  <h1 data-native-case="style-empty" style="">Source has an empty style</h1>
+  <h1 data-native-case="style-authored" style="color: red">Source has authored style</h1>
+</body></html>`, "utf8");
+  const { editor, frame } = await loadFixture(page, "style-copy-equivalence.html", {
+    buffer: source,
+    identifiedWorkingCopy: true,
+  });
+  const duplicateButton = editor.getByRole("button", {
+    name: "复制元素",
+    exact: true,
+  });
+  const assertAvailability = async (caseId, mutation, expected) => {
+    await page.keyboard.press("Escape");
+    const target = frame.locator(caseSelector(caseId));
+    if (mutation) await target.evaluate(mutation);
+    await target.click();
+    if (expected === "available") {
+      await expect(duplicateButton).toBeVisible();
+    } else {
+      await expect(duplicateButton).toHaveCount(0);
+      await expect(editor).toHaveAttribute(
+        "data-element-copy-reason",
+        "runtime-subtree-diverged",
+      );
+    }
+  };
+
+  await assertAvailability(
+    "style-missing",
+    (element) => element.setAttribute("style", ""),
+    "available",
+  );
+  await assertAvailability(
+    "style-missing",
+    (element) => element.setAttribute("style", "color: blue"),
+    "unsupported",
+  );
+  await assertAvailability("style-empty", null, "available");
+  await assertAvailability(
+    "style-empty",
+    (element) => element.removeAttribute("style"),
+    "unsupported",
+  );
+  await assertAvailability("style-authored", null, "available");
+  await assertAvailability(
+    "style-authored",
+    (element) => element.setAttribute("style", ""),
+    "unsupported",
+  );
+  await assertAvailability(
+    "style-authored",
+    (element) => element.setAttribute("style", "color: blue"),
+    "unsupported",
+  );
 });
 
 test("hovering a filled module's padding advertises the same module click selects", async ({

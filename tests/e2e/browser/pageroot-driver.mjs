@@ -415,6 +415,22 @@ export async function geometrySnapshot(frame, id) {
 
 export async function doubleClickRenderedText(frame, id, position) {
   await dismissCanvasToolbar(pageForFrame(frame));
+  // Playwright's pointer retry sleeps inside the target iframe. In a
+  // scripts-disabled frame that timer can stall after a layout transition
+  // makes its first stability check fail. Wait in the host realm, without
+  // changing sandbox permissions or bypassing pointer actionability.
+  await currentEditorIframe(frame).evaluate(async (iframe) => {
+    const running = () => {
+      const animations = [];
+      for (let node = iframe; node; node = node.parentElement)
+        animations.push(...node.getAnimations().filter(animation => animation.playState === "running"
+          && Number.isFinite(animation.effect?.getComputedTiming().endTime)));
+      return animations;
+    };
+    for (let animations = running(); animations.length; animations = running()) {
+      await Promise.all(animations.map(animation => animation.finished.catch(() => {})));
+    }
+  });
   const target = currentNativeTarget(frame, id);
   const textPosition = position || await target.evaluate((element) => {
     const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);

@@ -267,15 +267,29 @@ export function adoptCanonicalHistoryIslandInPlace(options: {
 
   rootElement.replaceChildren(...canonicalChildren);
   options.onSourceChildrenRestored?.(Array.from(rootElement.querySelectorAll("*")));
-  const nextElements = nextIndex.elements as SourceElementValue[];
-  const mountedElements = sourceBackedPreviewElements(documentNode);
-  if (
-    mountedElements.length !== nextElements.length
-    || mountedElements.some((element, index) => (
-      element.getAttribute(SOURCE_ELEMENT_ATTRIBUTE) !== nextElements[index].pagerootId
-      || element.tagName.toLowerCase() !== nextElements[index].tagName
-    ))
-  ) throw new Error("历史文字结果无法保持当前画布的 Stable ID 映射。");
+  // The source bytes outside this editable island were proven unchanged
+  // above. Author scripts may legitimately mutate unrelated mounted source
+  // elements, so their disposable DOM shape must not veto a safe island-local
+  // history adoption. Validate only the authority root and the canonical
+  // children installed by this operation.
+  const mountedElements = [
+    rootElement,
+    ...Array.from(rootElement.querySelectorAll(`[${SOURCE_ELEMENT_ATTRIBUTE}]`)),
+  ];
+  const mountedIds = new Set<string>();
+  const invalidMountedElement = mountedElements.some((element) => {
+    const pagerootId = element.getAttribute(SOURCE_ELEMENT_ATTRIBUTE);
+    if (!pagerootId || mountedIds.has(pagerootId)) return true;
+    mountedIds.add(pagerootId);
+    return !isCanonicalSourceElement(element as HTMLElement, nextIndex);
+  });
+  // Executed author <script> objects are intentionally consumed by the Runtime
+  // bootstrap, so a valid mounted projection can be a strict subset of source
+  // elements. Require every object that remains mounted to map uniquely and
+  // canonically; do not require consumed program nodes to stay in the DOM.
+  if (invalidMountedElement) {
+    throw new Error("历史文字结果无法保持当前画布的 Stable ID 映射。");
+  }
   return true;
 }
 

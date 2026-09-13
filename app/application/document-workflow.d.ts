@@ -38,7 +38,12 @@ export type DocumentWorkflowCanvasPort = Readonly<{
     context?: ProjectContext,
   ): Promise<void>;
   freeze?(reason: string): Promise<{ ok: boolean; reason?: string }> | { ok: boolean; reason?: string };
-  adoptHistorySource?(html: string, target: unknown, selection: unknown): void;
+  adoptHistorySource?(
+    html: string,
+    target: unknown,
+    selection: unknown,
+    operation: Readonly<{ kind: SourceHistoryEntry["kind"]; property?: string }>,
+  ): void;
 }>;
 
 export type DocumentWorkflowConstruction = Readonly<{

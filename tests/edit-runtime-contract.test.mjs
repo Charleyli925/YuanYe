@@ -6,6 +6,7 @@ import {
   EDIT_AUTHOR_RUNTIME_BUDGET,
   EDIT_AUTHOR_RUNTIME_VERIFICATION_DEADLINE_MS,
   EDIT_RUNTIME_PROTOCOL_SCHEME,
+  analyzeEditRuntimeDocument,
   authoredDocumentBase,
   collectEditRuntimeScripts,
   editRuntimeProgramIdentity,
@@ -20,6 +21,32 @@ import {
   isEditRuntimeSourceSha256,
   unsupportedEditRuntimeProgramReason,
 } from "../app/domain/edit-runtime-contract.js";
+
+test("one exact Runtime document analysis owns scripts, base and program identity", () => {
+  const source = [
+    '<noscript><base href="ignored/"><script>ignored()</script></noscript>',
+    '<base href="assets/">',
+    '<script defer src="chart.js"></script>',
+    '<script type="application/json">{"kind":"data"}</script>',
+  ].join("\n");
+  const analysis = analyzeEditRuntimeDocument(source);
+
+  assert.equal(analysis.source, source);
+  assert.deepEqual(analysis.documentBase, {
+    href: "assets/",
+    openingTag: '<base href="assets/">',
+  });
+  assert.deepEqual(
+    analysis.executableScripts.map((script) => script.src),
+    ["chart.js"],
+  );
+  assert.equal(analysis.programIdentity, editRuntimeProgramIdentity(source));
+  assert.deepEqual(authoredDocumentBase(source), analysis.documentBase);
+  assert.deepEqual(
+    collectEditRuntimeScripts(source).executableScripts,
+    analysis.executableScripts,
+  );
+});
 
 test("direct Edit runtime extracts ordered deterministic classic scripts", () => {
   const contract = collectEditRuntimeScripts([

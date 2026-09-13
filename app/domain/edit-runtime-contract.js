@@ -134,55 +134,16 @@ function scriptPolicy(attributes) {
 }
 
 /**
- * Returns the first authored, live-document <base href> using HTML parser tree
- * order. A base without href does not win, and inert template contents never
- * participate in the document base URL.
+ * Parses one exact HTML revision once and derives every authored-program fact
+ * consumed by the Edit Runtime. Template descendants and scripting-enabled
+ * noscript text are deliberately excluded from the live document tree.
  */
-export function authoredDocumentBase(html) {
-  const source = String(html || "");
-  let document;
-  try {
-    document = parseHtmlDocument(source, { sourceCodeLocationInfo: true });
-  } catch {
-    return null;
-  }
-  let result = null;
-  const visit = (node) => {
-    if (result) return;
-    if (
-      node?.namespaceURI === HTML_NAMESPACE
-      && String(node?.tagName || "").toLowerCase() === "base"
-    ) {
-      const hrefAttribute = (node.attrs || []).find((attribute) => (
-        String(attribute.name || "").toLowerCase() === "href"
-      ));
-      const startTag = node.sourceCodeLocation?.startTag;
-      if (hrefAttribute && startTag) {
-        result = Object.freeze({
-          href: String(hrefAttribute.value || ""),
-          openingTag: source.slice(startTag.startOffset, startTag.endOffset),
-        });
-        return;
-      }
-    }
-    // parse5 stores template descendants in node.content. Deliberately visit
-    // only live childNodes: inert template contents cannot set document.baseURI.
-    for (const child of node?.childNodes || []) visit(child);
-  };
-  visit(document);
-  return result;
-}
-
-/**
- * Collects authored Script elements from the live parsed document tree. Exact
- * source locations preserve author bytes while naturally excluding comments,
- * raw-text element content and inert template.content from execution identity.
- */
-export function collectEditRuntimeScripts(html) {
+export function analyzeEditRuntimeDocument(html) {
   const source = String(html ?? "");
   const scripts = [];
   let unsupportedReason = null;
   let activeIndex = 0;
+  let documentBase = null;
   let document;
   try {
     document = parseHtmlDocument(source, {
@@ -191,12 +152,31 @@ export function collectEditRuntimeScripts(html) {
     });
   } catch {
     return Object.freeze({
+      source,
       scripts: frozenArray(scripts),
       executableScripts: frozenArray([]),
       unsupportedReason: "invalid-html",
+      documentBase: null,
+      programIdentity: null,
     });
   }
   const visit = (node) => {
+    if (
+      !documentBase
+      && node?.namespaceURI === HTML_NAMESPACE
+      && String(node?.tagName || "").toLowerCase() === "base"
+    ) {
+      const hrefAttribute = (node.attrs || []).find((attribute) => (
+        String(attribute.name || "").toLowerCase() === "href"
+      ));
+      const startTag = node.sourceCodeLocation?.startTag;
+      if (hrefAttribute && startTag) {
+        documentBase = Object.freeze({
+          href: String(hrefAttribute.value || ""),
+          openingTag: source.slice(startTag.startOffset, startTag.endOffset),
+        });
+      }
+    }
     if (
       String(node?.tagName || "").toLowerCase() === "script"
       && node.sourceCodeLocation?.startTag
@@ -238,10 +218,49 @@ export function collectEditRuntimeScripts(html) {
     for (const child of node?.childNodes || []) visit(child);
   };
   visit(document);
+  const frozenScripts = frozenArray(scripts);
+  const executableScripts = frozenArray(
+    frozenScripts.filter((script) => script.executable),
+  );
+  const programIdentity = unsupportedReason || executableScripts.length < 1
+    ? null
+    : JSON.stringify({
+        documentBase: documentBase?.openingTag || null,
+        scripts: executableScripts.map((script) => ({
+          openingTag: script.openingTag,
+          inline: script.inline,
+        })),
+      });
   return Object.freeze({
-    scripts: frozenArray(scripts),
-    executableScripts: frozenArray(scripts.filter((script) => script.executable)),
+    source,
+    scripts: frozenScripts,
+    executableScripts,
     unsupportedReason,
+    documentBase,
+    programIdentity,
+  });
+}
+
+/**
+ * Returns the first authored, live-document <base href> using HTML parser tree
+ * order. A base without href does not win, and inert template contents never
+ * participate in the document base URL.
+ */
+export function authoredDocumentBase(html) {
+  return analyzeEditRuntimeDocument(html).documentBase;
+}
+
+/**
+ * Collects authored Script elements from the live parsed document tree. Exact
+ * source locations preserve author bytes while naturally excluding comments,
+ * raw-text element content and inert template.content from execution identity.
+ */
+export function collectEditRuntimeScripts(html) {
+  const analysis = analyzeEditRuntimeDocument(html);
+  return Object.freeze({
+    scripts: analysis.scripts,
+    executableScripts: analysis.executableScripts,
+    unsupportedReason: analysis.unsupportedReason,
   });
 }
 
@@ -252,15 +271,7 @@ export function collectEditRuntimeScripts(html) {
  * new Canvas generation and a new Main-authorized resource closure.
  */
 export function editRuntimeProgramIdentity(html) {
-  const contract = collectEditRuntimeScripts(html);
-  if (contract.unsupportedReason || contract.executableScripts.length < 1) return null;
-  return JSON.stringify({
-    documentBase: authoredDocumentBase(html)?.openingTag || null,
-    scripts: contract.executableScripts.map((script) => ({
-      openingTag: script.openingTag,
-      inline: script.inline,
-    })),
-  });
+  return analyzeEditRuntimeDocument(html).programIdentity;
 }
 
 function containsImportInAst(root) {

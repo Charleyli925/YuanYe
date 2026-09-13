@@ -65,8 +65,8 @@
         "build-web"
       ]
     },
-    "real-html": {
-      "description": "Run the discovery-based real-HTML island byte/geometry oracle and the opt-in all-host operation census.",
+    "dom-editing-compatibility": {
+      "description": "Run the synthetic DOM editing compatibility scan with byte and geometry oracles.",
       "prerequisites": [
         "build-web"
       ]
@@ -269,7 +269,7 @@
         "browser-editing-smoke",
         "browser-comments-smoke",
         "browser-review-smoke",
-        "real-html",
+        "dom-editing-compatibility",
         "electron-smoke",
         "electron-editing-smoke",
         "electron-project-lifecycle-smoke",
@@ -301,7 +301,7 @@
         "browser-editing-smoke",
         "browser-comments-smoke",
         "browser-review-smoke",
-        "real-html",
+        "dom-editing-compatibility",
         "electron-smoke",
         "electron-editing-smoke",
         "electron-project-lifecycle-smoke",
@@ -336,7 +336,7 @@
         "browser-full",
         "electron-full",
         "ai-closed-loop",
-        "real-html"
+        "dom-editing-compatibility"
       ]
     },
     "developer-package": {
@@ -361,7 +361,7 @@
         "browser-full",
         "electron-full",
         "ai-closed-loop",
-        "real-html",
+        "dom-editing-compatibility",
         "package-build",
         "packaged-runtime",
         "packaged-verify",
@@ -2392,13 +2392,35 @@
       ]
     },
     {
-      "id": "real-html-e2e",
+      "id": "real-html-test-oracles",
+      "patterns": [
+        "^tests/e2e/electron/local-html-corpus\\.mjs$",
+        "^tests/e2e/electron/helpers/clipboard-snapshot\\.mjs$",
+        "^tests/e2e/electron/real-html/.*\\.mjs$",
+        "^tests/helpers/source-byte-region-oracle\\.mjs$",
+        "^tests/(?:clipboard-snapshot|real-html-extended-format-evidence|real-html-result-model|real-html-source-scope|real-html-stage-contracts|source-byte-region-oracle|workspace-provenance)\\.test\\.mjs$"
+      ],
+      "suites": [
+        "browser-editing-smoke"
+      ],
+      "nodeTests": [
+        "tests/clipboard-snapshot.test.mjs",
+        "tests/real-html-extended-format-evidence.test.mjs",
+        "tests/real-html-result-model.test.mjs",
+        "tests/real-html-source-scope.test.mjs",
+        "tests/real-html-stage-contracts.test.mjs",
+        "tests/source-byte-region-oracle.test.mjs",
+        "tests/workspace-provenance.test.mjs"
+      ]
+    },
+    {
+      "id": "dom-editing-compatibility-e2e",
       "patterns": [
         "^tests/e2e/browser/real-complex-html\\.gate\\.mjs$",
         "^tests/e2e/browser/playwright\\.real-html\\.config\\.mjs$"
       ],
       "suites": [
-        "real-html"
+        "dom-editing-compatibility"
       ],
       "nodeTests": []
     },
@@ -2450,7 +2472,7 @@
       ],
       "suites": [
         "browser-editing-smoke",
-        "real-html"
+        "dom-editing-compatibility"
       ],
       "nodeTests": []
     },
@@ -2465,7 +2487,7 @@
     {
       "id": "electron-e2e",
       "patterns": [
-        "^tests/e2e/electron/(?!ai-|packaged-(?:runtime|startup)-smoke\\.spec|playwright\\.packaged(?:-startup)?\\.config).*\\.mjs$"
+        "^tests/e2e/electron/(?!ai-|packaged-(?:runtime|startup)-smoke\\.spec|playwright\\.packaged(?:-startup)?\\.config|real-html/).*\\.mjs$"
       ],
       "suites": [
         "electron-editing-smoke"

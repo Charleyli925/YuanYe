@@ -91,7 +91,11 @@ for an accepted edit: it lowers the canvas command to a semantic operation,
 applies the kernel, and publishes that complete HTML/Hash plus the kernel's
 SourcePatch target mappings. SourcePatch remains the internal materializer
 inside the kernel; Canvas does not apply a second independent plan or compare
-two HTML results before publishing. Comment and selection tracking pass
+two HTML results before publishing. Once the host accepts those bytes, a later
+native-session rebase or projection failure is recovery work and cannot turn
+the result back into a rejected source command. Working-source acceptance,
+visible rendered identity and persistence receipt remain three separate facts.
+Comment and selection tracking pass
 `trackedTargetRefs` into that same kernel apply. Official `resolveTargetRef()`
 uses only a managed unique `elementId`; missing or invalid IDs are orphaned.
 Selector, fingerprint, offset and text-affix scoring are not an official result
@@ -108,7 +112,13 @@ those identities. Coordinates, visibility and geometric overlap are not part of
 that cache and have no remaining Canvas consumers, so they are not stored or
 refreshed. Comment-target geometry is still measured from the current layout on
 each overlay tick. Unused insertion-point React state is not a second layout
-owner. Geometry or outline failure still must not refuse edit entry.
+owner. Copy availability similarly keeps one detached canonical parse per exact
+immutable `SourceIndex`, but revalidates the live target and private Runtime
+authority when the command runs; adjacent Text nodes compare as one text run.
+Geometry or outline failure still must not refuse edit entry. One exact source
+revision also produces Script descriptors, effective authored base and Runtime
+program identity from one parse5 analysis inside each renderer/application
+consumer.
 
 **Transitional.** Heuristic helpers may still exist in `target-resolver.js`,
 but the official entry does not call them and does not record fallback-only
@@ -122,7 +132,9 @@ restores the open-document history tuple and is not a new `fullPatchApply`. Live
 bytes until they are collected; that is not a global source-index cache.
 
 **Target, not done.** `Verified*Context` objects still live only inside one
-operation and are not a reusable source-index cache.
+operation and are not a reusable source-index cache. The later iframe-preparation
+transforms still need to consume the same Script descriptors end to end instead
+of rescanning HTML with different parser/regular-expression semantics.
 
 Living ADR status is in `docs/decisions/README.md`. Read this map and the
 Living rows for ADR 0062, 0064 and 0065 for today's contract. Historical

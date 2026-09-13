@@ -14,6 +14,18 @@
       "oracle": "authored host + Selection + source patch",
       "stage": "draft-canary"
     },
+    "tests/e2e/browser/native-dom-runtime-candidate-observer.spec.mjs": {
+      "riskId": "runtime-document-identity",
+      "primaryOwner": "runtime-continuity",
+      "oracle": "canonical Candidate ID transition + independent iframe generation",
+      "stage": "draft-canary"
+    },
+    "tests/e2e/browser/native-dom-real-html-capability-driver.spec.mjs": {
+      "riskId": "real-html-capability-harness",
+      "primaryOwner": "real-html-test-oracles",
+      "oracle": "frozen Stable ID identity + live capability + controller-owned Runtime diagnostics",
+      "stage": "draft-canary"
+    },
     "tests/e2e/browser/native-dom-comment-stress.spec.mjs": {
       "riskId": "comment-target-layout",
       "primaryOwner": "comment-rail-layout",

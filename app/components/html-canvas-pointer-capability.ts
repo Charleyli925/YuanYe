@@ -55,6 +55,26 @@ export type {
   ElementCopyAvailability,
 } from "./html-canvas-pointer-proof.js";
 
+export type ElementCopyAvailabilityReason =
+  | "available"
+  | "runtime-generated-target"
+  | "target-missing"
+  | "trusted-inspection-unavailable"
+  | "target-disconnected"
+  | "source-index-missing"
+  | "runtime-source-proof-pending"
+  | "source-mutation-authority-missing"
+  | "canonical-source-unavailable"
+  | "canonical-target-unavailable"
+  | "runtime-subtree-diverged"
+  | "transition-busy";
+
+export type ElementCopyAssessment = Readonly<{
+  availability: ElementCopyAvailability;
+  reason: ElementCopyAvailabilityReason;
+  diagnostic?: string;
+}>;
+
 const OPAQUE_OR_PROGRAM_COPY_TAGS = new Set([
   "canvas",
   "embed",
@@ -150,6 +170,66 @@ function captureTrustedDomInspection(): TrustedDomInspection | null {
 // DOM getters or selector methods that the authored realm can replace.
 const TRUSTED_DOM_INSPECTION = captureTrustedDomInspection();
 
+type CanonicalCopySource = Readonly<{
+  source: string;
+  sourceSha256: string;
+  rootsByPagerootId: ReadonlyMap<string, HTMLElement | null>;
+}>;
+
+// Exact SourceIndex objects are immutable revision snapshots. Cache only their
+// detached canonical side; live Runtime objects and the final availability
+// verdict are always checked again at the command boundary.
+const CANONICAL_COPY_SOURCE_BY_INDEX = new WeakMap<
+  SourceIndexValue,
+  CanonicalCopySource | null
+>();
+
+function canonicalCopySource(
+  sourceIndex: SourceIndexValue,
+): CanonicalCopySource | null {
+  if (CANONICAL_COPY_SOURCE_BY_INDEX.has(sourceIndex)) {
+    const cached = CANONICAL_COPY_SOURCE_BY_INDEX.get(sourceIndex) ?? null;
+    if (
+      cached
+      && (
+        cached.source !== sourceIndex.source
+        || cached.sourceSha256 !== sourceIndex.sourceSha256
+      )
+    ) return null;
+    return cached;
+  }
+  const inspection = TRUSTED_DOM_INSPECTION;
+  if (!inspection) return null;
+  try {
+    const canonicalDocument = inspection.parse(sourceIndex.source);
+    const rootsByPagerootId = new Map<string, HTMLElement | null>();
+    for (const candidate of inspection.query(
+      canonicalDocument,
+      `[${PAGEROOT_ELEMENT_ID_ATTRIBUTE}]`,
+    )) {
+      const pagerootId = inspection.attributeValue(
+        candidate,
+        PAGEROOT_ELEMENT_ID_ATTRIBUTE,
+      );
+      if (!pagerootId || !isValidPagerootElementId(pagerootId)) continue;
+      rootsByPagerootId.set(
+        pagerootId,
+        rootsByPagerootId.has(pagerootId) ? null : candidate as HTMLElement,
+      );
+    }
+    const result = Object.freeze({
+      source: sourceIndex.source,
+      sourceSha256: sourceIndex.sourceSha256,
+      rootsByPagerootId,
+    });
+    CANONICAL_COPY_SOURCE_BY_INDEX.set(sourceIndex, result);
+    return result;
+  } catch {
+    CANONICAL_COPY_SOURCE_BY_INDEX.set(sourceIndex, null);
+    return null;
+  }
+}
+
 function isOpaqueOrProgramCopyElement(localName: string): boolean {
   return OPAQUE_OR_PROGRAM_COPY_TAGS.has(localName) || localName.includes("-");
 }
@@ -193,16 +273,33 @@ function attributesMatch(
   liveElement: Element,
   canonicalElement: Element,
 ): boolean {
+  return attributeMismatchDiagnostic(
+    inspection,
+    liveElement,
+    canonicalElement,
+  ) === null;
+}
+
+function attributeMismatchDiagnostic(
+  inspection: TrustedDomInspection,
+  liveElement: Element,
+  canonicalElement: Element,
+): string | null {
   const canonical = normalizedAttributes(inspection, canonicalElement);
   const live = normalizedAttributes(inspection, liveElement);
   let authoredCount = 0;
   for (const [name, value] of live) {
     const sourceAttribute = canonical.find(([candidate]) => candidate === name);
     if (isProjectionOnlyAttribute(name, Boolean(sourceAttribute))) continue;
+    // CSSStyleDeclaration keeps an empty style attribute after some reversible
+    // browser-side probes. With no declaration it contributes no copied source
+    // content; every non-empty runtime style still fails the subtree proof.
+    if (name === "style" && value === "" && !sourceAttribute) continue;
     authoredCount += 1;
-    if (!sourceAttribute || sourceAttribute[1] !== value) return false;
+    if (!sourceAttribute) return `attribute-extra:${name}`;
+    if (sourceAttribute[1] !== value) return `attribute-value:${name}`;
   }
-  return authoredCount === canonical.length;
+  return authoredCount === canonical.length ? null : "attribute-missing";
 }
 
 function comparableChild(
@@ -223,76 +320,126 @@ function comparableChild(
   return candidate;
 }
 
+function adjacentTextRun(
+  inspection: TrustedDomInspection,
+  node: ChildNode | null,
+): Readonly<{ value: string; next: ChildNode | null }> | null {
+  if (!node || inspection.nodeType(node) !== Node.TEXT_NODE) return null;
+  let value = "";
+  let candidate: ChildNode | null = node;
+  while (candidate && inspection.nodeType(candidate) === Node.TEXT_NODE) {
+    value += inspection.nodeValue(candidate) ?? "";
+    candidate = inspection.next(candidate);
+  }
+  return Object.freeze({
+    value,
+    next: comparableChild(inspection, candidate),
+  });
+}
+
 function runtimeNodeMatchesSource(
   liveNode: Node,
   canonicalNode: Node,
   isProvenRuntimeSourceElement: ((element: HTMLElement) => boolean) | null,
   hasRuntimeShadowRoot: ((element: HTMLElement) => boolean) | null,
+  mismatch: { diagnostic: string | null } | null = null,
+  path = "root",
 ): boolean {
   const inspection = TRUSTED_DOM_INSPECTION;
-  if (!inspection) return false;
+  const fail = (diagnostic: string) => {
+    if (mismatch && !mismatch.diagnostic) mismatch.diagnostic = `${path}:${diagnostic}`;
+    return false;
+  };
+  if (!inspection) return fail("trusted-inspection-unavailable");
   const liveNodeType = inspection.nodeType(liveNode);
-  if (liveNodeType !== inspection.nodeType(canonicalNode)) return false;
+  if (liveNodeType !== inspection.nodeType(canonicalNode)) return fail("node-type");
   if (liveNodeType !== Node.ELEMENT_NODE) {
-    return inspection.nodeValue(liveNode) === inspection.nodeValue(canonicalNode);
+    return inspection.nodeValue(liveNode) === inspection.nodeValue(canonicalNode)
+      || fail("node-value");
   }
   const liveElement = liveNode as HTMLElement;
   const canonicalElement = canonicalNode as HTMLElement;
   const liveLocalName = inspection.localName(liveElement);
-  if (
-    liveLocalName !== inspection.localName(canonicalElement)
-    || inspection.namespace(liveElement) !== inspection.namespace(canonicalElement)
-    || inspection.shadowRoot(liveElement)
-    || hasRuntimeShadowRoot?.(liveElement)
-    || isOpaqueOrProgramCopyElement(liveLocalName)
-    || (isProvenRuntimeSourceElement && !isProvenRuntimeSourceElement(liveElement))
-  ) return false;
-  if (!attributesMatch(inspection, liveElement, canonicalElement)) return false;
+  if (liveLocalName !== inspection.localName(canonicalElement)) return fail("tag-name");
+  if (inspection.namespace(liveElement) !== inspection.namespace(canonicalElement)) {
+    return fail("namespace");
+  }
+  if (inspection.shadowRoot(liveElement) || hasRuntimeShadowRoot?.(liveElement)) {
+    return fail("shadow-root");
+  }
+  if (isOpaqueOrProgramCopyElement(liveLocalName)) return fail("opaque-or-program");
+  if (isProvenRuntimeSourceElement && !isProvenRuntimeSourceElement(liveElement)) {
+    return fail("runtime-source-proof");
+  }
+  if (!attributesMatch(inspection, liveElement, canonicalElement)) {
+    return fail(attributeMismatchDiagnostic(inspection, liveElement, canonicalElement) ?? "attributes");
+  }
   let liveChild = comparableChild(inspection, inspection.child(liveElement));
   let canonicalChild = comparableChild(inspection, inspection.child(canonicalElement));
+  let childIndex = 0;
   while (liveChild && canonicalChild) {
+    const liveText = adjacentTextRun(inspection, liveChild);
+    const canonicalText = adjacentTextRun(inspection, canonicalChild);
+    if (liveText || canonicalText) {
+      if (!liveText || !canonicalText || liveText.value !== canonicalText.value) {
+        return fail("adjacent-text-run");
+      }
+      liveChild = liveText.next;
+      canonicalChild = canonicalText.next;
+      childIndex += 1;
+      continue;
+    }
     if (!runtimeNodeMatchesSource(
       liveChild,
       canonicalChild,
       isProvenRuntimeSourceElement,
       hasRuntimeShadowRoot,
+      mismatch,
+      `${path}/${liveLocalName}[${childIndex}]`,
     )) return false;
     liveChild = comparableChild(inspection, inspection.next(liveChild));
     canonicalChild = comparableChild(inspection, inspection.next(canonicalChild));
+    childIndex += 1;
   }
-  return liveChild === null && canonicalChild === null;
+  return (liveChild === null && canonicalChild === null) || fail("child-count");
 }
 
-function runtimeSubtreeMatchesSource(
+type RuntimeSubtreeAssessment =
+  | "match"
+  | "canonical-source-unavailable"
+  | "canonical-target-unavailable"
+  | `runtime-subtree-diverged:${string}`;
+
+function assessRuntimeSubtreeAgainstSource(
   root: HTMLElement,
   sourceIndex: SourceIndexValue,
   isProvenRuntimeSourceElement: ((element: HTMLElement) => boolean) | null,
   hasRuntimeShadowRoot: ((element: HTMLElement) => boolean) | null,
-): boolean {
+): RuntimeSubtreeAssessment {
   const inspection = TRUSTED_DOM_INSPECTION;
-  if (!inspection) return false;
+  if (!inspection) return "canonical-source-unavailable";
   try {
     const pagerootId = inspection.attributeValue(root, PAGEROOT_ELEMENT_ID_ATTRIBUTE);
-    if (!pagerootId) return false;
-    const canonicalDocument = inspection.parse(sourceIndex.source);
-    const selector = `[${PAGEROOT_ELEMENT_ID_ATTRIBUTE}="${pagerootId}"]`;
-    const matches = inspection.query(canonicalDocument, selector);
-    const canonicalRoot = matches.length === 1 ? matches[0] as HTMLElement : null;
-    return Boolean(
-      canonicalRoot
-      && runtimeNodeMatchesSource(
-        root,
-        canonicalRoot,
-        isProvenRuntimeSourceElement,
-        hasRuntimeShadowRoot,
-      ),
+    if (!pagerootId) return "canonical-target-unavailable";
+    const canonicalSource = canonicalCopySource(sourceIndex);
+    if (!canonicalSource) return "canonical-source-unavailable";
+    const canonicalRoot = canonicalSource?.rootsByPagerootId.get(pagerootId) ?? null;
+    if (!canonicalRoot) return "canonical-target-unavailable";
+    const mismatch = { diagnostic: null as string | null };
+    const matches = runtimeNodeMatchesSource(
+      root,
+      canonicalRoot,
+      isProvenRuntimeSourceElement,
+      hasRuntimeShadowRoot,
+      mismatch,
     );
+    return matches ? "match" : `runtime-subtree-diverged:${mismatch.diagnostic ?? "unknown"}`;
   } catch {
-    return false;
+    return "runtime-subtree-diverged:exception";
   }
 }
 
-export function elementCopyAvailabilityForTarget({
+export function elementCopyAssessmentForTarget({
   element,
   sourceIndex,
   runtimeGenerated = false,
@@ -308,36 +455,65 @@ export function elementCopyAvailabilityForTarget({
   transientBusy?: boolean;
   isProvenRuntimeSourceElement?: ((element: HTMLElement) => boolean) | null;
   hasRuntimeShadowRoot?: ((element: HTMLElement) => boolean) | null;
-}): ElementCopyAvailability {
+}): ElementCopyAssessment {
   const inspection = TRUSTED_DOM_INSPECTION;
-  if (
-    runtimeGenerated
-    || !element
-    || !inspection
-    || !inspection.connected(element)
-    || !sourceIndex
-  ) {
-    return "unsupported";
+  if (runtimeGenerated) {
+    return Object.freeze({ availability: "unsupported", reason: "runtime-generated-target" });
+  }
+  if (!element) return Object.freeze({ availability: "unsupported", reason: "target-missing" });
+  if (!inspection) {
+    return Object.freeze({
+      availability: "unsupported",
+      reason: "trusted-inspection-unavailable",
+    });
+  }
+  if (!inspection.connected(element)) {
+    return Object.freeze({ availability: "unsupported", reason: "target-disconnected" });
+  }
+  if (!sourceIndex) {
+    return Object.freeze({ availability: "unsupported", reason: "source-index-missing" });
   }
   if (runtimeExpected && !isProvenRuntimeSourceElement) {
-    return elementCopyAvailabilityFromProof({ transientBusy: true });
+    return Object.freeze({ availability: "busy", reason: "runtime-source-proof-pending" });
   }
   const sourceMutationAuthority = runtimeExpected
     ? Boolean(isProvenRuntimeSourceElement?.(element))
     : Boolean(inspection.attributeValue(element, PAGEROOT_ELEMENT_ID_ATTRIBUTE));
-  const containsRuntimeGeneratedContent = sourceMutationAuthority
-    ? !runtimeSubtreeMatchesSource(
-        element,
-        sourceIndex,
-        runtimeExpected ? isProvenRuntimeSourceElement : null,
-        runtimeExpected ? hasRuntimeShadowRoot : null,
-      )
-    : false;
-  return elementCopyAvailabilityFromProof({
-    sourceMutationAuthority,
-    containsRuntimeGeneratedContent,
-    transientBusy,
-  });
+  if (!sourceMutationAuthority) {
+    return Object.freeze({
+      availability: "unsupported",
+      reason: "source-mutation-authority-missing",
+    });
+  }
+  const subtreeAssessment = assessRuntimeSubtreeAgainstSource(
+    element,
+    sourceIndex,
+    runtimeExpected ? isProvenRuntimeSourceElement : null,
+    runtimeExpected ? hasRuntimeShadowRoot : null,
+  );
+  if (subtreeAssessment !== "match") {
+    const runtimeDivergence = subtreeAssessment.startsWith("runtime-subtree-diverged:");
+    const reason: ElementCopyAvailabilityReason = runtimeDivergence
+      ? "runtime-subtree-diverged"
+      : subtreeAssessment as "canonical-source-unavailable" | "canonical-target-unavailable";
+    return Object.freeze({
+      availability: "unsupported",
+      reason,
+      diagnostic: runtimeDivergence
+        ? subtreeAssessment.slice("runtime-subtree-diverged:".length)
+        : undefined,
+    });
+  }
+  if (transientBusy) {
+    return Object.freeze({ availability: "busy", reason: "transition-busy" });
+  }
+  return Object.freeze({ availability: "available", reason: "available" });
+}
+
+export function elementCopyAvailabilityForTarget(
+  input: Parameters<typeof elementCopyAssessmentForTarget>[0],
+): ElementCopyAvailability {
+  return elementCopyAssessmentForTarget(input).availability;
 }
 
 export function canStartNativeTextEditAtTarget({

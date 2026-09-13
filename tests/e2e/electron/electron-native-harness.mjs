@@ -363,22 +363,288 @@ export async function expectCheckpointPersisted(page, afterRevision) {
   return Number(await indicator.getAttribute("data-persisted-revision"));
 }
 
-export async function waitForRuntimeHandoffSettled(page) {
-  const editor = page
-    .getByTestId("html-canvas-editor")
-    .filter({ visible: true })
-    .first();
-  await expect.poll(async () => ({
-    handoffState: await editor.getAttribute("data-runtime-handoff"),
-    activeFrameCount: await editor.locator("iframe:not([data-frame-role])").count(),
-    previousFrameCount: await editor.locator(
-      'iframe[data-frame-role="runtime-previous"]',
-    ).count(),
-  }), { timeout: 30_000 }).toMatchObject({
-    handoffState: null,
-    activeFrameCount: 1,
+function emptyRuntimeHandoffSnapshot(readError = null) {
+  return {
+    editorPresent: false,
+    handoff: null,
+    runtimeRefreshPending: false,
+    runtimeRefreshPendingSourceRevision: null,
+    candidateId: null,
+    candidatePhase: null,
+    candidateSourceRevision: null,
+    candidateGeneration: null,
+    candidateFrameCount: 0,
+    activeFrameCount: 0,
+    activeFrameRole: null,
+    activeFrameDataRole: null,
+    activeFrameGeneration: null,
+    activeFrameDocumentToken: null,
+    activeFrameConnected: false,
+    activeFrameDocumentReady: false,
     previousFrameCount: 0,
-  });
+    renderVerified: false,
+    workingProjectionSha256: null,
+    renderedProjectionSha256: null,
+    runtimeSurfacePhase: null,
+    runtimeSurfaceOutcome: null,
+    activeIdentityStable: false,
+    activeStabilitySampleCount: 0,
+    ...(readError ? { readError } : {}),
+  };
+}
+
+function normalizeRuntimeHandoffWaitOptions(options = {}) {
+  if (options === null || typeof options !== "object" || Array.isArray(options)) {
+    throw new TypeError("Runtime handoff wait options must be an object.");
+  }
+  const timeout = options.timeout ?? 30_000;
+  if (!Number.isFinite(timeout) || timeout <= 0) {
+    throw new TypeError("Runtime handoff wait timeout must be a positive number.");
+  }
+  const expectedSourceRevision = options.expectedSourceRevision;
+  if (
+    expectedSourceRevision !== undefined
+    && (typeof expectedSourceRevision !== "string" || expectedSourceRevision.length === 0)
+  ) {
+    throw new TypeError("expectedSourceRevision must be a non-empty string when provided.");
+  }
+  const priorGeneration = options.priorGeneration;
+  if (
+    priorGeneration !== undefined
+    && (!Number.isSafeInteger(priorGeneration) || priorGeneration < 0)
+  ) {
+    throw new TypeError("priorGeneration must be a non-negative safe integer when provided.");
+  }
+  const requireGenerationAdvance = options.requireGenerationAdvance ?? false;
+  if (typeof requireGenerationAdvance !== "boolean") {
+    throw new TypeError("requireGenerationAdvance must be boolean when provided.");
+  }
+  if (requireGenerationAdvance && priorGeneration === undefined) {
+    throw new TypeError(
+      "priorGeneration is required when requireGenerationAdvance is true.",
+    );
+  }
+  return {
+    timeout,
+    expectedSourceRevision,
+    priorGeneration,
+    requireGenerationAdvance,
+  };
+}
+
+function runtimeHandoffConditions(snapshot, options) {
+  const activeGeneration = snapshot.activeFrameGeneration === null
+    ? null
+    : Number(snapshot.activeFrameGeneration);
+  const activeGenerationKnown = Number.isSafeInteger(activeGeneration)
+    && activeGeneration >= 0;
+  const generationMatches = options.priorGeneration === undefined
+    ? true
+    : activeGenerationKnown && (
+      options.requireGenerationAdvance
+        ? activeGeneration > options.priorGeneration
+        : activeGeneration === options.priorGeneration
+    );
+  const sourceRevisionMatches = options.expectedSourceRevision === undefined
+    ? true
+    : snapshot.workingProjectionSha256 === options.expectedSourceRevision
+      && snapshot.renderedProjectionSha256 === options.expectedSourceRevision;
+  const conditions = {
+    handoffCleared: snapshot.handoff === null,
+    refreshSettled: snapshot.runtimeRefreshPending === false,
+    candidateIdAbsent: snapshot.candidateId === null,
+    candidateFramesAbsent: snapshot.candidateFrameCount === 0,
+    oneActiveFrame: snapshot.activeFrameCount === 1,
+    activeFrameRole: snapshot.activeFrameRole === "active"
+      && snapshot.activeFrameDataRole === null,
+    previousFramesAbsent: snapshot.previousFrameCount === 0,
+    renderVerified: snapshot.renderVerified === true,
+    activeIdentityStable: snapshot.activeIdentityStable === true,
+    sourceRevisionMatches,
+    generationMatches,
+  };
+  return {
+    ...conditions,
+    settled: Object.values(conditions).every(Boolean),
+  };
+}
+
+function sanitizedRuntimeHandoffSnapshot(snapshot) {
+  return {
+    ...snapshot,
+    // The token is an opaque per-document identity. Its presence is useful in
+    // timeout diagnostics, while the token value itself is unnecessary and
+    // should not be copied into test output.
+    activeFrameDocumentToken: snapshot.activeFrameDocumentToken ? "<present>" : null,
+  };
+}
+
+export async function readRuntimeHandoffSnapshot(page) {
+  try {
+    return await page.evaluate(async ({ stabilityFrames }) => {
+      const tokenKey = "__PAGEROOT_NATIVE_QA_DOCUMENT_TOKEN__";
+      const findVisibleEditor = () => Array.from(
+        document.querySelectorAll('[data-testid="html-canvas-editor"]'),
+      ).find((candidate) => {
+        const style = getComputedStyle(candidate);
+        return style.display !== "none"
+          && style.visibility !== "hidden"
+          && candidate.getClientRects().length > 0;
+      }) || document.querySelector('[data-testid="html-canvas-editor"]');
+
+      const read = () => {
+        const visibleEditor = findVisibleEditor();
+        const candidateFrames = Array.from(visibleEditor?.querySelectorAll(
+          'iframe[data-frame-role="runtime-candidate"]',
+        ) || []);
+        const activeFrames = Array.from(visibleEditor?.querySelectorAll(
+          'iframe[data-runtime-slot-role="active"]:not([data-frame-role])',
+        ) || []);
+        const activeFrame = activeFrames.length === 1 ? activeFrames[0] : null;
+        const activeDocument = activeFrame?.contentDocument || null;
+        let activeFrameDocumentToken = null;
+        try {
+          const activeWindow = activeFrame?.contentWindow;
+          activeFrameDocumentToken = typeof activeWindow?.[tokenKey] === "string"
+            ? activeWindow[tokenKey]
+            : null;
+        } catch {
+          activeFrameDocumentToken = null;
+        }
+        const surface = visibleEditor?.closest(".canvas-edit-surface");
+        return {
+          editorPresent: Boolean(visibleEditor),
+          handoff: visibleEditor?.getAttribute("data-runtime-handoff") || null,
+          runtimeRefreshPending: Boolean(visibleEditor?.hasAttribute(
+            "data-runtime-refresh-pending",
+          )),
+          runtimeRefreshPendingSourceRevision: visibleEditor?.getAttribute(
+            "data-runtime-refresh-pending-source-revision",
+          ) || null,
+          candidateId: visibleEditor?.getAttribute("data-runtime-candidate-id") || null,
+          candidatePhase: visibleEditor?.getAttribute("data-runtime-candidate-phase") || null,
+          candidateSourceRevision: visibleEditor?.getAttribute(
+            "data-runtime-candidate-source-revision",
+          ) || null,
+          candidateGeneration: visibleEditor?.getAttribute(
+            "data-runtime-candidate-generation",
+          ) || null,
+          candidateFrameCount: candidateFrames.length,
+          activeFrameCount: activeFrames.length,
+          activeFrameRole: activeFrame?.getAttribute("data-runtime-slot-role") || null,
+          activeFrameDataRole: activeFrame?.getAttribute("data-frame-role") || null,
+          activeFrameGeneration: activeFrame?.getAttribute("data-frame-generation") || null,
+          activeFrameDocumentToken,
+          activeFrameConnected: Boolean(activeFrame?.isConnected),
+          activeFrameDocumentReady: Boolean(activeDocument?.documentElement),
+          previousFrameCount: visibleEditor?.querySelectorAll(
+            'iframe[data-frame-role="runtime-previous"]',
+          ).length || 0,
+          renderVerified: visibleEditor?.getAttribute("data-render-verified") === "true",
+          workingProjectionSha256: visibleEditor?.getAttribute(
+            "data-working-source-sha256",
+          ) || null,
+          renderedProjectionSha256: visibleEditor?.getAttribute(
+            "data-rendered-projection-sha256",
+          ) || null,
+          runtimeSurfacePhase: surface?.getAttribute("data-edit-runtime-phase") || null,
+          runtimeSurfaceOutcome: surface?.getAttribute("data-edit-runtime-outcome") || null,
+          __activeFrame: activeFrame,
+          __activeDocument: activeDocument,
+        };
+      };
+      const withoutFrameHandles = (snapshot) => {
+        const publicSnapshot = { ...snapshot };
+        delete publicSnapshot.__activeFrame;
+        delete publicSnapshot.__activeDocument;
+        return publicSnapshot;
+      };
+
+      const first = read();
+      if (!first.editorPresent) {
+        return {
+          ...withoutFrameHandles(first),
+          activeIdentityStable: false,
+          activeStabilitySampleCount: 1,
+        };
+      }
+
+      const samples = [first];
+      await new Promise((resolve) => {
+        let remaining = stabilityFrames;
+        const sampleNextFrame = () => {
+          samples.push(read());
+          remaining -= 1;
+          if (remaining <= 0) {
+            resolve();
+            return;
+          }
+          window.requestAnimationFrame(sampleNextFrame);
+        };
+        window.requestAnimationFrame(sampleNextFrame);
+      });
+      const last = samples[samples.length - 1];
+      const sameIdentity = (left, right) => (
+        left.__activeFrame !== null
+        && left.__activeFrame === right.__activeFrame
+        && left.__activeDocument !== null
+        && left.__activeDocument === right.__activeDocument
+        && left.activeFrameGeneration === right.activeFrameGeneration
+        && left.activeFrameDocumentToken === right.activeFrameDocumentToken
+      );
+      const validSample = (sample) => (
+        sample.activeFrameCount === 1
+        && sample.activeFrameRole === "active"
+        && sample.activeFrameDataRole === null
+        && sample.activeFrameConnected
+        && sample.activeFrameDocumentReady
+        && sample.activeFrameGeneration !== null
+      );
+      const activeIdentityStable = samples.every(validSample)
+        && samples.slice(1).every((sample, index) => sameIdentity(samples[index], sample));
+      return {
+        ...withoutFrameHandles(last),
+        activeIdentityStable,
+        activeStabilitySampleCount: samples.length,
+      };
+    }, { stabilityFrames: 2 });
+  } catch (error) {
+    const message = String(error?.message || error).replace(/\s+/gu, " ").slice(0, 240);
+    return emptyRuntimeHandoffSnapshot(message);
+  }
+}
+
+export async function waitForRuntimeHandoffSettled(page, options = {}) {
+  const normalizedOptions = normalizeRuntimeHandoffWaitOptions(options);
+  let latestSnapshot = emptyRuntimeHandoffSnapshot();
+  let pollError = null;
+  try {
+    await expect.poll(async () => {
+      latestSnapshot = await readRuntimeHandoffSnapshot(page);
+      return runtimeHandoffConditions(latestSnapshot, normalizedOptions);
+    }, {
+      timeout: normalizedOptions.timeout,
+      intervals: [50, 100, 250, 500, 1_000],
+    }).toMatchObject({ settled: true });
+  } catch (error) {
+    pollError = error;
+    latestSnapshot = await readRuntimeHandoffSnapshot(page);
+    const conditions = runtimeHandoffConditions(latestSnapshot, normalizedOptions);
+    const details = {
+      timeoutMs: normalizedOptions.timeout,
+      conditions,
+      actual: sanitizedRuntimeHandoffSnapshot(latestSnapshot),
+    };
+    const timeoutError = new Error(
+      `Runtime handoff did not settle before timeout: ${JSON.stringify(details)}`,
+    );
+    timeoutError.name = "RuntimeHandoffSettlementTimeout";
+    timeoutError.code = "RUNTIME_HANDOFF_SETTLEMENT_TIMEOUT";
+    timeoutError.details = details;
+    timeoutError.cause = pollError;
+    throw timeoutError;
+  }
+  return latestSnapshot;
 }
 
 export async function clickEditHistoryMenu(electronApp, page, direction) {

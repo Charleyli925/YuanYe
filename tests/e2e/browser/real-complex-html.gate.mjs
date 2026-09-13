@@ -692,7 +692,7 @@ async function firstRenderedTextPosition(handle) {
   });
 }
 
-test("a real complex HTML file keeps layout and editable-island source authority", async ({ page }, testInfo) => {
+test("DOM editing compatibility scan keeps layout and editable-island source authority", async ({ page }, testInfo) => {
   const sourcePath = validatedRealHtmlPath();
   const beforeStat = statSync(sourcePath);
   const original = readFileSync(sourcePath);
@@ -706,7 +706,7 @@ test("a real complex HTML file keeps layout and editable-island source authority
   const target = await sourceNodes.nth(candidate.index).elementHandle();
   if (!target) throw new Error(`Editable candidate detached before activation: ${JSON.stringify(candidate)}`);
   await target.scrollIntoViewIfNeeded();
-  await testInfo.attach("real-html-before-edit.png", {
+  await testInfo.attach("dom-editing-compatibility-before-edit.png", {
     body: await iframe.screenshot(),
     contentType: "image/png",
   });
@@ -826,7 +826,7 @@ test("a real complex HTML file keeps layout and editable-island source authority
 const REAL_CENSUS_SHARD_COUNT = 32;
 
 for (let shardIndex = 0; shardIndex < REAL_CENSUS_SHARD_COUNT; shardIndex += 1) {
-test(`the real complex page edits every visible V2 host at start, middle and end (${shardIndex + 1}/${REAL_CENSUS_SHARD_COUNT})`, async ({ page }, testInfo) => {
+test(`DOM editing compatibility scan covers every visible V2 host (${shardIndex + 1}/${REAL_CENSUS_SHARD_COUNT})`, async ({ page }, testInfo) => {
   test.skip(
     !process.env.PAGEROOT_REAL_HTML_PATH,
     "The exhaustive census runs only when an explicit real HTML path is supplied.",
@@ -1002,7 +1002,7 @@ test(`the real complex page edits every visible V2 host at start, middle and end
 });
 }
 
-test("reported nested-list headings and wbr text preserve real authored structure", async ({
+test("DOM compatibility scan preserves nested-list headings and wbr structure", async ({
   page,
 }) => {
   test.skip(
@@ -1092,7 +1092,7 @@ test("reported nested-list headings and wbr text preserve real authored structur
   expect(afterStat.mtimeMs).toBe(beforeStat.mtimeMs);
 });
 
-test("reported real-page end boundaries round-trip with only island normalization", async ({ page }, testInfo) => {
+test("DOM compatibility scan round-trips end boundaries with only island normalization", async ({ page }, testInfo) => {
   test.skip(
     !process.env.PAGEROOT_REAL_HTML_PATH,
     "Named regressions run only when an explicit real HTML path is supplied.",

@@ -516,7 +516,7 @@ jobs:
             command: npx playwright test --config tests/e2e/browser/playwright.config.mjs --fully-parallel --workers=1 --shard=2/3
           - label: shard-3-of-3
             command: npx playwright test --config tests/e2e/browser/playwright.config.mjs --fully-parallel --workers=1 --shard=3/3
-          - label: real-html
+          - label: dom-editing-compatibility
             command: npx playwright test --config tests/e2e/browser/playwright.real-html.config.mjs
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -581,9 +581,9 @@ jobs:
           ${{ matrix.command }}
       - name: Record Playwright retry evidence
         # Runs even after a failed suite so flaky/retry counts and the first
-        # attempt's artifacts are never lost with the runner. The real-html
+        # attempt's artifacts are never lost with the runner. The DOM compatibility
         # oracle stays retry-free with no JSON reporter, so it is excluded.
-        if: always() && matrix.label != 'real-html'
+        if: always() && matrix.label != 'dom-editing-compatibility'
         timeout-minutes: 5
         run: >-
           node scripts/playwright-flaky-summary.mjs

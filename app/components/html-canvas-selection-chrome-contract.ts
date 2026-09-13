@@ -81,6 +81,8 @@ export type SelectionChromeModel = {
   isEditing: boolean;
   toolbarStyle: CSSProperties | undefined;
   selectedPagePresentationAction: PagePresentationAction | null;
+  activeFrameGeneration: number;
+  currentNativeDomGeneration: number;
   readOnly: boolean;
   selectedNativeEditAvailable: boolean;
   selectedStyle: SelectedStyle;

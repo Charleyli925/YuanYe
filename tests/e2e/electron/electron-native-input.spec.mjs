@@ -123,7 +123,150 @@ test("Electron shows continuous source text immediately without rebuilding the i
   }
 });
 
-test("Electron proves one V2 editable-island lane across complex projections", async () => {
+test("Runtime handoff settlement samples fixed slots, retires the old document and rejects a live Candidate", {
+  tag: ["@gate-smoke", "@smoke-editing"],
+}, async () => {
+  const fixture = createSourceFixture(
+    "runtime-handoff-settlement.html",
+    () => `<!doctype html>
+<html><head><title>Runtime handoff settlement</title></head><body>
+  <main data-native-case="runtime-handoff-settlement">合成 handoff 样本</main>
+</body></html>`,
+  );
+  const { electronApp, page, isolatedUserData } = await launchPageRoot({
+    activeSourcePath: fixture.sourcePath,
+  });
+  try {
+    const editor = page.getByTestId("html-canvas-editor").filter({ visible: true }).first();
+    const activeFrameElement = editor.locator(
+      'iframe[data-runtime-slot-role="active"]:not([data-frame-role])',
+    );
+    const oldFrameHandle = await activeFrameElement.elementHandle();
+    const oldFrame = await oldFrameHandle?.contentFrame();
+    const oldTarget = oldFrame?.locator('[data-native-case="runtime-handoff-settlement"]');
+    const oldTargetHandle = await oldTarget?.elementHandle();
+    expect(oldTargetHandle).toBeTruthy();
+    const settled = await waitForRuntimeHandoffSettled(page);
+    expect(settled).toMatchObject({
+      handoff: null,
+      runtimeRefreshPending: false,
+      candidateId: null,
+      candidateFrameCount: 0,
+      activeFrameCount: 1,
+      activeFrameRole: "active",
+      activeFrameDataRole: null,
+      previousFrameCount: 0,
+      renderVerified: true,
+      activeIdentityStable: true,
+      activeStabilitySampleCount: 3,
+    });
+
+    const swapped = await page.evaluate(async () => {
+      const editor = document.querySelector('[data-testid="html-canvas-editor"]');
+      const oldActive = editor?.querySelector(
+        'iframe[data-runtime-slot-role="active"]:not([data-frame-role])',
+      );
+      const newActive = editor?.querySelector('iframe[data-runtime-slot-role="inactive"]');
+      if (
+        !editor
+        || !(oldActive instanceof HTMLIFrameElement)
+        || !(newActive instanceof HTMLIFrameElement)
+      ) {
+        throw new Error("The fixed Active/inactive Runtime slots were unavailable.");
+      }
+      const nextGeneration = String(Number(oldActive.getAttribute("data-frame-generation")) + 1);
+      const loaded = new Promise((resolve) => newActive.addEventListener("load", resolve, { once: true }));
+      oldActive.setAttribute("data-runtime-slot-role", "inactive");
+      oldActive.setAttribute("data-frame-role", "runtime-inactive");
+      oldActive.setAttribute("aria-hidden", "true");
+      oldActive.srcdoc = "<!doctype html><html><body></body></html>";
+      newActive.setAttribute("data-runtime-slot-role", "active");
+      newActive.removeAttribute("data-frame-role");
+      newActive.removeAttribute("aria-hidden");
+      newActive.setAttribute("data-frame-generation", nextGeneration);
+      newActive.srcdoc = '<!doctype html><html><body><main data-native-case="replacement-document">new</main></body></html>';
+      await loaded;
+      return {
+        fixedSlotCount: editor.querySelectorAll("iframe[data-runtime-slot]").length,
+        oldSlotConnected: oldActive.isConnected,
+        activeFrameCount: editor.querySelectorAll(
+          'iframe[data-runtime-slot-role="active"]:not([data-frame-role])',
+        ).length,
+      };
+    });
+    expect(swapped).toEqual({
+      fixedSlotCount: 2,
+      oldSlotConnected: true,
+      activeFrameCount: 1,
+    });
+    await expect(editor.locator(
+      'iframe[data-runtime-slot-role="active"]:not([data-frame-role])',
+    ).contentFrame().locator('[data-native-case="replacement-document"]')).toHaveCount(1);
+    let oldTargetRetired = false;
+    try {
+      oldTargetRetired = await oldTargetHandle.evaluate((element) => !element.isConnected);
+    } catch {
+      oldTargetRetired = true;
+    }
+    expect(oldTargetRetired).toBe(true);
+    await oldTargetHandle.dispose();
+    const resettled = await waitForRuntimeHandoffSettled(page);
+    expect(resettled.activeFrameGeneration).not.toBe(settled.activeFrameGeneration);
+
+    const injected = await page.evaluate(() => {
+      const editor = document.querySelector('[data-testid="html-canvas-editor"]');
+      const inactive = editor?.querySelector('iframe[data-runtime-slot-role="inactive"]');
+      if (!editor || !(inactive instanceof HTMLIFrameElement)) {
+        throw new Error("The fixed inactive Runtime slot was unavailable.");
+      }
+      inactive.setAttribute("data-runtime-slot-role", "candidate");
+      inactive.setAttribute("data-frame-role", "runtime-candidate");
+      editor.setAttribute("data-runtime-candidate-id", "seeded-candidate");
+      return {
+        candidateFrameCount: editor.querySelectorAll(
+          'iframe[data-frame-role="runtime-candidate"]',
+        ).length,
+        activeFrameCount: editor.querySelectorAll(
+          'iframe[data-runtime-slot-role="active"]:not([data-frame-role])',
+        ).length,
+      };
+    });
+    expect(injected).toEqual({ candidateFrameCount: 1, activeFrameCount: 1 });
+
+    let timeoutError;
+    try {
+      await waitForRuntimeHandoffSettled(page, { timeout: 750 });
+    } catch (error) {
+      timeoutError = error;
+    }
+    expect(timeoutError).toMatchObject({
+      name: "RuntimeHandoffSettlementTimeout",
+      code: "RUNTIME_HANDOFF_SETTLEMENT_TIMEOUT",
+      details: {
+        conditions: {
+          candidateFramesAbsent: false,
+          oneActiveFrame: true,
+          activeIdentityStable: true,
+          settled: false,
+        },
+        actual: {
+          candidateFrameCount: 1,
+          activeFrameCount: 1,
+          activeIdentityStable: true,
+        },
+      },
+    });
+    expect(timeoutError.message).toContain('"candidateFramesAbsent":false');
+    expect(timeoutError.message).toContain('"activeFrameCount":1');
+  } finally {
+    await stopPageRoot(electronApp, isolatedUserData);
+    removeSourceFixture(fixture.sourceDirectory);
+  }
+});
+
+test("Electron fixed real-input sample covers mouse, keyboard, deletion and Enter", {
+  tag: ["@gate-smoke", "@smoke-editing"],
+}, async () => {
   const fixture = createSourceFixture("editable-island-lane.html");
   const { electronApp, page, isolatedUserData } = await launchPageRoot({
     activeSourcePath: fixture.sourcePath,
@@ -135,7 +278,14 @@ test("Electron proves one V2 editable-island lane across complex projections", a
       "collapsed-whitespace-copy",
     );
     const controlledCase = "collapsed-whitespace-copy";
-    await frame.locator(caseSelector(controlledCase)).scrollIntoViewIfNeeded();
+    const managedSourcePath = await managedWorkingCopyPath(page, fixture.sourcePath);
+    const initialDocument = await documentToken(frame);
+    const initialGeneration = await editor.locator('iframe[data-runtime-slot-role="active"]')
+      .getAttribute("data-frame-generation");
+    const selectedTarget = frame.locator(caseSelector(controlledCase));
+    await selectedTarget.scrollIntoViewIfNeeded();
+    await selectedTarget.click();
+    await expect(selectedTarget).toHaveAttribute("data-html-canvas-selected", "module");
     const beforeGeometry = await geometrySnapshot(frame, controlledCase);
     const controlledTarget = await activateNativeEdit(frame, controlledCase);
     await expect(controlledTarget).toHaveAttribute("contenteditable", "true");
@@ -149,14 +299,41 @@ test("Electron proves one V2 editable-island lane across complex projections", a
     );
     expect(await geometrySnapshot(frame, controlledCase)).toEqual(beforeGeometry);
 
-    await setTextSelection(frame, controlledCase, 0, 4);
-    await electronApp.evaluate(({ clipboard }, text) => {
-      clipboard.writeText(text);
-    }, "<b>Electron纯文字</b>");
-    await page.keyboard.press(keyShortcut("V"));
+    await page.keyboard.insertText("__REAL_BACKSPACE__X");
+    await page.keyboard.press("Backspace");
     await expect.poll(() => controlledTarget.textContent())
-      .toContain("<b>Electron纯文字</b>");
-    expect(await controlledTarget.locator("b").count()).toBe(0);
+      .toContain("__REAL_BACKSPACE__");
+    await expect.poll(() => controlledTarget.textContent())
+      .not.toContain("__REAL_BACKSPACE__X");
+
+    await page.keyboard.insertText("__REAL_DELETE__X");
+    await page.keyboard.press("ArrowLeft");
+    await page.keyboard.press("Delete");
+    await expect.poll(() => controlledTarget.textContent())
+      .toContain("__REAL_DELETE__");
+    await expect.poll(() => controlledTarget.textContent())
+      .not.toContain("__REAL_DELETE__X");
+
+    await page.keyboard.insertText("__REAL_ENTER_BEFORE__");
+    const breakIdsBefore = await controlledTarget.locator("br[data-pageroot-id]")
+      .evaluateAll((elements) => elements.map(
+        (element) => element.getAttribute("data-pageroot-id"),
+      ).filter(Boolean));
+    await page.keyboard.press("Enter");
+    await page.keyboard.insertText("__REAL_ENTER_LINE__");
+    await expect.poll(() => controlledTarget.textContent())
+      .toContain("__REAL_ENTER_LINE__");
+    await expect.poll(async () => (
+      (await controlledTarget.locator("br[data-pageroot-id]").evaluateAll((elements) => (
+        elements.map((element) => element.getAttribute("data-pageroot-id")).filter(Boolean)
+      ))).filter((id) => !breakIdsBefore.includes(id)).length
+    )).toBe(1);
+    await expect.poll(() => readPublishedWorkingCopy(managedSourcePath, "utf8"))
+      .toMatch(/__REAL_ENTER_BEFORE__[\s\S]*<br\s+[^>]*data-pageroot-id="pr1_[0-9a-f]{32}"[^>]*>[\s\S]*__REAL_ENTER_LINE__/u);
+    expect(await documentToken(frame)).toBe(initialDocument);
+    await expect(editor.locator('iframe[data-runtime-slot-role="active"]'))
+      .toHaveAttribute("data-frame-generation", initialGeneration);
+    await expect(editor.locator('iframe[data-frame-role="runtime-candidate"]')).toHaveCount(0);
 
     const secondProjectionCase = "display-contents-copy";
     await activateNativeEdit(page, secondProjectionCase);

@@ -400,6 +400,8 @@ const e2eStaticCandidateFailure = typeof process !== "undefined"
 const e2eRuntimeCommitHooks = typeof process !== "undefined"
   && process.env?.PAGEROOT_E2E === "1"
   && process.env?.PAGEROOT_E2E_RUNTIME_COMMIT_HOOKS === "1";
+const e2eCanvasCapabilityProbe = typeof process !== "undefined"
+  && process.env?.PAGEROOT_E2E === "1";
 const runtimeConfig = Object.freeze({
   bridgePort,
   bridgeAuthToken,
@@ -419,6 +421,7 @@ const runtimeConfig = Object.freeze({
     startupTiming,
     e2eStaticCandidateFailure,
     e2eRuntimeCommitHooks,
+    e2eCanvasCapabilityProbe,
   }),
 });
 

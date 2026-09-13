@@ -336,7 +336,7 @@ function commandForSuite(suite, context) {
       command: "npx",
       args: ["playwright", "test", "--config", "tests/e2e/browser/playwright.config.mjs"],
     },
-    "real-html": {
+    "dom-editing-compatibility": {
       command: "npx",
       args: ["playwright", "test", "--config", "tests/e2e/browser/playwright.real-html.config.mjs"],
     },
@@ -790,7 +790,7 @@ async function main() {
       const env = {
         ...process.env,
         ...(suite.runtimeSelection ? { PAGEROOT_SMOKE_SUITE: suite.id } : {}),
-        ...(options.realHtmlPath && suite.id === "real-html"
+        ...(options.realHtmlPath && suite.id === "dom-editing-compatibility"
           ? { PAGEROOT_REAL_HTML_PATH: options.realHtmlPath }
           : {}),
         ...((suite.id === "packaged-runtime"

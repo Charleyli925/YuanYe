@@ -6,18 +6,10 @@ export type EditRuntimeRefreshDecision = Readonly<{
   action: EditRuntimeRefreshAction;
   reason: string;
   synchronizeCurrentFrame: boolean;
-  markRuntimeRefreshPending: boolean;
 }>;
-
-export function isRuntimeInPlaceAttribute(
-  attributeName: unknown,
-  elementTagName?: unknown,
-): boolean;
 
 export function decideEditRuntimeRefresh(input?: Readonly<{
   hasRuntime?: boolean;
-  mutationKind?: "text" | "style" | "reorder" | "structure" | "attribute";
+  mutationKind?: "text" | "style" | "reorder" | "structure";
   programIdentityChanged?: boolean;
-  attributeName?: string | null;
-  elementTagName?: string | null;
 }>): EditRuntimeRefreshDecision;

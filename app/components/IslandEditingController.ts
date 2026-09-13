@@ -1039,6 +1039,30 @@ export class IslandEditingController {
 
   private handleKeyDown = (event: KeyboardEvent): void => {
     if (!this.hasCurrentLease()) return;
+    if (
+      !this.composing
+      && this.hostElement.localName === "summary"
+      && event.key === " "
+      && !event.metaKey
+      && !event.ctrlKey
+      && !event.altKey
+    ) {
+      // A focused <summary> consumes Space as its native disclosure action
+      // before Chromium emits beforeinput, even while it is contenteditable.
+      // During a leased text session Space must remain text input and must not
+      // toggle the surrounding <details> element.
+      event.preventDefault();
+      if (!this.ensureControlledDom()) return;
+      this.normalizeCollapsedInsertionAffinity();
+      this.lastInputType = "insertText";
+      this.runExpectedMutation(() => {
+        if (!insertTextAtSelection(this.hostElement, " ")) {
+          throw new Error("无法在当前光标位置插入空格。");
+        }
+      });
+      this.validateDom();
+      return;
+    }
     if (!this.composing && event.key === "Enter") {
       event.preventDefault();
       if (!this.ensureControlledDom()) return;

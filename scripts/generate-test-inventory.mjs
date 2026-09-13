@@ -10,7 +10,7 @@ const productRoot = path.resolve(path.dirname(scriptPath), "..");
 
 export const PLAYWRIGHT_EXECUTION_LANES = Object.freeze([
   { id: "browser-full", config: "tests/e2e/browser/playwright.config.mjs", stage: "ready-full" },
-  { id: "browser-real-html", config: "tests/e2e/browser/playwright.real-html.config.mjs", stage: "ready-full" },
+  { id: "browser-dom-editing-compatibility", config: "tests/e2e/browser/playwright.real-html.config.mjs", stage: "ready-full" },
   { id: "electron-native", config: "tests/e2e/electron/playwright.config.mjs", stage: "ready-full" },
   { id: "electron-ai", config: "tests/e2e/electron/playwright.ai-closed-loop.config.mjs", stage: "ready-full" },
   { id: "electron-ci-preflight", config: "tests/e2e/electron/playwright.ci-preflight.config.mjs", stage: "ready-full" },
@@ -134,9 +134,11 @@ export async function assertTestInventory(root = productRoot) {
   if (inventory.playwright.length < 1) {
     throw new Error("Playwright inventory is empty.");
   }
-  const realHtml = inventory.execution.lanes.find((lane) => lane.id === "browser-real-html");
-  if (!realHtml?.files.includes("tests/e2e/browser/real-complex-html.gate.mjs")) {
-    throw new Error("Real-html execution lane does not include real-complex-html.gate.mjs.");
+  const compatibility = inventory.execution.lanes.find(
+    (lane) => lane.id === "browser-dom-editing-compatibility",
+  );
+  if (!compatibility?.files.includes("tests/e2e/browser/real-complex-html.gate.mjs")) {
+    throw new Error("DOM editing compatibility lane does not include real-complex-html.gate.mjs.");
   }
   const review = inventory.execution.lanes.find((lane) => lane.id === "electron-review-annotation");
   if (!review?.files.includes("tests/e2e/electron/review-annotation-clarity.spec.mjs")) {

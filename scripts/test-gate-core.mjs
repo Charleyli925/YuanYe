@@ -100,7 +100,7 @@ function orderForFastFailure(suiteIds, selectedNodeTests) {
     if (suiteId.startsWith("node-")) return webBackedNode ? 40 : 30;
     if (suiteId === "build-web") return webBackedNode ? 30 : 40;
     if (suiteId.startsWith("browser-")) return 50;
-    if (suiteId === "real-html") return 55;
+    if (suiteId === "dom-editing-compatibility") return 55;
     if (suiteId === "build-desktop") return 60;
     if (suiteId.startsWith("electron-")) return 70;
     if (suiteId.startsWith("ai-")) return 80;
@@ -370,7 +370,9 @@ export function assertGateWidthPolicy(plan) {
 
 export function draftCiOutputs(plan, metadata = {}) {
   const suiteIds = (plan.suites || []).map((suite) => suite.id);
-  const browserSuites = suiteIds.filter((id) => runtimeOfSuite(id) === "browser" || id === "real-html");
+  const browserSuites = suiteIds.filter(
+    (id) => runtimeOfSuite(id) === "browser" || id === "dom-editing-compatibility",
+  );
   const desktopSuites = suiteIds.filter((id) => runtimeOfSuite(id) === "electron" || runtimeOfSuite(id) === "ai");
   return {
     has_browser: browserSuites.length > 0 ? "true" : "false",
@@ -395,7 +397,10 @@ export function filterPlanByRuntimes(plan, runtimes) {
     }
     if (suiteId.startsWith("node-")) return allowed.has("node");
     if (suiteId === "build-web") return allowed.has("node") || allowed.has("browser");
-    if (suiteId === "real-html" || suiteId.startsWith("browser-")) return allowed.has("browser");
+    if (
+      suiteId === "dom-editing-compatibility"
+      || suiteId.startsWith("browser-")
+    ) return allowed.has("browser");
     if (suiteId === "build-desktop") return allowed.has("electron") || allowed.has("ai");
     if (suiteId.startsWith("electron-")) return allowed.has("electron");
     if (suiteId.startsWith("ai-")) return allowed.has("ai");
