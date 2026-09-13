@@ -52,6 +52,11 @@ with `ProjectSession` + `ProjectWorkflow`. Open/switch/close now have
 `ProjectWorkflow`. Do not split that workflow for line budget, and do not
 add a second Controller.
 
+Ordinary save recovery and bounded retirement remain Repository operations in
+`bridge/project-file-repository.mjs`; `save-retirement.mjs` contains only the
+required-sync cleanup sequence. It owns no separate journal or background job.
+The deletion proof and retained-record cases are defined in `STATE_OWNERSHIP.md`.
+
 ## Workspace response ingress
 
 `decodeWorkspaceResponse` in the existing Controller codecs module is the

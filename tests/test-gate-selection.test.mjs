@@ -225,6 +225,7 @@ const TASK_OWNER_CASES = [
       "tests/project-registry-and-open.test.mjs",
       "tests/project-request-authority.test.mjs",
       "tests/project-working-copy-save.test.mjs",
+      "tests/save-retirement.test.mjs",
       "tests/source-element-identity-migration.test.mjs",
       "tests/workspace-performance-timing.test.mjs",
     ],

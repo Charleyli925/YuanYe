@@ -164,6 +164,7 @@ const APPROVED_PERSISTENCE_OWNERS = new Set([
   "bridge/project-file-repository/request-attachments.mjs",
   "bridge/project-file-repository/path-safety.mjs",
   "bridge/project-file-repository/source-binding.mjs",
+  "bridge/project-file-repository/save-retirement.mjs",
   "bridge/project-file-repository/registry.mjs",
   "bridge/project-file-repository/working-copy.mjs",
   "bridge/workspace-bridge.mjs",

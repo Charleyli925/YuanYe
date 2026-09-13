@@ -677,14 +677,17 @@ test("save fault injection recovers a complete durable state or a retained old s
       ".pageroot",
       "transactions",
     ))).filter((entry) => entry.startsWith("save_"));
-    assert.equal(transactions.length, 1, failpoint);
-    const transaction = await json(path.join(
-      imported.target.projectRootPath,
-      ".pageroot",
-      "transactions",
-      transactions[0],
-    ));
-    assert.equal(transaction.state, "committed", failpoint);
+    assert.equal(transactions.length, failpoint === "save-prepared" ? 1 : 0, failpoint);
+    if (transactions.length) {
+      const transaction = await json(path.join(
+        imported.target.projectRootPath,
+        ".pageroot",
+        "transactions",
+        transactions[0],
+      ));
+      assert.equal(transaction.state, "committed", failpoint);
+      assert.ok(transaction.recovery, "rolled-back recovery evidence remains durable");
+    }
     const manifest = await json(path.join(
       imported.target.projectRootPath,
       ".pageroot",

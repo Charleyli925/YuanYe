@@ -3,6 +3,7 @@ import { readSubmissionReceipt, saveSubmissionReceipt, finishSubmissionReceipt, 
 // Persistence façade. Internals live in ./project-file-repository/.
 // Callers keep importing this module; the public surface is unchanged.
 import { randomUUID } from "node:crypto";
+import { retireSaveTransaction } from "./project-file-repository/save-retirement.mjs";
 import {
   link,
   lstat,
@@ -5534,13 +5535,68 @@ export class ProjectFileRepository {
       const retained = await readHtmlFile(recoveryPaths.previousPath, "previous Working Copy", { projectRootPath: loaded.paths.projectRootPath });
       if (retained.sha256 !== expected) throw new ProjectFileRepositoryError("SAVE_RECOVERY_CONFLICT", "外部修改的旧工作文件已保留供恢复。");
     }
-    await rm(recoveryPaths.operationRoot, { recursive: true, force: true }).catch(() => {});
-    await syncDirectory(loaded.paths.recoveryRoot).catch(() => {});
+    await this.#retireCommittedSave(loaded, transactionPath, {
+      ...transaction, state: "committed",
+    });
     return this.#savedWorkingCopyResult({
       loaded,
       sourcePath: loaded.exactSourcePath,
       sourceSha256: nextSha256,
       lastPersistedRevision: nextState.lastPersistedRevision,
+    });
+  }
+
+  async #retireCommittedSave(loaded, transactionPath, transaction) {
+    if (transaction?.schemaVersion !== PROJECT_FILE_SCHEMA_VERSION
+      || transaction.kind !== "save" || transaction.state !== "committed"
+      || transaction.recovery || !transaction.recoveryId
+      || transaction.projectId !== loaded.project.projectId
+      || transaction.documentId !== loaded.project.documentId
+      || !SHA256.test(transaction.expectedSourceSha256)
+      || !SHA256.test(transaction.targetSourceSha256)
+      || !Number.isSafeInteger(transaction.editRevision) || transaction.editRevision < 0) return "retained";
+    const workingCopy = loaded.manifest.workingCopies.find(
+      (entry) => entry.workingCopyId === transaction.workingCopyId,
+    );
+    if (!workingCopy || workingCopy.sourceRelativePath !== transaction.sourceRelativePath) return "retained";
+    const recovery = saveRecoveryPaths(loaded.paths, workingCopy.workingCopyId,
+      transaction.editRevision, transaction.recoveryId);
+    if (transactionPath !== path.join(loaded.paths.transactionsRoot, `${transaction.recoveryId}.json`)) return "retained";
+    const sourcePath = workingCopySourcePath(loaded.paths, workingCopy);
+    const statePath = workingCopyStatePath(loaded.paths, workingCopy);
+    const verify = async () => {
+      const project = await readJsonFile(loaded.paths.projectPath, "project.json", { projectRootPath: loaded.paths.projectRootPath });
+      assertProjectIdentity(project);
+      const manifest = await readJsonFile(loaded.paths.manifestPath, "manifest.json", { projectRootPath: loaded.paths.projectRootPath });
+      assertManifest(manifest, project);
+      if (project.projectId !== transaction.projectId || project.documentId !== transaction.documentId
+        || !manifest.workingCopies.some((entry) => entry.workingCopyId === workingCopy.workingCopyId
+          && entry.sourceRelativePath === workingCopy.sourceRelativePath)) {
+        throw new ProjectFileRepositoryError("SAVE_TRANSACTION_IDENTITY_MISMATCH", "The Working Copy identity changed before retirement.");
+      }
+      const current = await readJsonFile(transactionPath, "save transaction", { projectRootPath: loaded.paths.projectRootPath });
+      if (!current || current.state !== "committed" || current.recovery
+        || Object.keys(transaction).some((key) => key !== "state" && current[key] !== transaction[key])) {
+        throw new ProjectFileRepositoryError("SAVE_TRANSACTION_INVALID", "The save journal changed before retirement.");
+      }
+      const state = await readJsonFile(statePath, "Working Copy state", { projectRootPath: loaded.paths.projectRootPath });
+      assertWorkingCopyState(state, loaded, workingCopy);
+      const source = await readHtmlFile(sourcePath, "Working Copy", { projectRootPath: loaded.paths.projectRootPath });
+      const previous = await readRegularFileWithSha256(recovery.previousPath, "previous Working Copy", { projectRootPath: loaded.paths.projectRootPath });
+      if (source.sha256 !== transaction.targetSourceSha256 || state.currentSha256 !== source.sha256
+        || state.saveState !== "saved" || Number(state.lastPersistedRevision) < transaction.editRevision
+        || (previous && previous.sha256 !== transaction.expectedSourceSha256)) {
+        throw new ProjectFileRepositoryError("SAVE_RECOVERY_CONFLICT", "保存后的源或旧工作文件发生变化，恢复记录已保留。");
+      }
+    };
+    return retireSaveTransaction({
+      projectRootPath: loaded.paths.projectRootPath,
+      transactionPath, recoveryPath: recovery.operationRoot,
+      publicationFiles: [sourcePath, statePath, loaded.paths.manifestPath, loaded.paths.runtimePath, transactionPath],
+      publicationDirectories: [loaded.paths.projectRootPath, loaded.paths.controlRoot,
+        path.dirname(statePath), path.join(loaded.paths.controlRoot, "source-bindings"),
+        loaded.paths.transactionsRoot],
+      verify,
     });
   }
 
@@ -7327,10 +7383,9 @@ export class ProjectFileRepository {
         projectRootPath: loaded.paths.projectRootPath,
       });
       const committed = await commitSavedSource(saved);
-      // This is the same best-effort cleanup boundary as a non-interrupted
-      // save. It happens only after the parked bytes have been rechecked.
-      await rm(recoveryPaths.operationRoot, { recursive: true, force: true }).catch(() => {});
-      await syncDirectory(loaded.paths.recoveryRoot).catch(() => {});
+      await this.#retireCommittedSave(loaded, transactionPath, {
+        ...transaction, state: "committed",
+      });
       return committed;
     }
     if (!source && previous) {
@@ -7512,6 +7567,7 @@ export class ProjectFileRepository {
       loaded.paths.transactionsRoot,
       "transactions",
     );
+    let saveRetirementAttempts = 0;
     for (const entry of entries) {
       if (entry.isSymbolicLink()) continue;
       if (
@@ -7573,6 +7629,17 @@ export class ProjectFileRepository {
             transactionPath,
             transaction,
           ));
+        } else if (saveRetirementAttempts < 16 && transaction?.recoveryId && !transaction.recovery) {
+          // Bounded opportunistic collection only. A later save, legacy shape,
+          // uncertain identity or failed durability proof leaves this journal
+          // alone; it must never roll current metadata back to an old target.
+          try {
+            await this.#retireCommittedSave(loaded, transactionPath, transaction);
+            saveRetirementAttempts += 1;
+          } catch {
+            // A stale target does not consume the useful-cleanup budget or
+            // turn an otherwise readable committed legacy record into failure.
+          }
         }
         continue;
       }
