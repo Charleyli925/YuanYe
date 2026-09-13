@@ -56,7 +56,7 @@ test("canonical annotation overflow rebuilds clean pages with comments and paire
     try {
       documents = api.buildReviewDocuments(before, after, {
         sessionId: "fallback-review", sourcePath: "/tmp/synthetic-review.html", externalBootstrap: true,
-        comments: [{ key: "frozen-comment", text: "Keep this requirement", target: {
+        comments: [{ key: "frozen-comment", text: "Keep this requirement", sourceAnchor: {
           selector: "#comment-host", label: "Alpha", level: "element", tagName: "p",
           sourceAnchor: { elementId: id(7) },
         } }],
