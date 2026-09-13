@@ -379,6 +379,7 @@ function projectFileHttpError(cause) {
       "CANDIDATE_NOT_PENDING_REVIEW",
       "CANDIDATE_AUTHORITY_MISMATCH",
       "CANDIDATE_HASH_MISMATCH",
+      "DECISION_IDENTITY_MISMATCH",
       "REQUEST_OUTPUT_CHANGED",
       "FROZEN_INPUT_HASH_MISMATCH",
       "REQUEST_COLLISION",
@@ -698,6 +699,33 @@ function projectFileDraftState(workspace) {
   };
 }
 
+function verifiedReadyCandidate(request, candidate, target) {
+  if (!request || typeof request !== "object" || !candidate || typeof candidate !== "object") {
+    return null;
+  }
+  const candidateId = String(candidate.candidateId || "");
+  if (
+    !/^candidate_[A-Za-z0-9_-]{8,160}$/u.test(candidateId)
+    || candidateId !== String(request.candidateId || "")
+    || candidate.projectId !== request.projectId
+    || candidate.documentId !== request.documentId
+    || candidate.requestId !== request.requestId
+    || candidate.attemptId !== request.attemptId
+    || candidate.sourceWorkingCopyId !== request.sourceWorkingCopyId
+    || candidate.proposedVersionId !== request.proposedVersionId
+    || candidate.expectedSourceSha256 !== request.expectedSourceSha256
+    || !target
+    || target.targetKind !== "working-copy"
+    || target.projectId !== candidate.projectId
+    || target.documentId !== candidate.documentId
+    // The current workspace may already be a newer Working Copy. Candidate
+    // identity keeps the Request-origin sourceWorkingCopyId independently;
+    // only the authoritative project/document/path/hash may be shared here.
+    || target.sourceSha256 !== candidate.expectedSourceSha256
+  ) return null;
+  return structuredClone(candidate);
+}
+
 function projectFileActiveRun(workspace, target) {
   return projectFileRunForRequest({
     request: workspace.activeRequest,
@@ -708,7 +736,10 @@ function projectFileActiveRun(workspace, target) {
 
 function projectFileRunForRequest({ request, candidate = null, target }) {
   if (!request || typeof request !== "object") return null;
-  const candidateReady = request.status === "candidate-ready" && candidate;
+  const verifiedCandidate = request.status === "candidate-ready"
+    ? verifiedReadyCandidate(request, candidate, target)
+    : null;
+  const candidateReady = Boolean(verifiedCandidate);
   const terminalStatus = ["no-change", "error"].includes(request.status)
     ? request.status
     : null;
@@ -728,13 +759,13 @@ function projectFileRunForRequest({ request, candidate = null, target }) {
   );
   const completion = candidateReady
     ? {
-      completedAt: candidate.createdAt,
+      completedAt: verifiedCandidate.createdAt,
       projectId: request.projectId,
       documentId: request.documentId,
       requestId: request.requestId,
       attemptId: request.attemptId,
-      versionId: candidate.proposedVersionId,
-      contentSha256: candidate.outputSha256,
+      versionId: verifiedCandidate.proposedVersionId,
+      contentSha256: verifiedCandidate.outputSha256,
     }
     : null;
   const readyPayload = candidateReady
@@ -745,31 +776,35 @@ function projectFileRunForRequest({ request, candidate = null, target }) {
       documentId: request.documentId,
       requestId: request.requestId,
       attemptId: request.attemptId,
-      versionId: candidate.proposedVersionId,
-      candidateVersionId: candidate.proposedVersionId,
-      candidateDisplayVersionLabel: `版本 ${candidate.proposedVersionOrdinal}`,
-      contentSha256: candidate.outputSha256,
-      sourceSha256: request.expectedSourceSha256,
+      candidateId: verifiedCandidate.candidateId,
+      versionId: verifiedCandidate.proposedVersionId,
+      candidateVersionId: verifiedCandidate.proposedVersionId,
+      candidateDisplayVersionLabel: `版本 ${verifiedCandidate.proposedVersionOrdinal}`,
+      contentSha256: verifiedCandidate.outputSha256,
+      sourceSha256: verifiedCandidate.expectedSourceSha256,
       // A ready Candidate may belong to a background project while another
       // project is currently mounted. Carry its complete managed OpenTarget
       // so renderer activation never borrows identity fields from the screen.
       openTarget: target,
       version: {
-        versionId: candidate.proposedVersionId,
-        generatedAt: candidate.createdAt,
-        contentSha256: candidate.outputSha256,
+        versionId: verifiedCandidate.proposedVersionId,
+        generatedAt: verifiedCandidate.createdAt,
+        contentSha256: verifiedCandidate.outputSha256,
         projectId: request.projectId,
         documentId: request.documentId,
       },
       outcome: completion,
       completion,
+      candidate: verifiedCandidate,
     }
     : null;
   return {
     projectId: request.projectId,
     documentId: request.documentId,
+    sourceWorkingCopyId: request.sourceWorkingCopyId,
     requestId: request.requestId,
     attemptId: request.attemptId,
+    ...(candidateReady ? { candidateId: verifiedCandidate.candidateId } : {}),
     status,
     sourcePath,
     requestPath,
@@ -799,8 +834,8 @@ function projectFileRunForRequest({ request, candidate = null, target }) {
       : 0,
     ...(candidateReady ? {
       completionObserved: true,
-      candidateOutputSha256: candidate.outputSha256,
-      candidateAssessment: candidate.assessment,
+      candidateOutputSha256: verifiedCandidate.outputSha256,
+      candidateAssessment: verifiedCandidate.assessment,
       readyPayload,
     } : terminalStatus ? {
       completionObserved: true,
@@ -1209,7 +1244,14 @@ function projectFilePromptForRequest(target, request, taskSpec) {
   return `# PageRoot AI Candidate\n\n## 本轮目标\n\n${objective}\n\n## 修改范围\n\n${scopeLabel}（\`${scopePolicy}\`）\n\n## 本轮要求\n\n${instructionLines.join("\n")}\n\n## 运行时可见内容评论规则\n\n评论可能指向由某个源码宿主生成的表格、图表、SVG、Canvas 或其他可见内容。每条评论的 \`sourceAnchor\` 是唯一拥有保存、跨版本重绑和源码定位权限的稳定源码 TargetRef；\`visualHint\` 只用于区分用户实际看到的对象。用户评论的是由该源码宿主生成的可见内容。请修改生成该内容的 HTML、数据或 Script，不要修改或保存临时 Runtime DOM，也不要把 \`visualHint\` 当作源码身份或编辑权限。\n\n${acceptanceLines.length > 0 ? `## 验收标准\n\n${acceptanceLines.join("\n")}\n\n` : ""}## 明确不做\n\n${nonGoalLines.length > 0 ? nonGoalLines.join("\n") : "评论中没有额外明确的不做项。"}\n\n## 冻结输入与输出\n\n从 \`${inputManifestPath}\` 开始，严格按 \`readOrder\` 读取。跨任务不变的合同在 \`input/AI_RULES.md\`；本轮 Task Spec 以 \`${changeRequestPath}\` 为准。\n\n- 项目长期规则：\`${projectRulesPath}\`\n- 冻结 HTML：\`${inputPath}\`\n- 评论、目标与审计上下文：\`${annotationsPath}\`\n- 唯一输出：\`${outputPath}\`\n\n## 完成\n\n完成输出写入后，最后执行唯一最终化命令：\n\n\`\`\`sh\n${projectFileFinalizerCommand(target, request)}\n\`\`\`\n`;
 }
 
-function projectFileReadyPayload({ request, candidate, target }) {
+function projectFileReadyPayload({ request, candidate: candidateInput, target }) {
+  const candidate = verifiedReadyCandidate(request, candidateInput, target);
+  if (!candidate) {
+    throw new ProjectFileError(
+      "CANDIDATE_IDENTITY_INVALID",
+      "候选版本缺少可核对的完整身份，不能进入采用流程。",
+    );
+  }
   const completedAt = String(candidate.createdAt || request.createdAt || nowIso());
   const version = {
     versionId: candidate.proposedVersionId,
@@ -1224,6 +1266,7 @@ function projectFileReadyPayload({ request, candidate, target }) {
     documentId: candidate.documentId,
     requestId: candidate.requestId,
     attemptId: candidate.attemptId,
+    candidateId: candidate.candidateId,
     versionId: candidate.proposedVersionId,
     contentSha256: candidate.outputSha256,
   };
@@ -1239,6 +1282,7 @@ function projectFileReadyPayload({ request, candidate, target }) {
     openTarget: target,
     requestId: candidate.requestId,
     attemptId: candidate.attemptId,
+    candidateId: candidate.candidateId,
     versionId: candidate.proposedVersionId,
     candidateVersionId: candidate.proposedVersionId,
     candidateVersionLabel: `V${candidate.proposedVersionOrdinal}`,
@@ -1254,6 +1298,7 @@ function projectFileReadyPayload({ request, candidate, target }) {
     activeRun: {
       projectId: candidate.projectId,
       documentId: candidate.documentId,
+      sourceWorkingCopyId: candidate.sourceWorkingCopyId,
       requestId: candidate.requestId,
       attemptId: candidate.attemptId,
       status: "ready-to-open",
@@ -1263,6 +1308,7 @@ function projectFileReadyPayload({ request, candidate, target }) {
       handoffMessage: String(request.request?.handoffMessage || ""),
       agentDelivery: request.request?.agentDelivery || { mode: "clipboard" },
       baseSnapshotSha256: candidate.expectedSourceSha256,
+      candidateId: candidate.candidateId,
       previousVersionId: candidate.previousVersionId,
       basedOnVersionId: candidate.basedOnVersionId,
       freezeCutoffRevision: Number(request.request?.freezeCutoffRevision || 0),
@@ -1539,6 +1585,18 @@ function agentSessionForStatus({ request, run, lifecycleStatus }) {
 }
 
 async function activateProjectFileCandidate(body) {
+  const candidateId = String(body?.candidateId || "");
+  if (!/^candidate_[A-Za-z0-9_-]{8,160}$/u.test(candidateId)) {
+    throw new HttpError(422, "INVALID_CANDIDATE_ID", "candidateId is required for Candidate adoption.");
+  }
+  const expectedDecisionOperationId = `promote_${candidateId}`;
+  if (body?.decisionOperationId !== expectedDecisionOperationId) {
+    throw new HttpError(
+      409,
+      "DECISION_IDENTITY_MISMATCH",
+      "decisionOperationId must identify the Candidate being adopted.",
+    );
+  }
   const target = await projectFileTargetForBody(body);
   if (!target) return null;
   try {
@@ -1548,7 +1606,7 @@ async function activateProjectFileCandidate(body) {
       // the opaque Candidate id owned by the v4 repository.  Do not let that
       // label select a different Candidate (or turn a valid adoption into an
       // invalid-id error).
-      candidateId: body.candidateId || null,
+      candidateId,
       expectedSourceSha256: body.expectedSourceSha256,
       decisionOperationId: body.decisionOperationId,
     });

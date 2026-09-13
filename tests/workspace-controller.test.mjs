@@ -142,6 +142,7 @@ function createHarness({
   html = "<main>local source</main>",
   bridgeClient = null,
   projectSource = null,
+  projectRulesWorkflow: projectRulesWorkflowConfig = null,
   editRuntimePort = null,
   initialDocument = null,
   controllerCodecs = codecs,
@@ -187,6 +188,9 @@ function createHarness({
       ...(projectSource ? { projectSource } : {}),
       ...(editRuntimePort ? { editRuntime: editRuntimePort } : {}),
     },
+    ...(projectRulesWorkflowConfig
+      ? { projectRulesWorkflow: projectRulesWorkflowConfig }
+      : {}),
     clock: { now: () => 1_726_000_000_000 },
   });
   controller.subscribeEvents((event) => events.push(event));
@@ -198,6 +202,7 @@ function createHarness({
     draftSession,
     versionSession,
     sourceHistorySession,
+    runSession: projectRulesWorkflowConfig?.runSession || null,
     recovery,
     events,
     client,
@@ -341,7 +346,7 @@ test("workspace controller publishes one recovered Working Copy signal from Brid
   assert.equal(harness.events[0].workingCopyRecovered, true);
 });
 
-test("managed registration activates the exact V1 Working Copy before publishing Sessions", async () => {
+test("managed registration activates the exact V1 Working Copy before publishing Sessions", async (t) => {
   const workingCopyPath = "/tmp/PageRoot/项目/managed/managed-V1.html";
   const managedHtml = "<main>managed V1 source</main>";
   const target = {
@@ -355,6 +360,7 @@ test("managed registration activates the exact V1 Working Copy before publishing
     sourceSha256: sha256(managedHtml),
   };
   const calls = [];
+  const runSession = new RunSession({ sourcePath: SOURCE_PATH });
   const harness = createHarness({
     html: managedHtml,
     bridgeClient: {
@@ -379,11 +385,19 @@ test("managed registration activates the exact V1 Working Copy before publishing
       async saveDraft() {
         return {};
       },
+      async projectFile() {
+        return { content: "" };
+      },
+      async updateProjectFile() {
+        return {};
+      },
     },
+    projectRulesWorkflow: { runSession },
     projectSource: {
       async activateManagedWorkingCopy(input) {
         calls.push(input);
         return {
+          operationId: input.operationId,
           sourcePath: workingCopyPath,
           sha256: sha256(managedHtml),
           html: managedHtml,
@@ -391,14 +405,32 @@ test("managed registration activates the exact V1 Working Copy before publishing
       },
     },
   });
+  const aggregateSnapshots = [];
+  const unsubscribe = harness.controller.subscribe((snapshot) => {
+    if (snapshot.projectSession?.sourcePath === workingCopyPath) {
+      aggregateSnapshots.push(snapshot);
+    }
+  });
+  t.after(unsubscribe);
 
   const outcome = await harness.controller.ensureRegistered();
 
   assert.equal(outcome.status, "succeeded");
   assert.equal(harness.projectSession.context?.sourcePath, workingCopyPath);
   assert.equal(harness.projectSession.context?.workingCopyId, "work_ver_0001");
+  assert.ok(aggregateSnapshots.length >= 1);
+  for (const snapshot of aggregateSnapshots) {
+    assert.equal(
+      snapshot.projectSession.sourcePath,
+      snapshot.runSession.activeSourcePath,
+    );
+  }
   assert.equal(calls.length, 1);
-  assert.deepEqual(calls[0], {
+  assert.match(calls[0].operationId, /^registration_/u);
+  const activationCall = Object.fromEntries(
+    Object.entries(calls[0]).filter(([key]) => key !== "operationId"),
+  );
+  assert.deepEqual(activationCall, {
     previousSourcePath: SOURCE_PATH,
     nextSourcePath: workingCopyPath,
     expectedSha256: sha256(managedHtml),
@@ -408,6 +440,294 @@ test("managed registration activates the exact V1 Working Copy before publishing
     versionId: "ver_0001",
     projectRootPath: "/tmp/PageRoot/项目/managed",
   });
+});
+
+test("managed registration rejects an incomplete OpenTarget before Desktop or Session mutation", async (t) => {
+  const managedHtml = "<main>managed incomplete target</main>";
+  const baseTarget = {
+    projectId: "project_incomplete_target",
+    documentId: "document_incomplete_target",
+    projectRootPath: "/tmp/PageRoot/项目/incomplete-target",
+    targetKind: "working-copy",
+    workingCopyId: "work_ver_0001",
+    versionId: "ver_0001",
+    exactSourcePath: NEXT_SOURCE_PATH,
+    sourceSha256: sha256(managedHtml),
+  };
+
+  for (const [label, mutateTarget] of [
+    ["missing exactSourcePath", (target) => { delete target.exactSourcePath; }],
+    ["wrong exactSourcePath", (target) => { target.exactSourcePath = "/tmp/PageRoot/项目/incomplete-target/other-V1.html"; }],
+    ["wrong sourceSha256", (target) => { target.sourceSha256 = `sha256:${"0".repeat(64)}`; }],
+    ["missing OpenTarget", null],
+  ]) {
+    const runSession = new RunSession({ sourcePath: SOURCE_PATH });
+    const previousRun = {
+      projectId: "project_incomplete_target",
+      documentId: "document_incomplete_target",
+      sourcePath: SOURCE_PATH,
+      requestId: `request_incomplete_${label.replaceAll(" ", "_")}`,
+      attemptId: "attempt_incomplete_target",
+      status: "processing",
+    };
+    runSession.trackRun(previousRun, { activate: "never" });
+    let desktopCalls = 0;
+    const harness = createHarness({
+      html: managedHtml,
+      bridgeClient: {
+        async ensureProject() {
+          const target = mutateTarget ? structuredClone(baseTarget) : null;
+          mutateTarget?.(target);
+          return registrationPayload({
+            sourcePath: NEXT_SOURCE_PATH,
+            projectId: baseTarget.projectId,
+            documentId: baseTarget.documentId,
+            html: managedHtml,
+            ...(target ? { openTarget: target } : {}),
+          });
+        },
+        async workspace() {
+          return registrationPayload();
+        },
+        async saveDraft() {
+          return {};
+        },
+        async projectFile() {
+          return { content: "" };
+        },
+        async updateProjectFile() {
+          return {};
+        },
+      },
+      projectRulesWorkflow: { runSession },
+      projectSource: {
+        async activateManagedWorkingCopy() {
+          desktopCalls += 1;
+          return null;
+        },
+      },
+    });
+    t.after(() => harness.controller.dispose());
+    const beforeDocument = harness.documentSession.snapshot;
+    const beforeComments = harness.commentSession.snapshot;
+    const beforeVersions = harness.versionSession.snapshot;
+    const beforeRules = harness.controller.getSnapshot().projectRules;
+    const beforeRun = runSession.snapshot;
+    const beforeProjectSource = harness.projectSession.sourcePath;
+
+    const outcome = await harness.controller.ensureRegistered();
+
+    assert.equal(outcome.status, "rejected", label);
+    assert.equal(outcome.code, "PROJECT_REGISTRATION_OPEN_TARGET_INVALID", label);
+    assert.equal(desktopCalls, 0, label);
+    assert.equal(harness.projectSession.context, null, label);
+    assert.equal(harness.projectSession.sourcePath, beforeProjectSource, label);
+    assert.deepEqual(harness.documentSession.snapshot, beforeDocument, label);
+    assert.deepEqual(harness.commentSession.snapshot, beforeComments, label);
+    assert.deepEqual(harness.versionSession.snapshot, beforeVersions, label);
+    assert.deepEqual(harness.controller.getSnapshot().projectRules, beforeRules, label);
+    assert.deepEqual(runSession.snapshot, beforeRun, label);
+  }
+});
+
+test("managed registration fails closed when its destination locator already owns a Request", async (t) => {
+  const managedHtml = "<main>managed destination source</main>";
+  const target = {
+    projectId: "project_registration",
+    documentId: "document_registration",
+    projectRootPath: "/tmp/PageRoot/项目/occupied",
+    targetKind: "working-copy",
+    workingCopyId: "work_ver_0001",
+    versionId: "ver_0001",
+    exactSourcePath: NEXT_SOURCE_PATH,
+    sourceSha256: sha256(managedHtml),
+  };
+  const runSession = new RunSession({ sourcePath: SOURCE_PATH });
+  const harness = createHarness({
+    html: managedHtml,
+    bridgeClient: {
+      async ensureProject() {
+        return registrationPayload({
+          sourcePath: NEXT_SOURCE_PATH,
+          projectId: target.projectId,
+          documentId: target.documentId,
+          html: managedHtml,
+          openTarget: target,
+        });
+      },
+      async workspace() {
+        return registrationPayload();
+      },
+      async saveDraft() {
+        return {};
+      },
+      async projectFile() {
+        return { content: "" };
+      },
+      async updateProjectFile() {
+        return {};
+      },
+    },
+    projectRulesWorkflow: { runSession },
+    projectSource: {
+      async activateManagedWorkingCopy(input) {
+        return {
+          operationId: input.operationId,
+          sourcePath: NEXT_SOURCE_PATH,
+          sha256: sha256(managedHtml),
+          html: managedHtml,
+        };
+      },
+    },
+  });
+  t.after(() => harness.controller.dispose());
+  const previousRun = {
+    projectId: target.projectId,
+    documentId: target.documentId,
+    sourcePath: SOURCE_PATH,
+    requestId: "request_previous_registration",
+    attemptId: "attempt_previous_registration",
+    status: "complete",
+  };
+  const destinationRun = {
+    projectId: target.projectId,
+    documentId: target.documentId,
+    sourcePath: NEXT_SOURCE_PATH,
+    requestId: "request_destination_registration",
+    attemptId: "attempt_destination_registration",
+    status: "processing",
+  };
+  runSession.trackRun(previousRun, { activate: "never" });
+  runSession.trackRun(destinationRun, { activate: "never" });
+
+  const outcome = await harness.controller.ensureRegistered();
+
+  assert.equal(outcome.status, "rejected");
+  assert.equal(outcome.code, "PROJECT_RUN_LOCATOR_REBASE_REJECTED");
+  assert.equal(harness.projectSession.context, null);
+  assert.equal(harness.projectSession.sourcePath, SOURCE_PATH);
+  assert.equal(runSession.runForSource(SOURCE_PATH), previousRun);
+  assert.equal(runSession.runForSource(NEXT_SOURCE_PATH), destinationRun);
+});
+
+test("managed activation reports unknown when a destination collision appears after host activation", async (t) => {
+  const managedHtml = "<main>managed destination race</main>";
+  const target = {
+    projectId: "project_registration_race",
+    documentId: "document_registration_race",
+    projectRootPath: "/tmp/PageRoot/项目/race",
+    targetKind: "working-copy",
+    workingCopyId: "work_ver_race",
+    versionId: "ver_race",
+    exactSourcePath: NEXT_SOURCE_PATH,
+    sourceSha256: sha256(managedHtml),
+  };
+  let releaseActivation;
+  const activationStarted = new Promise((resolve) => {
+    releaseActivation = resolve;
+  });
+  const calls = [];
+  const receipts = new Map();
+  let hostMutations = 0;
+  let hostActivePath = SOURCE_PATH;
+  const runSession = new RunSession({ sourcePath: SOURCE_PATH });
+  const harness = createHarness({
+    html: managedHtml,
+    bridgeClient: {
+      async ensureProject() {
+        return registrationPayload({
+          sourcePath: NEXT_SOURCE_PATH,
+          projectId: target.projectId,
+          documentId: target.documentId,
+          html: managedHtml,
+          openTarget: target,
+        });
+      },
+      async workspace() {
+        return registrationPayload();
+      },
+      async saveDraft() {
+        return {};
+      },
+      async projectFile() {
+        return { content: "" };
+      },
+      async updateProjectFile() {
+        return {};
+      },
+    },
+    projectRulesWorkflow: { runSession },
+    projectSource: {
+      async activateManagedWorkingCopy(input) {
+        calls.push(input);
+        if (!receipts.has(input.operationId)) {
+          hostMutations += 1;
+          hostActivePath = NEXT_SOURCE_PATH;
+          receipts.set(input.operationId, Object.freeze({
+            operationId: input.operationId,
+            activePath: hostActivePath,
+          }));
+        }
+        await activationStarted;
+        return {
+          operationId: input.operationId,
+          sourcePath: NEXT_SOURCE_PATH,
+          sha256: sha256(managedHtml),
+          html: managedHtml,
+        };
+      },
+    },
+  });
+  t.after(() => harness.controller.dispose());
+
+  const previousRun = {
+    projectId: target.projectId,
+    documentId: target.documentId,
+    sourcePath: SOURCE_PATH,
+    requestId: "request_race_previous",
+    attemptId: "attempt_race_previous",
+    status: "complete",
+  };
+  const destinationRun = {
+    projectId: target.projectId,
+    documentId: target.documentId,
+    sourcePath: NEXT_SOURCE_PATH,
+    requestId: "request_race_destination",
+    attemptId: "attempt_race_destination",
+    status: "processing",
+  };
+  runSession.trackRun(previousRun, { activate: "never" });
+  const registration = harness.controller.ensureRegistered();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls.length, 1);
+  runSession.trackRun(destinationRun, { activate: "never" });
+  releaseActivation();
+
+  const outcome = await registration;
+
+  assert.equal(outcome.status, "unknown");
+  assert.equal(hostActivePath, NEXT_SOURCE_PATH);
+  assert.equal(receipts.get(calls[0].operationId)?.activePath, NEXT_SOURCE_PATH);
+  assert.equal(
+    harness.controller.getSnapshot().registration.outcome.operationId,
+    calls[0].operationId,
+  );
+  assert.equal(harness.projectSession.context, null);
+  assert.equal(harness.projectSession.sourcePath, SOURCE_PATH);
+  assert.equal(runSession.runForSource(SOURCE_PATH), previousRun);
+  assert.equal(runSession.runForSource(NEXT_SOURCE_PATH), destinationRun);
+
+  runSession.removeRun(destinationRun);
+  const retry = await harness.controller.ensureRegistered();
+
+  assert.equal(retry.status, "succeeded");
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].operationId, calls[0].operationId);
+  assert.equal(hostMutations, 1);
+  assert.equal(hostActivePath, NEXT_SOURCE_PATH);
+  assert.equal(harness.projectSession.context?.sourcePath, NEXT_SOURCE_PATH);
+  assert.equal(runSession.runForSource(SOURCE_PATH), null);
+  assert.equal(runSession.runForSource(NEXT_SOURCE_PATH)?.requestId, previousRun.requestId);
 });
 
 test("managed registration fails closed when its desktop Working Copy activation is unavailable", async () => {

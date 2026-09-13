@@ -268,6 +268,7 @@ export class ProjectWorkflow {
     nextDocumentId: string;
     versionId: string;
     openTarget?: Omit<OpenTarget, "sessionEpoch"> | null;
+    operationId?: string | null;
   }): Promise<PreparedGeneratedSourceTransition>;
   commitGeneratedSourceTransition(input: {
     prepared: PreparedGeneratedSourceTransition;

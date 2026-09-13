@@ -151,6 +151,7 @@ export const REQUIRED_SHARED_FILES = [
   "agent-access-operation.mjs",
   "agent-login-url.mjs",
   "agent-auth-source.mjs",
+  "agent-input-policy.mjs",
   "openai-compatible-vendors.mjs",
   "supported-agent-models.mjs",
   "agent-feature-gates.mjs",

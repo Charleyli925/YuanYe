@@ -60,6 +60,7 @@ test("a Candidate is not a Version until adoption, rejection consumes no ordinal
   const promoted = await value.repository.promoteCandidate({
     target: imported.target,
     candidateId: secondCandidate.candidate.candidateId,
+    decisionOperationId: `promote_${secondCandidate.candidate.candidateId}`,
   });
   assert.equal(promoted.promoted, true);
   assert.equal(promoted.version.versionId, "ver_0002");
@@ -68,11 +69,75 @@ test("a Candidate is not a Version until adoption, rejection consumes no ordinal
   const repeated = await value.repository.promoteCandidate({
     target: imported.target,
     candidateId: secondCandidate.candidate.candidateId,
+    decisionOperationId: `promote_${secondCandidate.candidate.candidateId}`,
   });
   assert.equal(repeated.version.versionId, "ver_0002");
   manifest = await json(path.join(imported.target.projectRootPath, ".pageroot", "manifest.json"));
   assert.deepEqual(manifest.versions.map((version) => version.versionId), ["ver_0001", "ver_0002"]);
   assert.equal(manifest.latestOfficialVersionId, "ver_0002");
+});
+
+test("Candidate adoption requires its own decision receipt and retries one lost response", async (t) => {
+  const value = await fixture(t);
+  const imported = await importSource(value, "candidate-receipt.html");
+  const candidate = await value.repository.createCandidate({
+    target: imported.target,
+    requestId: "req_candidate_receipt",
+    candidateId: "candidate_candidate_receipt_0001",
+    html: html("candidate receipt"),
+    expectedSourceSha256: imported.target.sourceSha256,
+  });
+  await assert.rejects(
+    value.repository.promoteCandidate({
+      target: imported.target,
+      candidateId: candidate.candidate.candidateId,
+    }),
+    { code: "DECISION_IDENTITY_MISMATCH" },
+  );
+  await assert.rejects(
+    value.repository.promoteCandidate({
+      target: imported.target,
+      candidateId: candidate.candidate.candidateId,
+      decisionOperationId: "promote_candidate_other_0001",
+    }),
+    { code: "DECISION_IDENTITY_MISMATCH" },
+  );
+  let lostResponse = true;
+  const interrupted = new ProjectFileRepository({
+    projectsRoot: value.projects,
+    failpoint: async (name) => {
+      if (name === "promotion-manifest-committed" && lostResponse) {
+        lostResponse = false;
+        return true;
+      }
+      return false;
+    },
+  });
+  const input = {
+    target: imported.target,
+    candidateId: candidate.candidate.candidateId,
+    decisionOperationId: `promote_${candidate.candidate.candidateId}`,
+  };
+  await assert.rejects(
+    interrupted.promoteCandidate(input),
+    { code: "INJECTED_FAILPOINT" },
+  );
+  const afterLostResponse = await json(path.join(
+    imported.target.projectRootPath,
+    ".pageroot",
+    "manifest.json",
+  ));
+  assert.deepEqual(afterLostResponse.versions.map((version) => version.versionId), ["ver_0001", "ver_0002"]);
+  const recovered = await new ProjectFileRepository({ projectsRoot: value.projects }).promoteCandidate(input);
+  assert.equal(recovered.version.versionId, "ver_0002");
+  const replayed = await new ProjectFileRepository({ projectsRoot: value.projects }).promoteCandidate(input);
+  assert.equal(replayed.version.versionId, "ver_0002");
+  const finalManifest = await json(path.join(
+    imported.target.projectRootPath,
+    ".pageroot",
+    "manifest.json",
+  ));
+  assert.deepEqual(finalManifest.versions.map((version) => version.versionId), ["ver_0001", "ver_0002"]);
 });
 
 test("promotion preserves the identity-normalized Candidate in its Version and Working Copy", async (t) => {
@@ -92,6 +157,7 @@ test("promotion preserves the identity-normalized Candidate in its Version and W
   const promoted = await value.repository.promoteCandidate({
     target: imported.target,
     candidateId: candidate.candidate.candidateId,
+    decisionOperationId: `promote_${candidate.candidate.candidateId}`,
   });
   const controlRoot = path.join(imported.target.projectRootPath, ".pageroot");
   const candidateHtml = await readFile(path.join(
@@ -149,6 +215,7 @@ test("legacy Promotion journals without a Working Copy hash remain recoverable",
       failing.promoteCandidate({
         target: imported.target,
         candidateId: candidate.candidate.candidateId,
+        decisionOperationId: `promote_${candidate.candidate.candidateId}`,
       }),
       (error) => error instanceof ProjectFileRepositoryError
         && error.code === "INJECTED_FAILPOINT",
@@ -213,6 +280,7 @@ test("a historical Version reactivates its original Working Copy without changin
     const promoted = await value.repository.promoteCandidate({
       target: active,
       candidateId: candidate.candidate.candidateId,
+      decisionOperationId: `promote_${candidate.candidate.candidateId}`,
     });
     active = promoted.target;
     if (ordinal === 2) v2Target = active;
@@ -360,6 +428,7 @@ test("a historical Version reactivates its original Working Copy without changin
   const promoted = await restarted.promoteCandidate({
     target: reopened.target,
     candidateId: candidate.candidate.candidateId,
+    decisionOperationId: `promote_${candidate.candidate.candidateId}`,
   });
   assert.equal(promoted.version.versionId, "ver_0007");
   assert.equal(promoted.version.basedOnVersionId, "ver_0002");
@@ -496,6 +565,7 @@ test("runtime authority seals Candidate record and output after review begins", 
     value.repository.promoteCandidate({
       target: imported.target,
       candidateId: candidate.candidate.candidateId,
+      decisionOperationId: `promote_${candidate.candidate.candidateId}`,
     }),
     (error) => error instanceof ProjectFileRepositoryError
       && error.code === "CANDIDATE_AUTHORITY_MISMATCH",
@@ -571,6 +641,7 @@ test("Promotion recovery does not bypass the runtime-sealed Candidate record", a
     interrupted.promoteCandidate({
       target: imported.target,
       candidateId: candidate.candidate.candidateId,
+      decisionOperationId: `promote_${candidate.candidate.candidateId}`,
     }),
     (error) => error instanceof ProjectFileRepositoryError
       && error.code === "INJECTED_FAILPOINT",
@@ -638,6 +709,7 @@ test("Promotion recovery re-derives every Candidate-backed transaction field", a
       interrupted.promoteCandidate({
         target: imported.target,
         candidateId: candidate.candidate.candidateId,
+        decisionOperationId: `promote_${candidate.candidate.candidateId}`,
       }),
       (error) => error instanceof ProjectFileRepositoryError
         && error.code === "INJECTED_FAILPOINT",
@@ -689,6 +761,7 @@ test("Promotion recovery validates the recorded Working Copy against sealed auth
     interrupted.promoteCandidate({
       target: imported.target,
       candidateId: candidate.candidate.candidateId,
+      decisionOperationId: `promote_${candidate.candidate.candidateId}`,
     }),
     (error) => error instanceof ProjectFileRepositoryError
       && error.code === "INJECTED_FAILPOINT",
@@ -745,6 +818,7 @@ test("a Candidate cannot be adopted after its frozen Working Copy changes", asyn
     value.repository.promoteCandidate({
       target: edited.target,
       candidateId: candidate.candidate.candidateId,
+      decisionOperationId: `promote_${candidate.candidate.candidateId}`,
     }),
     (error) => error instanceof ProjectFileRepositoryError
       && error.code === "CANDIDATE_SOURCE_CHANGED",
@@ -790,6 +864,7 @@ test("promotion rechecks the Candidate base before manifest publication and reco
     repository.promoteCandidate({
       target: imported.target,
       candidateId: candidate.candidate.candidateId,
+      decisionOperationId: `promote_${candidate.candidate.candidateId}`,
     }),
     (error) => error instanceof ProjectFileRepositoryError
       && error.code === "CANDIDATE_SOURCE_CHANGED",
@@ -846,6 +921,7 @@ test("promotion uses the latest Working Copy name and allocates around file, dir
   const promoted = await value.repository.promoteCandidate({
     target: renamed,
     candidateId: candidate.candidate.candidateId,
+    decisionOperationId: `promote_${candidate.candidate.candidateId}`,
   });
   assert.equal(
     path.basename(promoted.target.exactSourcePath),
@@ -885,6 +961,7 @@ test("promotion retries the next same-ordinal path after an OS no-replace collis
   const promoted = await repository.promoteCandidate({
     target: renamed,
     candidateId: candidate.candidate.candidateId,
+    decisionOperationId: `promote_${candidate.candidate.candidateId}`,
   });
   assert.equal(raced, true);
   assert.equal(path.basename(promoted.target.exactSourcePath), "B-V2-V2.html");
@@ -1090,6 +1167,7 @@ test("a replaced private promotion file fails recovery without deleting user byt
     interrupted.promoteCandidate({
       target: imported.target,
       candidateId: candidate.candidate.candidateId,
+      decisionOperationId: `promote_${candidate.candidate.candidateId}`,
     }),
     (error) => error instanceof ProjectFileRepositoryError
       && error.code === "INJECTED_FAILPOINT",
@@ -1153,6 +1231,7 @@ test("a replaced published promotion file fails recovery without deleting user b
     interrupted.promoteCandidate({
       target: imported.target,
       candidateId: candidate.candidate.candidateId,
+      decisionOperationId: `promote_${candidate.candidate.candidateId}`,
     }),
     (error) => error instanceof ProjectFileRepositoryError
       && error.code === "INJECTED_FAILPOINT",
@@ -1202,6 +1281,7 @@ test("promotion fault recovery leaves exactly one formal Version and regular fil
       failing.promoteCandidate({
         target: imported.target,
         candidateId: candidate.candidate.candidateId,
+        decisionOperationId: `promote_${candidate.candidate.candidateId}`,
       }),
       (error) => error instanceof ProjectFileRepositoryError
         && error.code === "INJECTED_FAILPOINT",

@@ -150,6 +150,10 @@ export type ActiveRun = {
   adoptionPhase?: "applying" | "unknown";
   projectId: string;
   documentId: string;
+  /** Immutable Request origin; null/absent on legacy projections, never inferred from the current route. */
+  sourceWorkingCopyId?: string | null;
+  /** In-memory submission identity while requestId is the pending placeholder. */
+  submissionToken?: number;
   requestId: string;
   attemptId: string;
   requestPath: string;

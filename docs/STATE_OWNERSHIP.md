@@ -254,6 +254,51 @@ Rules:
   read-only fence while reconciliation determines whether a durable run exists.
   Workbench must derive its active lock and submission presentation from that
   snapshot rather than maintain a second boolean or ref.
+- Run projections carry the immutable Request's `sourceWorkingCopyId` alongside
+  project, document, Request and Attempt identity. Bridge projects the Repository
+  fact; `activeRunFromRecord` represents a missing legacy field as `null`, never
+  deriving it from a path, based-on Version or the currently displayed OpenTarget.
+  Pending runs carry the existing submission token in memory; the shared
+  `pending`/`attempt_001` placeholders cannot identify one submission. Removing a
+  run checks its registered scope and known origin; removing a pending run also
+  checks its token (old tokenless projections remain scoped to their locator).
+- Run locator rebinding selects only the exact previous source, optionally checked
+  against project/document identity. Rename, first managed registration and a
+  confirmed Promotion/source transition reuse this boundary without selecting
+  every Working Copy in a project. A Promotion can change the displayed Working
+  Copy and path, but never rewrites the original Request's `sourceWorkingCopyId`.
+  Existing project epoch, submission reconciliation, lifecycle locks and durable
+  authority checks still apply. Run, background result, handoff,
+  copied/recovered and outcome facts share one locator-keyed in-memory entry;
+  active presentation retains only locator keys and projects from that entry.
+  A new Request/Attempt at the same locator atomically replaces the old attempt
+  facts, so late poll/cancel/completion publication cannot overwrite it. This
+  consolidation preserves the public Session contract and introduces neither a
+  second store nor a disk format.
+- Every canonical locator also retains a monotonic in-memory revision/tombstone
+  after absence, activation, removal, result/outcome publication, handoff
+  change, or source rebase. Recent-run hydration captures that revision together
+  with its per-query sequence and the current Project epoch; an awaited Bridge
+  response must match all three before it can publish. A path-only recent row is
+  only a lookup hint: authoritative workspace project/document/OpenTarget
+  identity must fill the hydration context, and a missing identity fails closed.
+- Cross-owner source moves use read-only ProjectSession/RunSession reservations
+  followed by synchronous CAS commits. Both commits publish only after they
+  succeed; a failed transition rolls the Run reservation back before any
+  Document/Comment/Rules reset. If a managed desktop activation has already
+  committed but local CAS cannot prove the same identity, the outcome is
+  `unknown`/recovery-required rather than a plain rejection that could hide a
+  host/local split.
+- Desktop activation owns one durable operation-specific `activeEffect` beside
+  `activePath` and the Recent catalog. The effect stores the full activation
+  tuple and is persisted atomically with the destination path; Recent
+  membership alone never proves a completed operation. A pending operation
+  stores the predecessor `activeEffect` (including the monotonic
+  `activeEffectGeneration`) and may continue only while both the exact
+  predecessor path and that pair remain active. This generation/effect fence
+  rejects ABA navigation that returns to the same path; replay can complete
+  only when the destination path and the same effect tuple match the receipt.
+  Any other post-crash or post-navigation mismatch remains unknown.
 - `RunWorkflow` owns the I/O sequence around that Session fact: it soft-checkpoints
   native input, performs one `leave-canvas` freeze, drains the authoritative source, submits only one Request,
   reconciles an unknown POST with read-only workspace authority, and fences

@@ -3,6 +3,8 @@
  * Must never create Notice, banners, cards, or other user-facing UI.
  */
 
+import { productErrorMessage } from "../lib/notification-policy.js";
+
 let telemetrySink = null;
 
 export function setInternalFailureTelemetry(sink) {
@@ -28,7 +30,9 @@ export function reportInternalFailure({
       ? cause.message
       : cause == null
         ? ""
-        : String(cause);
+        : cause && typeof cause === "object"
+          ? productErrorMessage(cause, "内部错误")
+          : String(cause);
     console.warn(
       "[pageroot:internal-failure]",
       record.area,

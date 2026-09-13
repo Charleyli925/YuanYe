@@ -78,6 +78,22 @@ export type ProjectVersionSummary = {
   isLatestOfficial: boolean | null;
 };
 
+/**
+ * Structured-clone rejection exposed by the trusted project IPC adapter.
+ * Main-process Error instances and transport metadata never cross the
+ * contextBridge boundary.
+ */
+export type DesktopProjectOperationError = Readonly<{
+  code: string;
+  message: string;
+  details?: Readonly<Record<string, string | number | boolean | null>>;
+}>;
+
+/**
+ * Project API promises reject with DesktopProjectOperationError. The
+ * Promise value type below describes only the successful result, as required
+ * by TypeScript's standard Promise contract.
+ */
 export type DesktopProjectsApi = {
   getActiveProject: () => Promise<HtmlOpenResult | null>;
   openHtml: () => Promise<HtmlOpenResult | null>;
@@ -114,6 +130,7 @@ export type DesktopProjectsApi = {
     versionId: string;
   }) => Promise<{ versionPath: string }>;
   activateGeneratedVersion?: (payload: {
+    operationId?: string;
     previousSourcePath: string;
     nextSourcePath: string;
     expectedSha256: string;

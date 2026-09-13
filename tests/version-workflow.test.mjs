@@ -59,6 +59,57 @@ function versionRecord({
 
 function readyRun(overrides = {}) {
   const version = versionRecord();
+  const candidateId = overrides.candidateId || "candidate_ready_0001";
+  const sourceWorkingCopyId = overrides.sourceWorkingCopyId || "work_ver_0001";
+  const readyPayloadOverrides = overrides.readyPayload || {};
+  const runOverrides = { ...overrides };
+  delete runOverrides.candidateId;
+  delete runOverrides.readyPayload;
+  const baseCandidate = {
+    candidateId,
+    projectId: "project_a",
+    documentId: "document_a",
+    requestId: "req_0001",
+    attemptId: "attempt_001",
+    sourceWorkingCopyId,
+    proposedVersionId: version.versionId,
+    proposedVersionOrdinal: 2,
+    expectedSourceSha256: sha256(BASE_HTML),
+    outputSha256: version.contentSha256,
+    createdAt: "2026-08-12T00:00:01.000Z",
+  };
+  const baseReadyPayload = {
+    projectId: "project_a",
+    documentId: "document_a",
+    requestId: "req_0001",
+    attemptId: "attempt_001",
+    candidateId,
+    versionId: version.versionId,
+    contentSha256: version.contentSha256,
+    candidateDisplayVersionLabel: "版本 2",
+    version,
+    openTarget: {
+      projectId: "project_a",
+      documentId: "document_a",
+      projectRootPath: "/tmp/project-a",
+      targetKind: "working-copy",
+      workingCopyId: sourceWorkingCopyId,
+      versionId: "ver_0001",
+      exactSourcePath: SOURCE_A,
+      sourceSha256: sha256(BASE_HTML),
+    },
+    candidate: baseCandidate,
+    completion: { completedAt: "2026-08-12T00:00:01.000Z" },
+    outcome: {
+      projectId: "project_a",
+      documentId: "document_a",
+      requestId: "req_0001",
+      attemptId: "attempt_001",
+      versionId: version.versionId,
+      contentSha256: version.contentSha256,
+      generatedAt: version.generatedAt,
+    },
+  };
   return {
     projectId: "project_a",
     documentId: "document_a",
@@ -69,6 +120,7 @@ function readyRun(overrides = {}) {
     handoffMessage: "request",
     status: "ready-to-open",
     sourcePath: SOURCE_A,
+    sourceWorkingCopyId,
     baseSnapshotSha256: sha256(BASE_HTML),
     previousVersionId: "ver_0001",
     basedOnVersionId: "ver_0001",
@@ -77,37 +129,35 @@ function readyRun(overrides = {}) {
     candidateVersionLabel: "版本 2",
     submittedAt: "2026-08-12T00:00:00.000Z",
     completionObserved: true,
+    ...runOverrides,
     readyPayload: {
-      projectId: "project_a",
-      documentId: "document_a",
-      requestId: "req_0001",
-      attemptId: "attempt_001",
-      versionId: version.versionId,
-      contentSha256: version.contentSha256,
-      candidateDisplayVersionLabel: "版本 2",
-      version,
-      openTarget: {
-        projectId: "project_a",
-        documentId: "document_a",
-        projectRootPath: "/tmp/project-a",
-        targetKind: "working-copy",
-        workingCopyId: "work_ver_0001",
-        versionId: "ver_0001",
-        exactSourcePath: SOURCE_A,
-        sourceSha256: sha256(BASE_HTML),
-      },
-      completion: { completedAt: "2026-08-12T00:00:01.000Z" },
-      outcome: {
-        projectId: "project_a",
-        documentId: "document_a",
-        requestId: "req_0001",
-        attemptId: "attempt_001",
-        versionId: version.versionId,
-        contentSha256: version.contentSha256,
-        generatedAt: version.generatedAt,
+      ...baseReadyPayload,
+      ...readyPayloadOverrides,
+      candidateId: readyPayloadOverrides.candidateId || candidateId,
+      candidate: {
+        ...baseCandidate,
+        ...(readyPayloadOverrides.candidate || {}),
       },
     },
-    ...overrides,
+  };
+}
+
+function promotedOpenTarget(input, {
+  sourcePath = SOURCE_A,
+  sourceSha256 = sha256(CANDIDATE_HTML),
+  documentId = input.documentId,
+  targetKind = "working-copy",
+  versionId = input.versionId,
+} = {}) {
+  return {
+    projectId: input.projectId,
+    documentId,
+    projectRootPath: "/tmp/project-a",
+    targetKind,
+    workingCopyId: "work_ver_0002",
+    versionId,
+    exactSourcePath: sourcePath,
+    sourceSha256,
   };
 }
 
@@ -173,6 +223,7 @@ function createHarness({
     render: [],
     invalidate: 0,
     unlock: 0,
+    freeze: 0,
     clearRecovery: 0,
     clearAudit: 0,
     resetComments: 0,
@@ -235,6 +286,8 @@ function createHarness({
         contentSha256: version.contentSha256,
         sourceSha256: version.contentSha256,
         currentHtmlSha256: version.contentSha256,
+        sourcePath: SOURCE_A,
+        openTarget: promotedOpenTarget(input, { sourceSha256: version.contentSha256 }),
         candidateDisplayVersionLabel: "版本 2",
         version,
       };
@@ -320,14 +373,25 @@ function createHarness({
     },
     async prepareManagedSourceTransition(input) {
       calls.prepare.push(input);
+      const updatesCurrentProject = (
+        projectSession.projectId === input.nextProjectId
+        && projectSession.documentId === input.nextDocumentId
+      );
       return Object.freeze({
         previousSourcePath: input.previousSourcePath,
         nextSourcePath: input.nextSourcePath,
         projectId: input.nextProjectId,
         documentId: input.nextDocumentId,
         openTarget: input.openTarget || null,
-        updatesCurrentProject: projectSession.projectId === input.nextProjectId,
-        activatedProject: null,
+        updatesCurrentProject,
+        activatedProject: updatesCurrentProject && !sameSourcePath(input.previousSourcePath, input.nextSourcePath)
+          ? {
+              operationId: input.operationId,
+              sourcePath: input.nextSourcePath,
+              sha256: input.expectedSha256,
+              html: input.nextSourcePath === HISTORY_WORKING_COPY_PATH ? HISTORY_HTML : CANDIDATE_HTML,
+            }
+          : null,
       });
     },
     commitManagedSourceTransition({ prepared, html, sourceSha256, publishVersion, publishSessions }) {
@@ -386,10 +450,16 @@ function createHarness({
       if (onCatalogAfterSettlement) onCatalogAfterSettlement(context);
     },
   };
+  const recoveryState = {
+    context,
+    recoveryId: "recovery-existing-001",
+    status: "pending",
+  };
   const documentWorkflow = {
     observeExternalSourceChange,
     clearRecovery() {
       calls.clearRecovery += 1;
+      recoveryState.status = "cleared";
     },
     clearAudit() {
       calls.clearAudit += 1;
@@ -432,7 +502,10 @@ function createHarness({
       hash: { sha256: async (html) => sha256(html) },
       canvas: {
         freezeWorkingSource: () => ({ ok: true }),
-        freeze: () => ({ ok: true, html: documentSession.html }),
+        freeze: () => {
+          calls.freeze += 1;
+          return { ok: true, html: documentSession.html };
+        },
         async verifyRendered(html, hash, nextContext) {
           calls.render.push({ html, hash, context: nextContext });
           if (verifyRendered) await verifyRendered(html, hash, nextContext);
@@ -457,6 +530,7 @@ function createHarness({
     commentSession,
     draftSession,
     calls,
+    recoveryState,
     context,
   };
 }
@@ -504,7 +578,7 @@ test("review preparation fences a late candidate read after cancellation", async
 
 test("activation validates all content and synchronously publishes every Session authority", async () => {
   const harness = createHarness();
-  const run = readyRun();
+  const run = readyRun({ sourceWorkingCopyId: "work_ver_0001" });
   harness.runSession.trackRun(run, { activate: "always" });
 
   const outcome = await harness.workflow.activateReadyVersion({ run });
@@ -517,6 +591,7 @@ test("activation validates all content and synchronously publishes every Session
   assert.equal(harness.versionSession.snapshot.currentExactVersionId, "ver_0002");
   assert.equal(harness.versionSession.snapshot.viewMode, "current");
   assert.equal(harness.runSession.activeRun?.status, "complete");
+  assert.equal(harness.runSession.activeRun.sourceWorkingCopyId, "work_ver_0001");
   assert.equal(harness.calls.render.at(-1)?.html, CANDIDATE_HTML);
   assert.equal(harness.calls.clearAudit, 1);
   assert.equal(harness.calls.resetComments, 0);
@@ -588,6 +663,8 @@ test("activation rejects completion/version hash drift before publishing current
       versionId: input.versionId,
       contentSha256: sha256("tampered"),
       sourceSha256: sha256("tampered"),
+      sourcePath: SOURCE_A,
+      openTarget: promotedOpenTarget(input, { sourceSha256: sha256("tampered") }),
       version: {
         ...versionRecord({ id: input.versionId }),
         contentSha256: sha256("tampered"),
@@ -626,6 +703,75 @@ test("activation rejects malformed ready identity before the explicit Bridge mut
   assert.equal(harness.versionSession.snapshot.currentExactVersionId, "ver_0001");
 });
 
+test("activation fails closed when a hydrated ready run has no Candidate identity", async () => {
+  const harness = createHarness();
+  const run = readyRun();
+  run.readyPayload = {
+    ...run.readyPayload,
+    candidateId: null,
+    candidate: null,
+    navigationOperationId: "navigation_should_not_be_used",
+  };
+  harness.runSession.trackRun(run, { activate: "always" });
+
+  const outcome = await harness.workflow.activateReadyVersion({ run });
+
+  assert.equal(outcome.status, "blocked");
+  assert.equal(outcome.code, "VERSION_ACTIVATION_PRECONDITION");
+  assert.equal(harness.calls.activate, 0);
+  assert.equal(harness.calls.commit.length, 0);
+  assert.equal(harness.documentSession.html, BASE_HTML);
+  assert.equal(harness.versionSession.snapshot.currentExactVersionId, "ver_0001");
+});
+
+test("Candidate Promotion rejects an incomplete or wrong-kind response target before local Desktop transition", async () => {
+  const mutations = [
+    ["null target", () => null],
+    ["version target", (target) => ({ ...target, targetKind: "version" })],
+    ["missing version", (target) => ({ ...target, versionId: "" })],
+    ["missing path", (target) => ({ ...target, exactSourcePath: "" })],
+    ["missing hash", (target) => ({ ...target, sourceSha256: "" })],
+    ["wrong document", (target) => ({ ...target, documentId: "document_other" })],
+  ];
+
+  for (const [label, mutate] of mutations) {
+    const harness = createHarness({
+      activation: async (input) => {
+        const version = versionRecord({ id: input.versionId });
+        const target = promotedOpenTarget(input, { sourceSha256: version.contentSha256 });
+        return {
+          projectId: input.projectId,
+          documentId: input.documentId,
+          requestId: input.requestId,
+          attemptId: input.attemptId,
+          versionId: input.versionId,
+          sourcePath: SOURCE_A,
+          contentSha256: version.contentSha256,
+          sourceSha256: version.contentSha256,
+          currentHtmlSha256: version.contentSha256,
+          openTarget: mutate(target),
+          version,
+        };
+      },
+    });
+    const run = readyRun();
+    harness.runSession.trackRun(run, { activate: "always" });
+    const beforeDocument = harness.documentSession.snapshot;
+    const beforeVersion = harness.versionSession.snapshot;
+    const beforeProject = harness.projectSession.context;
+
+    const outcome = await harness.workflow.activateReadyVersion({ run });
+
+    assert.equal(outcome.status, "rejected", label);
+    assert.equal(harness.calls.activate, 1, label);
+    assert.equal(harness.calls.prepare.length, 0, label);
+    assert.equal(harness.calls.commit.length, 0, label);
+    assert.deepEqual(harness.documentSession.snapshot, beforeDocument, label);
+    assert.deepEqual(harness.versionSession.snapshot, beforeVersion, label);
+    assert.deepEqual(harness.projectSession.context, beforeProject, label);
+  }
+});
+
 test("activation remains read-only while project hydration is in flight", async () => {
   const harness = createHarness();
   const run = readyRun();
@@ -654,11 +800,142 @@ test("background activation never replaces the active Canvas", async () => {
   assert.equal(outcome.value.current, false);
   assert.equal(harness.documentSession.html, B_HTML);
   assert.equal(harness.versionSession.snapshot.currentExactVersionId, "ver_0001");
+  assert.equal(harness.calls.activate, 0);
   assert.equal(harness.calls.commit.length, 0);
-  assert.equal(harness.calls.activateInputs[0].projectRootPath, "/tmp/project-a");
-  assert.equal(harness.calls.activateInputs[0].workingCopyId, "work_ver_0001");
-  assert.equal(harness.calls.activateInputs[0].sourcePath, SOURCE_A);
-  assert.equal(harness.calls.catalogAfterSettlement.length, 1);
+  assert.equal(harness.calls.catalogAfterSettlement.length, 0);
+});
+
+test("openCommittedVersion does not clear background-document recovery for a same-project different-document result", async () => {
+  const harness = createHarness();
+  const locator = harness.projectSession.openLocator(SOURCE_A);
+  harness.projectSession.register({
+    ...locator,
+    projectId: "project_a",
+    documentId: "document_other",
+    openTarget: {
+      projectId: "project_a",
+      documentId: "document_other",
+      projectRootPath: "/tmp/project-a",
+      targetKind: "working-copy",
+      workingCopyId: "work_ver_0001",
+      versionId: "ver_0001",
+      exactSourcePath: SOURCE_A,
+      sourceSha256: sha256(BASE_HTML),
+    },
+  });
+  const run = readyRun();
+  const beforeDocument = harness.documentSession.snapshot;
+  const beforeVersion = harness.versionSession.snapshot;
+  const beforeComments = harness.commentSession.snapshot;
+  const outcome = await harness.workflow.openCommittedVersion({
+    run,
+    payload: {
+      ...run.readyPayload,
+      ok: true,
+      status: "version-activated",
+      projectId: run.projectId,
+      documentId: run.documentId,
+      versionId: run.candidateVersionId,
+      sourcePath: SOURCE_A,
+      content: CANDIDATE_HTML,
+      contentSha256: sha256(CANDIDATE_HTML),
+      sourceSha256: sha256(CANDIDATE_HTML),
+      currentHtmlSha256: sha256(CANDIDATE_HTML),
+      lastModifiedAt: "2026-08-12T00:00:02.000Z",
+      openTarget: promotedOpenTarget(run, {
+        sourceSha256: sha256(CANDIDATE_HTML),
+        versionId: run.candidateVersionId,
+      }),
+      version: versionRecord({ id: run.candidateVersionId }),
+    },
+  });
+  assert.equal(outcome.status, "succeeded");
+  assert.equal(outcome.value.current, false);
+  assert.equal(harness.calls.commit.length, 0);
+  assert.equal(harness.calls.clearRecovery, 0);
+  assert.equal(harness.calls.resetComments, 0);
+  assert.deepEqual(harness.documentSession.snapshot, beforeDocument);
+  assert.deepEqual(harness.versionSession.snapshot, beforeVersion);
+  assert.deepEqual(harness.commentSession.snapshot, beforeComments);
+});
+
+test("openCommittedVersion rejects incomplete or mismatched OpenTarget before current classification", async () => {
+  const cases = [
+    ["null target", () => null],
+    ["wrong document target", (target) => ({ ...target, documentId: "document_other" })],
+    ["wrong version target", (target) => ({ ...target, versionId: "ver_0099" })],
+  ];
+
+  for (const [label, mutateTarget] of cases) {
+    const harness = createHarness();
+    const run = readyRun();
+    const candidateSha256 = sha256(CANDIDATE_HTML);
+    const beforeProject = harness.projectSession.context;
+    const beforeDocument = harness.documentSession.snapshot;
+    const beforeVersion = harness.versionSession.snapshot;
+    const beforeComments = harness.commentSession.snapshot;
+    const beforeRecovery = { ...harness.recoveryState };
+    const outcome = await harness.workflow.openCommittedVersion({
+      run,
+      payload: {
+        ...run.readyPayload,
+        ok: true,
+        status: "version-activated",
+        projectId: run.projectId,
+        documentId: run.documentId,
+        versionId: run.candidateVersionId,
+        sourcePath: SOURCE_A,
+        content: CANDIDATE_HTML,
+        contentSha256: candidateSha256,
+        sourceSha256: candidateSha256,
+        currentHtmlSha256: candidateSha256,
+        lastModifiedAt: "2026-08-12T00:00:02.000Z",
+        openTarget: mutateTarget(promotedOpenTarget(run, { sourceSha256: candidateSha256 })),
+        version: versionRecord({ id: run.candidateVersionId }),
+      },
+    });
+
+    assert.equal(outcome.status, "rejected", label);
+    assert.equal(harness.calls.freeze, 0, label);
+    assert.equal(harness.calls.clearRecovery, 0, label);
+    assert.equal(harness.calls.prepare.length, 0, label);
+    assert.equal(harness.calls.commit.length, 0, label);
+    assert.deepEqual(harness.projectSession.context, beforeProject, label);
+    assert.deepEqual(harness.documentSession.snapshot, beforeDocument, label);
+    assert.deepEqual(harness.versionSession.snapshot, beforeVersion, label);
+    assert.deepEqual(harness.commentSession.snapshot, beforeComments, label);
+    assert.deepEqual(harness.recoveryState, beforeRecovery, label);
+  }
+});
+
+test("Version to Project transition with the same project but another document stays publication-free", async () => {
+  const harness = createHarness();
+  const run = readyRun();
+  run.documentId = "document_other";
+  run.readyPayload = {
+    ...run.readyPayload,
+    documentId: "document_other",
+    candidate: { ...run.readyPayload.candidate, documentId: "document_other" },
+    openTarget: { ...run.readyPayload.openTarget, documentId: "document_other" },
+    version: { ...run.readyPayload.version, documentId: "document_other" },
+    outcome: { ...run.readyPayload.outcome, documentId: "document_other" },
+  };
+  harness.runSession.trackRun(run, { activate: "always" });
+  const beforeProject = harness.projectSession.context;
+  const beforeDocument = harness.documentSession.snapshot;
+  const beforeVersion = harness.versionSession.snapshot;
+  const beforeComments = harness.commentSession.snapshot;
+
+  const outcome = await harness.workflow.activateReadyVersion({ run });
+
+  assert.equal(outcome.status, "succeeded");
+  assert.equal(outcome.value.current, false);
+  assert.equal(harness.calls.activate, 0);
+  assert.equal(harness.calls.commit.length, 0);
+  assert.deepEqual(harness.projectSession.context, beforeProject);
+  assert.deepEqual(harness.documentSession.snapshot, beforeDocument);
+  assert.deepEqual(harness.versionSession.snapshot, beforeVersion);
+  assert.deepEqual(harness.commentSession.snapshot, beforeComments);
 });
 
 test("activation reuses activation-response bytes without a Bridge read-back", async () => {
@@ -675,6 +952,7 @@ test("activation reuses activation-response bytes without a Bridge read-back", a
       sourceSha256: sha256(CANDIDATE_HTML),
       currentHtmlSha256: sha256(CANDIDATE_HTML),
       sourcePath: SOURCE_A,
+      openTarget: promotedOpenTarget(input),
       content: CANDIDATE_HTML,
       lastModifiedAt: "2026-08-12T00:00:02.000Z",
       candidateDisplayVersionLabel: "版本 2",
@@ -709,6 +987,7 @@ test("activation rejects activation-response bytes whose hash does not match", a
       sourceSha256: sha256(CANDIDATE_HTML),
       currentHtmlSha256: sha256(CANDIDATE_HTML),
       sourcePath: SOURCE_A,
+      openTarget: promotedOpenTarget(input),
       content: CANDIDATE_HTML.replace("candidate", "tampered"),
       lastModifiedAt: "2026-08-12T00:00:02.000Z",
       candidateDisplayVersionLabel: "版本 2",
@@ -1062,6 +1341,72 @@ test("history continuation retries one lost Bridge response with the same receip
   assert.equal(harness.calls.confirmHistory[0].operationId, harness.calls.continueHistory[0].operationId);
 });
 
+test("legacy history adopts a preseeded Repository receipt before later workspace validation", async () => {
+  const receipt = {
+    operationId: "history_preseed_x_0001",
+    projectId: "project_a",
+    documentId: "document_a",
+    previousWorkingCopyId: "work_ver_0001",
+    activatedWorkingCopyId: "work_ver_0002",
+    versionId: "ver_0001",
+    state: "desktop-pending",
+    createdAt: "2026-08-14T00:00:00.000Z",
+  };
+  const calls = [];
+  const responseFor = (operationId, malformed = false) => ({
+    ok: true,
+    status: "history-working-copy-activated",
+    projectId: "project_a",
+    documentId: "document_a",
+    sourcePath: HISTORY_WORKING_COPY_PATH,
+    operationId,
+    historyActivation: { ...receipt, operationId },
+    openTarget: {
+      projectId: "project_a",
+      documentId: "document_a",
+      projectRootPath: "/tmp/project-a",
+      targetKind: "working-copy",
+      workingCopyId: "work_ver_0002",
+      versionId: "ver_0001",
+      exactSourcePath: HISTORY_WORKING_COPY_PATH,
+      sourceSha256: sha256(BASE_HTML),
+    },
+    currentHtmlSha256: sha256(BASE_HTML),
+    currentBasedOnVersionId: "ver_0001",
+    currentExactVersionId: "ver_0001",
+    restoredFromVersionId: null,
+    latestVersionId: "ver_0001",
+    versions: malformed ? [] : [versionRecord({ id: "ver_0001", content: BASE_HTML })],
+    content: BASE_HTML,
+    lastModifiedAt: "2026-08-14T00:00:00.000Z",
+    activeDraft: {
+      draftRevision: 0,
+      comments: [],
+      changeEvents: [],
+      deletedCommentIds: [],
+      appliedOperationIds: [],
+    },
+  });
+  const harness = createHarness({
+    continueHistory: async (input) => {
+      calls.push(input);
+      return responseFor(receipt.operationId, calls.length === 1);
+    },
+  });
+  harness.versionSession.enterHistory("ver_0001");
+  const first = await harness.workflow.continueEditingHistoryVersion({ context: harness.context });
+  assert.equal(first.status, "unknown");
+  assert.equal(first.operationId, receipt.operationId);
+  assert.equal(harness.calls.confirmHistory.length, 0);
+  const second = await harness.workflow.continueEditingHistoryVersion({ context: harness.context });
+  assert.equal(second.status, "succeeded");
+  assert.equal(calls.length, 2);
+  assert.notEqual(calls[0].operationId, receipt.operationId);
+  assert.equal(calls[1].operationId, receipt.operationId);
+  assert.equal(harness.calls.confirmHistory.length, 1);
+  assert.equal(harness.calls.confirmHistory[0].operationId, receipt.operationId);
+});
+
 test("history continuation keeps the V2 Working Copy active when Canvas validation fails", async () => {
   let failHistoryRender = false;
   const harness = createHarness({
@@ -1150,6 +1495,193 @@ test("history continuation keeps the V2 Working Copy active when Canvas validati
   assert.equal(harness.documentSession.html, HISTORY_HTML);
 });
 
+test("legacy history retains one Repository receipt until local commit and never confirms a collision", async () => {
+  let hostMutationCount = 0;
+  let hostReceiptCommitted = false;
+  let collision = true;
+  let blockConfirmation = false;
+  const confirmationGate = deferred();
+  const v2 = versionRecord({ id: "ver_0002", content: HISTORY_HTML });
+  const v6 = versionRecord({ id: "ver_0006", content: CANDIDATE_HTML });
+  const historyResponse = (input) => {
+    if (!hostReceiptCommitted) {
+      hostReceiptCommitted = true;
+      hostMutationCount += 1;
+    }
+    return {
+      ok: true,
+      status: "history-working-copy-activated",
+      projectId: "project_a",
+      documentId: "document_a",
+      sourcePath: HISTORY_WORKING_COPY_PATH,
+      openTarget: {
+        projectId: "project_a",
+        documentId: "document_a",
+        projectRootPath: "/tmp/project-a",
+        targetKind: "working-copy",
+        workingCopyId: "work_ver_0002",
+        versionId: "ver_0002",
+        exactSourcePath: HISTORY_WORKING_COPY_PATH,
+        sourceSha256: sha256(HISTORY_HTML),
+      },
+      currentHtmlSha256: sha256(HISTORY_HTML),
+      currentBasedOnVersionId: "ver_0002",
+      currentExactVersionId: "ver_0002",
+      restoredFromVersionId: null,
+      latestVersionId: "ver_0006",
+      versions: [v2, v6],
+      content: HISTORY_HTML,
+      lastModifiedAt: "2026-08-14T00:00:00.000Z",
+      historyActivation: {
+        operationId: input.operationId,
+        projectId: "project_a",
+        documentId: "document_a",
+        previousWorkingCopyId: "work_ver_0006",
+        activatedWorkingCopyId: "work_ver_0002",
+        versionId: "ver_0002",
+        state: "desktop-pending",
+        createdAt: "2026-08-14T00:00:00.000Z",
+      },
+      operationId: input.operationId,
+      activeDraft: {
+        draftRevision: 0,
+        comments: [],
+        changeEvents: [],
+        deletedCommentIds: [],
+        appliedOperationIds: [],
+      },
+    };
+  };
+  const harness = createHarness({
+    versionRead: async (_sourcePath, versionId) => ({
+      projectId: "project_a",
+      documentId: "document_a",
+      versionId,
+      content: versionId === "ver_0002" ? HISTORY_HTML : CANDIDATE_HTML,
+      sha256: sha256(versionId === "ver_0002" ? HISTORY_HTML : CANDIDATE_HTML),
+    }),
+    continueHistory: async (input) => historyResponse(input),
+    confirmHistory: async (input) => {
+      if (blockConfirmation) return confirmationGate.promise;
+      return {
+        ok: true,
+        status: "history-working-copy-desktop-confirmed",
+        projectId: input.projectId,
+        documentId: input.documentId,
+        operationId: input.operationId,
+        historyActivation: {
+          operationId: input.operationId,
+          projectId: input.projectId,
+          documentId: input.documentId,
+          previousWorkingCopyId: input.previousWorkingCopyId,
+          activatedWorkingCopyId: input.activatedWorkingCopyId,
+          versionId: input.versionId,
+          state: "desktop-confirmed",
+          createdAt: "2026-08-14T00:00:00.000Z",
+        },
+      };
+    },
+  });
+  harness.versionSession.hydrate({
+    versions: decodedVersions([v2, v6]),
+    latestVersionId: "ver_0006",
+    currentBasedOnVersionId: "ver_0006",
+    currentExactVersionId: "ver_0006",
+  });
+  assert.equal((await harness.workflow.viewHistory({
+    version: decodedVersions([v2])[0],
+    context: harness.context,
+  })).status, "succeeded");
+
+  const originalPrepare = harness.projectWorkflow.prepareManagedSourceTransition;
+  harness.projectWorkflow.prepareManagedSourceTransition = async (input) => {
+    if (collision) {
+      harness.calls.prepare.push(input);
+      return {
+        previousSourcePath: input.previousSourcePath,
+        nextSourcePath: input.nextSourcePath,
+        projectId: input.nextProjectId,
+        documentId: input.nextDocumentId,
+        openTarget: input.openTarget,
+        updatesCurrentProject: true,
+        activatedProject: null,
+      };
+    }
+    const prepared = await originalPrepare(input);
+    return prepared;
+  };
+
+  const beforeDocument = harness.documentSession.snapshot;
+  const beforeVersion = harness.versionSession.snapshot;
+  const first = await harness.workflow.continueEditingHistoryVersion({
+    context: harness.projectSession.context,
+  });
+  assert.equal(first.status, "unknown");
+  assert.equal(harness.calls.confirmHistory.length, 0);
+  assert.equal(harness.calls.commit.length, 0);
+  assert.equal(hostMutationCount, 1);
+  assert.deepEqual(harness.documentSession.snapshot, beforeDocument);
+  assert.deepEqual(harness.versionSession.snapshot, beforeVersion);
+
+  collision = false;
+  blockConfirmation = true;
+  const secondAttempt = harness.workflow.continueEditingHistoryVersion({
+    context: harness.projectSession.context,
+  });
+  for (let attempt = 0; attempt < 20 && harness.calls.confirmHistory.length === 0; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  assert.equal(harness.calls.confirmHistory.length, 1);
+  const changedContext = harness.projectSession.openLocator(SOURCE_B);
+  harness.projectSession.register({
+    ...changedContext,
+    projectId: "project_b",
+    documentId: "document_b",
+  });
+  harness.runSession.activate(SOURCE_B);
+  harness.documentSession.publishAuthority({ html: B_HTML, persistedSourceSha256: sha256(B_HTML) });
+  confirmationGate.resolve({
+    ok: true,
+    status: "history-working-copy-desktop-confirmed",
+    projectId: "project_a",
+    documentId: "document_a",
+    operationId: harness.calls.confirmHistory[0].operationId,
+    historyActivation: {
+      operationId: harness.calls.confirmHistory[0].operationId,
+      projectId: "project_a",
+      documentId: "document_a",
+      previousWorkingCopyId: "work_ver_0006",
+      activatedWorkingCopyId: "work_ver_0002",
+      versionId: "ver_0002",
+      state: "desktop-confirmed",
+      createdAt: "2026-08-14T00:00:00.000Z",
+    },
+  });
+  const second = await secondAttempt;
+  assert.equal(second.status, "unknown");
+  assert.equal(hostMutationCount, 1);
+  assert.equal(harness.calls.commit.length, 0);
+
+  const restoredContext = harness.projectSession.openLocator(SOURCE_A);
+  harness.projectSession.register({
+    ...restoredContext,
+    projectId: "project_a",
+    documentId: "document_a",
+  });
+  harness.runSession.activate(SOURCE_A);
+  harness.documentSession.publishAuthority({ html: BASE_HTML, persistedSourceSha256: sha256(BASE_HTML) });
+  blockConfirmation = false;
+  const third = await harness.workflow.continueEditingHistoryVersion({
+    context: harness.projectSession.context,
+  });
+  assert.equal(third.status, "succeeded");
+  assert.equal(hostMutationCount, 1);
+  assert.equal(harness.calls.continueHistory.length, 3);
+  assert.equal(new Set(harness.calls.continueHistory.map((input) => input.operationId)).size, 1);
+  assert.equal(harness.calls.confirmHistory.length, 2);
+  assert.equal(harness.calls.commit.length, 1);
+});
+
 test("return-current preserves working authority and checks external changes independently", async () => {
   const observation = deferred();
   let observedPath;
@@ -1174,6 +1706,17 @@ test("return-current preserves working authority and checks external changes ind
 test("malformed committed history response remains unknown and preserves Session authority", async () => {
   const harness = createHarness({ continueHistory: async () => ({
     ok: true, status: "history-working-copy-activated", projectId: "project_a", documentId: "document_a",
+    operationId: "history_malformed_receipt_0001",
+    historyActivation: {
+      operationId: "history_malformed_receipt_0001",
+      projectId: "project_a",
+      documentId: "document_a",
+      previousWorkingCopyId: "work_ver_0001",
+      activatedWorkingCopyId: "work_ver_0002",
+      versionId: "ver_0001",
+      state: "desktop-pending",
+      createdAt: "2026-08-14T00:00:00.000Z",
+    },
     versions: [versionRecord({ id: "ver_0001" }), versionRecord({ id: "ver_0001" })],
   }) });
   harness.versionSession.enterHistory("ver_0001");
@@ -1391,7 +1934,8 @@ test("lost adoption reply reconciles the same Candidate decision without a new o
     if (++count === 1) throw new BridgeRequestError("response lost", { outcome: "unknown" });
     const version = versionRecord({ id: input.versionId });
     return { ...input, contentSha256: version.contentSha256, sourceSha256: version.contentSha256,
-      currentHtmlSha256: version.contentSha256, version };
+      currentHtmlSha256: version.contentSha256, sourcePath: SOURCE_A,
+      openTarget: promotedOpenTarget(input, { sourceSha256: version.contentSha256 }), version };
   } });
   const run = readyRun({ candidateId: "candidate_synthetic" });
   harness.runSession.trackRun(run, { activate: "always" });
@@ -1400,6 +1944,7 @@ test("lost adoption reply reconciles the same Candidate decision without a new o
   assert.equal(harness.calls.activate, 2);
   assert.deepEqual(harness.calls.activateInputs[0], harness.calls.activateInputs[1]);
   assert.equal(harness.calls.activateInputs[0].decisionOperationId, "promote_candidate_synthetic");
+  assert.equal(harness.calls.prepare[0].operationId, "promote_candidate_synthetic");
   assert.equal(harness.calls.commit.length, 1);
 });
 
@@ -1412,7 +1957,9 @@ test("two lost adoption replies retain one decision and automatically reconcile 
     return { projectId: input.projectId, documentId: input.documentId,
       requestId: input.requestId, attemptId: input.attemptId, versionId: input.versionId,
       contentSha256: version.contentSha256, sourceSha256: version.contentSha256,
-      currentHtmlSha256: version.contentSha256, candidateDisplayVersionLabel: "版本 2", version };
+      currentHtmlSha256: version.contentSha256, sourcePath: SOURCE_A,
+      openTarget: promotedOpenTarget(input, { sourceSha256: version.contentSha256 }),
+      candidateDisplayVersionLabel: "版本 2", version };
   } });
   t.after(() => harness.workflow.dispose());
   const run = readyRun({ candidateId: "candidate_adoption_recovery" });

@@ -266,6 +266,7 @@ const MAX_HTML_BYTES = PRODUCT_MAX_HTML_BYTES;
 const MAX_STATE_BYTES = 1024 * 1024;
 const MAX_PATH_LENGTH = 4096;
 const MAX_RECENT_PROJECTS = 12;
+const MAX_ACTIVATION_RECEIPTS = 32;
 const HTML_EXTENSIONS = new Set([".html", ".htm"]);
 const PROJECT_STATE_VERSION = 2;
 const PROJECT_CHANNELS = Object.freeze({
@@ -775,6 +776,9 @@ function emptyProjectState() {
     pendingRename: null,
     lastRename: null,
     lastManagedActivation: null,
+    activeEffect: null,
+    activeEffectGeneration: 0,
+    activationReceipts: [],
     importedAssetRoots: [],
     activeManagedLocator: null,
   };
@@ -929,20 +933,264 @@ function normalizeManagedWorkingCopyActivation(value) {
   }
 }
 
-function sameManagedWorkingCopyActivation(left, right) {
+function normalizeActivationEffectTuple(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const operationId = String(value.operationId || "");
+  const kind = String(value.kind || "");
+  const effectKind = String(value.effectKind || "active-path");
+  try {
+    const projectId = String(value.projectId || "");
+    const documentId = String(value.documentId || "");
+    const versionId = String(value.versionId || "");
+    const expectedSha256 = String(value.expectedSha256 || "").trim().toLowerCase();
+    const projectRootPath = value.projectRootPath == null
+      ? null
+      : String(value.projectRootPath);
+    const committedAt = Number(value.committedAt ?? value.updatedAt);
+    if (
+      !/^[A-Za-z0-9_-]{8,160}$/.test(operationId)
+      || !["managed-working-copy", "generated-version"].includes(kind)
+      || effectKind !== "active-path"
+      || !/^project_[A-Za-z0-9_-]+$/.test(projectId)
+      || (documentId && !/^doc_[A-Za-z0-9_-]+$/.test(documentId))
+      || !/^ver_\d{4,}$/.test(versionId)
+      || !/^sha256:[a-f0-9]{64}$/.test(expectedSha256)
+      || (kind === "managed-working-copy" && !/^work_ver_\d{4,}$/.test(String(value.workingCopyId || "")))
+      || (projectRootPath !== null && (!projectRootPath || projectRootPath.length > MAX_PATH_LENGTH || projectRootPath.includes("\0")))
+      || !Number.isFinite(committedAt)
+    ) return null;
+    return Object.freeze({
+      operationId,
+      kind,
+      effectKind,
+      projectId,
+      documentId: documentId || null,
+      workingCopyId: kind === "managed-working-copy" ? String(value.workingCopyId) : null,
+      versionId,
+      expectedSha256,
+      previousSourcePath: assertHtmlPath(value.previousSourcePath, "previousSourcePath"),
+      nextSourcePath: assertHtmlPath(value.nextSourcePath, "nextSourcePath"),
+      projectRootPath: projectRootPath === null ? null : path.resolve(projectRootPath),
+      committedAt,
+    });
+  } catch {
+    return null;
+  }
+}
+
+function normalizeActiveEffectGeneration(value) {
+  const generation = Number(value);
+  return Number.isSafeInteger(generation) && generation >= 0 ? generation : 0;
+}
+
+function bumpActiveEffectGeneration(state) {
+  const current = normalizeActiveEffectGeneration(state.activeEffectGeneration);
+  if (current >= Number.MAX_SAFE_INTEGER) {
+    throw new ProjectFileError(
+      "ACTIVE_EFFECT_GENERATION_EXHAUSTED",
+      "活动文件切换序列已达到上限，不能安全继续切换。",
+    );
+  }
+  state.activeEffectGeneration = current + 1;
+  return state.activeEffectGeneration;
+}
+
+function normalizeActivationReceipt(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const operationId = String(value.operationId || "");
+  const kind = String(value.kind || "");
+  const effectKind = String(value.effectKind || "active-path");
+  const status = String(value.status || "");
+  if (
+    !/^[A-Za-z0-9_-]{8,160}$/.test(operationId)
+    || !["managed-working-copy", "generated-version"].includes(kind)
+    || effectKind !== "active-path"
+    || !["pending", "completed"].includes(status)
+  ) return null;
+  try {
+    const projectId = String(value.projectId || "");
+    const documentId = String(value.documentId || "");
+    const versionId = String(value.versionId || "");
+    const expectedSha256 = String(value.expectedSha256 || "").trim().toLowerCase();
+    const projectRootPath = value.projectRootPath == null
+      ? null
+      : String(value.projectRootPath);
+    const predecessorGeneration = value.predecessorGeneration == null
+      ? null
+      : Number(value.predecessorGeneration);
+    const hasPredecessorEffect = Object.prototype.hasOwnProperty.call(
+      value,
+      "predecessorEffect",
+    );
+    const predecessorEffect = value.predecessorEffect === null
+      ? null
+      : normalizeActivationEffectTuple(value.predecessorEffect);
+    const predecessorProofValid = (
+      value.predecessorProofValid !== false
+      && Number.isSafeInteger(predecessorGeneration)
+      && predecessorGeneration >= 0
+      && hasPredecessorEffect
+      && (value.predecessorEffect === null || predecessorEffect !== null)
+    );
+    if (
+      !/^project_[A-Za-z0-9_-]+$/.test(projectId)
+      || (documentId && !/^doc_[A-Za-z0-9_-]+$/.test(documentId))
+      || !/^ver_\d{4,}$/.test(versionId)
+      || !/^sha256:[a-f0-9]{64}$/.test(expectedSha256)
+      || (kind === "managed-working-copy" && !/^work_ver_\d{4,}$/.test(String(value.workingCopyId || "")))
+      || (projectRootPath !== null && (!projectRootPath || projectRootPath.length > MAX_PATH_LENGTH || projectRootPath.includes("\0")))
+      || !Number.isFinite(Number(value.updatedAt))
+    ) return null;
+    return Object.freeze({
+      operationId,
+      kind,
+      effectKind,
+      status,
+      projectId,
+      documentId: documentId || null,
+      workingCopyId: kind === "managed-working-copy" ? String(value.workingCopyId) : null,
+      versionId,
+      expectedSha256,
+      previousSourcePath: assertHtmlPath(value.previousSourcePath, "previousSourcePath"),
+      nextSourcePath: assertHtmlPath(value.nextSourcePath, "nextSourcePath"),
+      projectRootPath: projectRootPath === null ? null : path.resolve(projectRootPath),
+      updatedAt: Number(value.updatedAt),
+      predecessorGeneration: Number.isSafeInteger(predecessorGeneration)
+        && predecessorGeneration >= 0
+        ? predecessorGeneration
+        : null,
+      predecessorEffect,
+      predecessorProofValid,
+    });
+  } catch {
+    return null;
+  }
+}
+
+function normalizeActivationReceipts(values) {
+  if (!Array.isArray(values)) return [];
+  const seen = new Set();
+  const receipts = [];
+  for (const value of values) {
+    const receipt = normalizeActivationReceipt(value);
+    if (!receipt || seen.has(receipt.operationId)) continue;
+    seen.add(receipt.operationId);
+    receipts.push(receipt);
+    if (receipts.length >= MAX_ACTIVATION_RECEIPTS) break;
+  }
+  return receipts;
+}
+
+function normalizeActiveEffect(value) {
+  return normalizeActivationEffectTuple(value);
+}
+
+function activationReceiptFor(state, operationId) {
+  const key = String(operationId || "");
+  return state.activationReceipts.find((receipt) => receipt.operationId === key)
+    || (state.lastManagedActivation?.operationId === key
+      ? normalizeActivationReceipt({
+        ...state.lastManagedActivation,
+        kind: "managed-working-copy",
+        status: "completed",
+        updatedAt: state.lastManagedActivation.completedAt,
+      })
+      : null);
+}
+
+function sameActivationReceipt(receipt, candidate) {
   return Boolean(
-    left
-    && right
-    && left.operationId === right.operationId
-    && left.projectId === right.projectId
-    && left.documentId === right.documentId
-    && left.workingCopyId === right.workingCopyId
-    && left.versionId === right.versionId
-    && left.expectedSha256 === right.expectedSha256
-    && left.previousSourcePath === right.previousSourcePath
-    && left.nextSourcePath === right.nextSourcePath
-    && left.projectRootPath === right.projectRootPath,
+    receipt
+    && candidate
+    && receipt.operationId === candidate.operationId
+    && receipt.kind === candidate.kind
+    && receipt.effectKind === candidate.effectKind
+    && receipt.projectId === candidate.projectId
+    && receipt.documentId === candidate.documentId
+    && receipt.workingCopyId === candidate.workingCopyId
+    && receipt.versionId === candidate.versionId
+    && receipt.expectedSha256 === candidate.expectedSha256
+    && receipt.previousSourcePath === candidate.previousSourcePath
+    && receipt.nextSourcePath === candidate.nextSourcePath
+    && receipt.projectRootPath === candidate.projectRootPath
   );
+}
+
+function sameActivationEffect(effect, receipt) {
+  return Boolean(
+    effect
+    && receipt
+    && effect.operationId === receipt.operationId
+    && effect.kind === receipt.kind
+    && effect.effectKind === receipt.effectKind
+    && effect.projectId === receipt.projectId
+    && effect.documentId === receipt.documentId
+    && effect.workingCopyId === receipt.workingCopyId
+    && effect.versionId === receipt.versionId
+    && effect.expectedSha256 === receipt.expectedSha256
+    && effect.previousSourcePath === receipt.previousSourcePath
+    && effect.nextSourcePath === receipt.nextSourcePath
+    && effect.projectRootPath === receipt.projectRootPath
+  );
+}
+
+function sameActivationPredecessor(state, receipt) {
+  if (!receipt?.predecessorProofValid) return false;
+  if (normalizeActiveEffectGeneration(state.activeEffectGeneration) !== receipt.predecessorGeneration) {
+    return false;
+  }
+  const activeEffect = normalizeActiveEffect(state.activeEffect);
+  if (!activeEffect && !receipt.predecessorEffect) return true;
+  return sameActivationEffect(activeEffect, receipt.predecessorEffect);
+}
+
+function rememberActivationReceipt(state, receipt) {
+  state.activationReceipts = [
+    receipt,
+    ...(state.activationReceipts || []).filter((entry) => entry.operationId !== receipt.operationId),
+  ].slice(0, MAX_ACTIVATION_RECEIPTS);
+}
+
+async function persistActivationReceipt(state, receipt) {
+  rememberActivationReceipt(state, Object.freeze({ ...receipt, updatedAt: Date.now() }));
+  await persistProjectState();
+}
+
+function activationReceiptCandidate({
+  kind,
+  operationId,
+  projectId,
+  documentId = null,
+  workingCopyId = null,
+  versionId,
+  expectedSha256,
+  previousSourcePath,
+  nextSourcePath,
+  projectRootPath = null,
+  predecessorGeneration,
+  predecessorEffect,
+}) {
+  const normalizedPredecessorGeneration = normalizeActiveEffectGeneration(
+    predecessorGeneration,
+  );
+  return Object.freeze({
+    kind,
+    effectKind: "active-path",
+    status: "pending",
+    operationId,
+    projectId,
+    documentId,
+    workingCopyId,
+    versionId,
+    expectedSha256,
+    previousSourcePath,
+    nextSourcePath,
+    projectRootPath,
+    predecessorGeneration: normalizedPredecessorGeneration,
+    predecessorEffect: normalizeActiveEffect(predecessorEffect),
+    predecessorProofValid: true,
+    updatedAt: Date.now(),
+  });
 }
 
 async function loadProjectState() {
@@ -979,6 +1227,9 @@ async function loadProjectState() {
       pendingRename: normalizePendingSourceRename(parsed.pendingRename),
       lastRename: normalizeCompletedSourceRename(parsed.lastRename),
       lastManagedActivation: normalizeManagedWorkingCopyActivation(parsed.lastManagedActivation),
+      activeEffect: normalizeActiveEffect(parsed.activeEffect),
+      activeEffectGeneration: normalizeActiveEffectGeneration(parsed.activeEffectGeneration),
+      activationReceipts: normalizeActivationReceipts(parsed.activationReceipts),
       importedAssetRoots: normalizeImportedAssetRoots(parsed.importedAssetRoots),
       activeManagedLocator: normalizeActiveManagedLocator(parsed.activeManagedLocator),
     };
@@ -1092,8 +1343,10 @@ async function activateProject(filePath, { managedLocator = null } = {}) {
     state.recent.map((entry) => existingPathIdentity(entry.path)),
   );
   const now = Date.now();
+  bumpActiveEffectGeneration(state);
   state.activePath = normalizedPath;
   state.lastManagedActivation = null;
+  state.activeEffect = null;
   state.activeManagedLocator = normalizeActiveManagedLocator(managedLocator);
   state.recent = [
     {
@@ -1123,7 +1376,9 @@ async function forgetProject(filePath) {
     state.activePath
     && await existingPathIdentity(state.activePath) === forgottenIdentity
   ) {
+    bumpActiveEffectGeneration(state);
     state.activePath = null;
+    state.activeEffect = null;
     state.activeManagedLocator = null;
     sourceFileWatcher.close();
   }
@@ -2044,12 +2299,16 @@ async function rollbackPreparedHtmlOpen(payload) {
         await activateProject(project.sourcePath);
         return { rolledBack: true, project: taggedProject(project) };
       } catch {
+        bumpActiveEffectGeneration(state);
         state.activePath = null;
+        state.activeEffect = null;
         await persistProjectState();
         return { rolledBack: true, project: null };
       }
     }
+    bumpActiveEffectGeneration(state);
     state.activePath = null;
+    state.activeEffect = null;
     await persistProjectState();
     return { rolledBack: true, project: null };
   });
@@ -2323,7 +2582,7 @@ function assertManagedWorkingCopyActivationPayload(payload) {
   const versionId = String(payload.versionId || "");
   const projectRootPath = String(payload.projectRootPath || "");
   const operationId = payload.operationId === undefined || payload.operationId === null
-    ? null
+    ? ""
     : String(payload.operationId);
   if (
     !/^project_[A-Za-z0-9_-]+$/.test(projectId)
@@ -2333,7 +2592,7 @@ function assertManagedWorkingCopyActivationPayload(payload) {
     || !projectRootPath
     || projectRootPath.length > MAX_PATH_LENGTH
     || projectRootPath.includes("\0")
-    || (operationId !== null && !/^[A-Za-z0-9_-]{8,160}$/.test(operationId))
+    || !/^[A-Za-z0-9_-]{8,160}$/.test(operationId || "")
   ) {
     throw new TypeError("托管工作文件身份无效。");
   }
@@ -2358,6 +2617,7 @@ async function commitActivatedProjectPath({
   importedAssetSourcePath = null,
   managedActivation = null,
   managedLocator = undefined,
+  activeEffect = null,
 }) {
   const now = Date.now();
   const activePathIdentity = state.activePath
@@ -2389,6 +2649,7 @@ async function commitActivatedProjectPath({
     ),
   );
   if (activatesCurrentProject) {
+    bumpActiveEffectGeneration(state);
     state.activePath = nextSourcePath;
     state.recent = [replacement, ...retained].slice(0, MAX_RECENT_PROJECTS);
     sourceFileWatcher.watch(nextSourcePath);
@@ -2404,6 +2665,9 @@ async function commitActivatedProjectPath({
     state.recent = retained.slice(0, MAX_RECENT_PROJECTS);
   }
   state.lastManagedActivation = managedActivation;
+  if (activatesCurrentProject) {
+    state.activeEffect = normalizeActiveEffect(activeEffect);
+  }
   if (
     importedAssetSourcePath
     && isExternalOriginalPath(importedAssetSourcePath, nextSourcePath)
@@ -2448,6 +2712,72 @@ async function commitActivatedProjectPath({
   };
 }
 
+async function replayActivationReceipt(state, receipt) {
+  if (receipt.effectKind !== "active-path") {
+    throw new ProjectFileError(
+      "ACTIVATION_EFFECT_UNKNOWN",
+      "这次桌面切换的回执缺少可核对的活动路径 effect，不能重放。",
+      { operationId: receipt.operationId },
+    );
+  }
+  const activePathIdentity = state.activePath
+    ? await existingPathIdentity(state.activePath)
+    : null;
+  const activeCommitted = activePathIdentity === receipt.nextSourcePath;
+  const activeEffect = normalizeActiveEffect(state.activeEffect);
+  const effectCommitted = activeCommitted && sameActivationEffect(activeEffect, receipt);
+  // Recent membership is only a ranked catalog observation. It is not an
+  // operation-specific host effect and must never make a pending/completed
+  // activation look replayable after another project became active.
+  if (effectCommitted) {
+    const project = await readHtmlProject(receipt.nextSourcePath);
+    if (project.sha256 !== receipt.expectedSha256) {
+      throw new ProjectFileError(
+        "ACTIVATION_RECEIPT_HASH_MISMATCH",
+        "桌面切换回执指向的文件 Hash 已变化，不能重放旧结果。",
+        { operationId: receipt.operationId },
+      );
+    }
+    if (receipt.status === "pending") {
+      await persistActivationReceipt(state, {
+        ...receipt,
+        status: "completed",
+      });
+    }
+    return {
+      ...project,
+      previousSourcePath: receipt.previousSourcePath,
+      ...(receipt.kind === "managed-working-copy"
+        ? { operationId: receipt.operationId }
+        : { versionId: receipt.versionId, operationId: receipt.operationId }),
+    };
+  }
+  if (
+    receipt.status === "pending"
+    && activePathIdentity === receipt.previousSourcePath
+    && sameActivationPredecessor(state, receipt)
+  ) {
+    // A pre-commit crash leaves the exact predecessor active. The caller may
+    // continue the same durable operation, but it must never mint a new ID.
+    // The persisted generation/effect pair is the identity fence; path alone
+    // is intentionally insufficient because another activation may have
+    // returned to the same path.
+    return null;
+  }
+  if (receipt.status === "pending" && !receipt.predecessorProofValid) {
+    throw new ProjectFileError(
+      "ACTIVATION_PREDECESSOR_UNKNOWN",
+      "这次桌面切换缺少可核对的前序 active effect，不能恢复。",
+      { operationId: receipt.operationId },
+    );
+  }
+  throw new ProjectFileError(
+    "ACTIVATION_OPERATION_NOT_COMMITTED",
+    "这次桌面切换的持久回执与当前活动 effect 不一致，不能伪造重放结果。",
+    { operationId: receipt.operationId },
+  );
+}
+
 function assertActiveManagedReconcilePayload(payload) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     throw new TypeError("活动工作文件定位参数无效。");
@@ -2480,7 +2810,7 @@ function assertActiveManagedReconcilePayload(payload) {
   const versionId = String(payload.versionId || "");
   const reason = String(payload.reason || "");
   const operationId = payload.operationId === undefined || payload.operationId === null
-    ? `reconcile_${randomUUID().replaceAll("-", "")}`
+    ? ""
     : String(payload.operationId);
   if (
     !/^project_[A-Za-z0-9_-]+$/.test(projectId)
@@ -2628,68 +2958,60 @@ async function activateManagedWorkingCopyOperation(payload) {
   const activePathIdentity = state.activePath
     ? await existingPathIdentity(state.activePath)
     : null;
-  const requestedActivation = requested.operationId
-    ? {
-      operationId: requested.operationId,
-      projectId: requested.projectId,
-      documentId: requested.documentId,
-      workingCopyId: requested.workingCopyId,
-      versionId: requested.versionId,
-      expectedSha256: requested.expectedSha256,
-      previousSourcePath,
-      nextSourcePath,
-      projectRootPath: requested.projectRootPath,
-      completedAt: Date.now(),
-    }
-    : null;
-  let managedActivation = null;
-  if (requestedActivation) {
-    const completed = state.lastManagedActivation;
-    if (completed?.operationId === requestedActivation.operationId) {
-      if (!sameManagedWorkingCopyActivation(completed, requestedActivation)) {
-        throw new ProjectFileError(
-          "MANAGED_WORKING_COPY_OPERATION_MISMATCH",
-          "同一托管工作文件操作不能改变目标或前序文件。",
-          { operationId: requestedActivation.operationId },
-        );
-      }
-      if (activePathIdentity !== nextSourcePath) {
-        throw new ProjectFileError(
-          "MANAGED_WORKING_COPY_OPERATION_NOT_COMMITTED",
-          "这次托管工作文件操作的桌面状态不完整，不能伪造重放结果。",
-          { operationId: requestedActivation.operationId },
-        );
-      }
-      managedActivation = completed;
-    } else {
-      if (activePathIdentity !== previousSourcePath) {
-        throw new ProjectFileError(
-          "MANAGED_WORKING_COPY_PREDECESSOR_CONFLICT",
-          "当前桌面文件已变化，不能提交过期的托管工作文件切换。",
-          {
-            previousSourcePath: requested.previousSourcePath,
-            activePath: state.activePath,
-          },
-        );
-      }
-      managedActivation = requestedActivation;
-    }
-  } else {
-    const knownPathIdentities = new Set(await Promise.all([
-      state.activePath,
-      ...state.recent.map((entry) => entry.path),
-    ].filter(Boolean).map(existingPathIdentity)));
-    if (
-      !knownPathIdentities.has(previousSourcePath)
-      && !knownPathIdentities.has(nextSourcePath)
-    ) {
+  const requestedActivation = {
+    operationId: requested.operationId,
+    projectId: requested.projectId,
+    documentId: requested.documentId,
+    workingCopyId: requested.workingCopyId,
+    versionId: requested.versionId,
+    expectedSha256: requested.expectedSha256,
+    previousSourcePath,
+    nextSourcePath,
+    projectRootPath: requested.projectRootPath,
+    completedAt: Date.now(),
+  };
+  const receiptCandidate = activationReceiptCandidate({
+    kind: "managed-working-copy",
+    operationId: requested.operationId,
+    projectId: requested.projectId,
+    documentId: requested.documentId,
+    workingCopyId: requested.workingCopyId,
+    versionId: requested.versionId,
+    expectedSha256: requested.expectedSha256,
+    previousSourcePath,
+    nextSourcePath,
+    projectRootPath: requested.projectRootPath,
+    predecessorGeneration: state.activeEffectGeneration,
+    predecessorEffect: state.activeEffect,
+  });
+  const existingReceipt = activationReceiptFor(state, requested.operationId);
+  if (existingReceipt) {
+    if (!sameActivationReceipt(existingReceipt, receiptCandidate)) {
       throw new ProjectFileError(
-        "UNKNOWN_SOURCE",
-        "只能从当前已经打开的 HTML 切换到托管工作文件。",
-        { previousSourcePath: requested.previousSourcePath },
+        "MANAGED_WORKING_COPY_OPERATION_MISMATCH",
+        "同一托管工作文件操作不能改变目标或前序文件。",
+        { operationId: requested.operationId },
       );
     }
+    const replayed = await replayActivationReceipt(state, existingReceipt);
+    if (replayed) return replayed;
+    // A pending receipt with the exact predecessor is the pre-commit crash
+    // window. Continue the already-recorded operation with the same receipt;
+    // replayActivationReceipt throws for every other pending/completed mismatch.
+  } else {
+    if (activePathIdentity !== previousSourcePath) {
+      throw new ProjectFileError(
+        "MANAGED_WORKING_COPY_PREDECESSOR_CONFLICT",
+        "当前桌面文件已变化，不能提交过期的托管工作文件切换。",
+        {
+          previousSourcePath: requested.previousSourcePath,
+          activePath: state.activePath,
+        },
+      );
+    }
+    await persistActivationReceipt(state, receiptCandidate);
   }
+  const managedActivation = requestedActivation;
   if (!bridgePort) {
     throw new ProjectFileError(
       "BRIDGE_NOT_READY",
@@ -2746,14 +3068,23 @@ async function activateManagedWorkingCopyOperation(payload) {
       },
     );
   }
-  return commitActivatedProjectPath({
+  const activated = await commitActivatedProjectPath({
     state,
     previousSourcePath,
     nextSourcePath,
     project,
     importedAssetSourcePath: previousSourcePath,
     managedActivation,
+    activeEffect: receiptCandidate,
   });
+  await persistActivationReceipt(state, {
+    ...receiptCandidate,
+    status: "completed",
+  });
+  return {
+    ...activated,
+    operationId: requested.operationId,
+  };
 }
 
 async function activateGeneratedVersionOperation(payload) {
@@ -2761,6 +3092,7 @@ async function activateGeneratedVersionOperation(payload) {
     throw new TypeError("新版本文件参数无效。");
   }
   const allowedKeys = new Set([
+    "operationId",
     "previousSourcePath",
     "nextSourcePath",
     "expectedSha256",
@@ -2778,6 +3110,9 @@ async function activateGeneratedVersionOperation(payload) {
     payload.nextSourcePath,
     "nextSourcePath",
   );
+  const operationId = payload.operationId === undefined || payload.operationId === null
+    ? ""
+    : String(payload.operationId);
   if (
     typeof payload.projectId !== "string"
     || !/^project_[A-Za-z0-9_-]+$/.test(payload.projectId)
@@ -2785,6 +3120,7 @@ async function activateGeneratedVersionOperation(payload) {
     || !/^ver_\d{4,}$/.test(payload.versionId)
     || typeof payload.expectedSha256 !== "string"
     || !/^sha256:[a-f0-9]{64}$/.test(payload.expectedSha256)
+    || !/^[A-Za-z0-9_-]{8,160}$/.test(operationId)
   ) {
     throw new TypeError("新版本文件身份无效。");
   }
@@ -2803,6 +3139,32 @@ async function activateGeneratedVersionOperation(payload) {
     realpath(previousSourcePath),
     realpath(nextSourcePath),
   ]);
+  const receiptCandidate = activationReceiptCandidate({
+    kind: "generated-version",
+    operationId,
+    projectId: payload.projectId,
+    versionId: payload.versionId,
+    expectedSha256: payload.expectedSha256,
+    previousSourcePath: resolvedPreviousPath,
+    nextSourcePath: resolvedNextPath,
+    predecessorGeneration: state.activeEffectGeneration,
+    predecessorEffect: state.activeEffect,
+  });
+  const existingReceipt = activationReceiptFor(state, operationId);
+  if (existingReceipt) {
+    if (!sameActivationReceipt(existingReceipt, receiptCandidate)) {
+      throw new ProjectFileError(
+        "GENERATED_VERSION_OPERATION_MISMATCH",
+        "同一生成版本操作不能改变目标或前序文件。",
+        { operationId },
+      );
+    }
+    const replayed = await replayActivationReceipt(state, existingReceipt);
+    if (replayed) return replayed;
+    // The exact predecessor means the host commit did not reach the durable
+    // active-effect record. Continue this pending operation with its original
+    // operationId; any other pending/completed mismatch already throws above.
+  }
   const knownPathIdentities = new Set(await Promise.all([
     state.activePath,
     ...state.recent.map((entry) => entry.path),
@@ -2817,6 +3179,7 @@ async function activateGeneratedVersionOperation(payload) {
       { previousSourcePath, nextSourcePath },
     );
   }
+  if (!existingReceipt) await persistActivationReceipt(state, receiptCandidate);
   if (!bridgePort) {
     throw new ProjectFileError(
       "BRIDGE_NOT_READY",
@@ -2901,10 +3264,16 @@ async function activateGeneratedVersionOperation(payload) {
     previousSourcePath: resolvedPreviousPath,
     nextSourcePath: resolvedNextPath,
     project,
+    activeEffect: receiptCandidate,
+  });
+  await persistActivationReceipt(state, {
+    ...receiptCandidate,
+    status: "completed",
   });
   return {
     ...activated,
     versionId: payload.versionId,
+    operationId,
   };
 }
 
@@ -3599,8 +3968,10 @@ async function openRegisteredProject(projectIdInput) {
       entry,
       identity: await existingPathIdentity(entry.path).catch(() => null),
     })));
+    bumpActiveEffectGeneration(state);
     state.activePath = sourcePath;
     state.lastManagedActivation = null;
+    state.activeEffect = null;
     state.activeManagedLocator = activeManagedLocatorForActivatedPath(
       target,
       sourcePath,

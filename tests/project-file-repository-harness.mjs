@@ -65,6 +65,7 @@ export async function promoteNextVersion(repository, target, label) {
   const promoted = await repository.promoteCandidate({
     target,
     candidateId: candidate.candidate.candidateId,
+    decisionOperationId: `promote_${candidate.candidate.candidateId}`,
   });
   assert.equal(promoted.promoted, true);
   return promoted.target;

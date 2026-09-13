@@ -219,3 +219,73 @@ test("project IPC envelopes preserve safe errors and redact unknown failures", a
   );
   assert.doesNotMatch(JSON.stringify(unknown), /secret|channel|stack/i);
 });
+
+test("project IPC envelopes preserve only the public reclassification confirmation schema", async () => {
+  const confirmation = {
+    openKind: "confirmation",
+    requestId: "req_reclassified",
+    classification: "known-external",
+    sourceFileName: "产品首页.html",
+    visibleV1FileName: "产品首页.html",
+    projectsRootLabel: "HTML编辑器",
+    projectName: "产品首页",
+    currentBasedOnVersionId: "version_0006",
+    currentBasedOnOrdinal: 6,
+    latestOfficialVersionId: null,
+    latestOfficialOrdinal: 6,
+    currentDiffersFromBase: true,
+    sourceRelation: "unchanged",
+    sourcePath: "/private/secret.html",
+    nested: { secret: "do-not-forward" },
+  };
+  const result = await runProjectIpcOperation(async () => {
+    throw new ProjectFileError(
+      "OPEN_INTENT_RECLASSIFIED",
+      "这个文件之前已经导入过了，请确认后打开之前的项目。",
+      {
+        confirmation,
+        safeReason: "reclassified",
+        unknownNested: { channel: "html-projects:open" },
+      },
+    );
+  });
+
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.error.details, {
+    confirmation: {
+      openKind: "confirmation",
+      requestId: "req_reclassified",
+      classification: "known-external",
+      sourceFileName: "产品首页.html",
+      projectName: "产品首页",
+      currentBasedOnVersionId: "version_0006",
+      currentBasedOnOrdinal: 6,
+      latestOfficialVersionId: null,
+      latestOfficialOrdinal: 6,
+      currentDiffersFromBase: true,
+      sourceRelation: "unchanged",
+    },
+    safeReason: "reclassified",
+  });
+  assert.doesNotMatch(JSON.stringify(result), /secret|channel|html-projects|sourcePath/u);
+
+  const invalid = await runProjectIpcOperation(async () => {
+    throw new ProjectFileError(
+      "OPEN_INTENT_RECLASSIFIED",
+      "reclassification",
+      { confirmation: { requestId: "missing-classification", classification: "unknown" } },
+    );
+  });
+  assert.equal(invalid.ok, false);
+  assert.equal(invalid.error.details, undefined);
+
+  const forgedCode = await runProjectIpcOperation(async () => {
+    throw new ProjectFileError(
+      "PERMISSION_DENIED",
+      "拒绝访问。",
+      { confirmation },
+    );
+  });
+  assert.equal(forgedCode.ok, false);
+  assert.equal(forgedCode.error.details, undefined);
+});

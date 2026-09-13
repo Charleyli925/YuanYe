@@ -204,6 +204,7 @@ test("v4 schemas accept repository-produced identity, Working Copy, Candidate an
   const promoted = await repository.promoteCandidate({
     target: imported.target,
     candidateId: candidate.candidate.candidateId,
+    decisionOperationId: `promote_${candidate.candidate.candidateId}`,
   });
   const transaction = await json(path.join(
     controlRoot,

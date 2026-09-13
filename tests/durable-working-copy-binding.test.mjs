@@ -53,7 +53,7 @@ test("five projects migrate all fifteen Working Copies without touching HTML", a
     for (let version = 2; version <= 3; version += 1) {
       const candidateId = `candidate_binding_${i}_${version}`;
       await value.repository.createCandidate({target, requestId:`req_binding_${i}_${version}`, candidateId, html:html(`v${version}`), expectedSourceSha256:target.sourceSha256});
-      const promoted = await value.repository.promoteCandidate({target, candidateId}); copies.push(promoted.target);
+      const promoted = await value.repository.promoteCandidate({target, candidateId, decisionOperationId: `promote_${candidateId}`}); copies.push(promoted.target);
     }
     await drift(target);
   }
@@ -76,7 +76,7 @@ for (const removeBindings of [false, true]) {
       const candidateId = `candidate_startup_scale_${ordinal}`;
       await value.repository.createCandidate({ target, requestId: `req_startup_scale_${ordinal}`, candidateId,
         html: html(`version ${ordinal}`), expectedSourceSha256: target.sourceSha256 });
-      target = (await value.repository.promoteCandidate({ target, candidateId })).target;
+      target = (await value.repository.promoteCandidate({ target, candidateId, decisionOperationId: `promote_${candidateId}` })).target;
     }
     await drift(target);
     const manifestPath = path.join(target.projectRootPath, ".pageroot/manifest.json");
@@ -120,7 +120,7 @@ test("Bridge startup migrates inactive members before serving the project catalo
   const value = await fixture(t); const { target } = await importSource(value);
   const candidateId = "candidate_bridge_migration_0001";
   await value.repository.createCandidate({ target, requestId: "req_bridge_migration_0001", candidateId, html: html("next"), expectedSourceSha256: target.sourceSha256 });
-  const promoted = await value.repository.promoteCandidate({ target, candidateId });
+  const promoted = await value.repository.promoteCandidate({ target, candidateId, decisionOperationId: `promote_${candidateId}` });
   const members = [target, promoted.target];
   const bytes = await Promise.all(members.map((member) => readFile(member.exactSourcePath)));
   await drift(target);
@@ -216,7 +216,7 @@ for (const stage of ["promotion-prepared", "promotion-snapshot-created", "promot
     const candidateId = "candidate_binding_crash_01";
     await value.repository.createCandidate({ target, requestId:"req_binding_crash_01", candidateId, html:html("V2"), expectedSourceSha256:target.sourceSha256 });
     const writer = new ProjectFileRepository({ projectsRoot:value.projects, failpoint:(name)=>name===stage });
-    await assert.rejects(writer.promoteCandidate({target,candidateId}));
+    await assert.rejects(writer.promoteCandidate({target,candidateId,decisionOperationId: `promote_${candidateId}`}));
     await drift(target);
     const journalPath=path.join(target.projectRootPath,".pageroot","transactions",`promote_${candidateId}`,"transaction.json");
     // Promotion journals keep legacy observations for compatibility, not authority.
@@ -253,7 +253,7 @@ test("replacement after the final Hash check is preserved instead of overwritten
 test("two Working Copy anchors cannot claim one surviving visible HTML", async (t) => {
   const value = await fixture(t); const { target } = await importSource(value);
   await value.repository.createCandidate({ target, requestId: "req_binding_duplicate", candidateId: "candidate_binding_duplicate", html: html("v2"), expectedSourceSha256: target.sourceSha256 });
-  const promoted = await value.repository.promoteCandidate({ target, candidateId: "candidate_binding_duplicate" });
+  const promoted = await value.repository.promoteCandidate({ target, candidateId: "candidate_binding_duplicate", decisionOperationId: "promote_candidate_binding_duplicate" });
   const second = promoted.target;
   await rm(sourceBindingPath(second.projectRootPath, second.workingCopyId));
   await rm(second.exactSourcePath);
@@ -266,7 +266,7 @@ test("two Working Copy anchors cannot claim one surviving visible HTML", async (
 test("registered projection reads an exact inactive Working Copy without activating another Version", async (t) => {
   const value = await fixture(t); const { target } = await importSource(value);
   await value.repository.createCandidate({ target, requestId: "req_binding_projection", candidateId: "candidate_binding_projection", html: html("v2"), expectedSourceSha256: target.sourceSha256 });
-  const promoted = await value.repository.promoteCandidate({ target, candidateId: "candidate_binding_projection" });
+  const promoted = await value.repository.promoteCandidate({ target, candidateId: "candidate_binding_projection", decisionOperationId: "promote_candidate_binding_projection" });
   const exact = await value.repository.resolveRegisteredProjectOpenTarget({ projectId: target.projectId, workingCopyId: target.workingCopyId });
   assert.equal(exact.target.workingCopyId, target.workingCopyId);
   assert.equal(exact.html, await readFile(target.exactSourcePath, "utf8"));
@@ -366,7 +366,7 @@ for (const replacementStage of ["before-recovery", "before-binding-refresh", "af
       html: html("V2"), expectedSourceSha256: target.sourceSha256 });
     const writer = new ProjectFileRepository({ projectsRoot: value.projects,
       failpoint: (name) => name === "promotion-working-copy-created" });
-    await assert.rejects(writer.promoteCandidate({ target, candidateId }));
+    await assert.rejects(writer.promoteCandidate({ target, candidateId, decisionOperationId: `promote_${candidateId}` }));
     const transaction = await json(path.join(target.projectRootPath, ".pageroot", "transactions",
       `promote_${candidateId}`, "transaction.json"));
     const visiblePath = path.join(target.projectRootPath, transaction.workingCopy.sourceRelativePath);
@@ -402,7 +402,7 @@ for (const replacementStage of ["before-recovery", "before-binding-refresh", "af
         syncBuiltinESMExports();
       }
       const recovery = new ProjectFileRepository({ projectsRoot: value.projects });
-      await assert.rejects(recovery.promoteCandidate({ target, candidateId }),
+      await assert.rejects(recovery.promoteCandidate({ target, candidateId, decisionOperationId: `promote_${candidateId}` }),
         (error) => ["PROMOTION_PATH_REPLACED", "WORKING_COPY_CONFLICT"].includes(error.code));
     } finally {
       filesystem.open = originalOpen;

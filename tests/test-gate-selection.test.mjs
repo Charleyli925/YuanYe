@@ -802,6 +802,19 @@ test("Qoder ACP transport changes select Qoder and ACP owners without the packag
   assert.equal(plan.selectedNodeTests.includes("tests/desktop-package.test.mjs"), false);
 });
 
+test("native HTTP provider imports retain the packaged Bridge resource closure", () => {
+  for (const file of [
+    "shared/agent-input-policy.mjs",
+    "bridge/agent/providers/openai-compatible-provider.mjs",
+  ]) {
+    const plan = selectGatePlan({ map, lane: "task", changedFiles: [file] });
+    assert.ok(
+      plan.selectedNodeTests.includes("tests/desktop-package.test.mjs"),
+      file,
+    );
+  }
+});
+
 test("notification, comment, and presentation Browser owners select their smoke lane", () => {
   const cases = [
     ["tests/e2e/browser/native-dom-notification-recovery.spec.mjs", "browser-comments-smoke"],

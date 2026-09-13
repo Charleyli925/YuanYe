@@ -154,6 +154,16 @@ async function waitFor(predicate, message = "condition did not settle") {
   throw new Error(message);
 }
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((nextResolve, nextReject) => {
+    resolve = nextResolve;
+    reject = nextReject;
+  });
+  return { promise, resolve, reject };
+}
+
 function createHarness({
   getCatalogRevision,
   bridge = {},
@@ -403,6 +413,16 @@ function createHarness({
       };
     },
   };
+  const projectRulesWorkflow = {
+    drainCount: 0,
+    resetForProjectTransition() {},
+    inspect: () => ({ state: "resolved" }),
+    async drain() {
+      this.drainCount += 1;
+      return true;
+    },
+    ...rulesWorkflow,
+  };
   const workflow = new ProjectWorkflow({
     getCatalogRevision,
     bridgeClient: client,
@@ -414,16 +434,7 @@ function createHarness({
     versionSession,
     commentWorkflow,
     runSession,
-    projectRulesWorkflow: {
-      drainCount: 0,
-      resetForProjectTransition() {},
-      inspect: () => ({ state: "resolved" }),
-      async drain() {
-        this.drainCount += 1;
-        return true;
-      },
-      ...rulesWorkflow,
-    },
+    projectRulesWorkflow,
     externalFileOpenSession: new ExternalFileOpenSession(),
     projectApplicationSession: new ProjectApplicationSession(),
     documentWorkflow,
@@ -508,6 +519,7 @@ function createHarness({
     runSession,
     documentWorkflow,
     commentWorkflow,
+    projectRulesWorkflow,
     canvasPort,
     oldContext,
     get unlockCount() {
@@ -1541,6 +1553,7 @@ test("a v4 Working Copy transition uses the exact managed desktop activation", a
       async activateManagedWorkingCopy(input) {
         calls.push(input);
         return {
+          operationId: input.operationId,
           sourcePath: B_PATH,
           sha256: sha256(B_HTML),
           html: B_HTML,
@@ -1561,6 +1574,7 @@ test("a v4 Working Copy transition uses the exact managed desktop activation", a
     nextDocumentId: "document_old",
     versionId: "ver_0002",
     openTarget: managedTarget,
+    operationId: "generated_transition_001",
   });
 
   assert.equal(prepared.updatesCurrentProject, true);
@@ -1574,6 +1588,7 @@ test("a v4 Working Copy transition uses the exact managed desktop activation", a
     workingCopyId: "work_ver_0002",
     versionId: "ver_0002",
     projectRootPath: "/tmp/PageRoot/项目/managed",
+    operationId: "generated_transition_001",
   }]);
 });
 
@@ -1582,6 +1597,112 @@ test("v4 exposes no relocation workflow that can retarget a moved project", (t) 
   t.after(() => harness.workflow.dispose());
   assert.equal("relocateCurrentProject" in harness.workflow, false);
   assert.equal("rebindRelocatedOpenTarget" in harness.documentWorkflow, false);
+});
+
+test("generated compatibility requires an explicit Version OpenTarget route", async (t) => {
+  const generatedCalls = [];
+  const harness = createHarness({
+    projectOpen: {
+      async activateGeneratedVersion(input) {
+        generatedCalls.push(input);
+        return {
+          operationId: input.operationId,
+          sourcePath: B_PATH,
+          sha256: sha256(B_HTML),
+          html: B_HTML,
+        };
+      },
+    },
+  });
+  t.after(() => harness.workflow.dispose());
+  await assert.rejects(
+    () => harness.workflow.prepareManagedSourceTransition({
+      previousSourcePath: OLD_PATH,
+      nextSourcePath: B_PATH,
+      expectedSha256: sha256(B_HTML),
+      nextProjectId: "project_old",
+      nextDocumentId: "document_old",
+      versionId: "ver_0002",
+      openTarget: null,
+      operationId: "generated_route_missing_001",
+    }),
+  );
+  assert.equal(generatedCalls.length, 0);
+
+  const explicitVersionTarget = {
+    projectId: "project_old",
+    documentId: "document_old",
+    projectRootPath: "/tmp/project-root",
+    targetKind: "version",
+    versionId: "ver_0002",
+    exactSourcePath: B_PATH,
+    sourceSha256: sha256(B_HTML),
+  };
+  const prepared = await harness.workflow.prepareManagedSourceTransition({
+    previousSourcePath: OLD_PATH,
+    nextSourcePath: B_PATH,
+    expectedSha256: sha256(B_HTML),
+    nextProjectId: "project_old",
+    nextDocumentId: "document_old",
+    versionId: "ver_0002",
+    openTarget: explicitVersionTarget,
+    operationId: "generated_route_explicit_001",
+  });
+  assert.equal(generatedCalls.length, 1);
+  assert.equal(prepared.activatedProject?.operationId, "generated_route_explicit_001");
+});
+
+test("same-path Version preparation rejects missing or mismatched OpenTarget before publication", async (t) => {
+  const desktopCalls = [];
+  const harness = createHarness({
+    projectOpen: {
+      async activateManagedWorkingCopy(input) {
+        desktopCalls.push(input);
+        return { operationId: input.operationId, sourcePath: OLD_PATH, sha256: sha256(OLD_HTML), html: OLD_HTML };
+      },
+      async activateGeneratedVersion(input) {
+        desktopCalls.push(input);
+        return { operationId: input.operationId, sourcePath: OLD_PATH, sha256: sha256(OLD_HTML), html: OLD_HTML };
+      },
+    },
+  });
+  t.after(() => harness.workflow.dispose());
+  const beforeProject = harness.projectSession.context;
+  const beforeDocument = harness.documentSession.snapshot;
+  const beforeVersion = harness.versionSession.snapshot;
+  const beforeComments = harness.commentSession.snapshot;
+  const input = {
+    previousSourcePath: OLD_PATH,
+    nextSourcePath: OLD_PATH,
+    expectedSha256: sha256(OLD_HTML),
+    nextProjectId: "project_old",
+    nextDocumentId: "document_old",
+    versionId: "ver_0001",
+    operationId: "same_path_target_fence_001",
+  };
+  await assert.rejects(
+    () => harness.workflow.prepareManagedSourceTransition({ ...input, openTarget: null }),
+  );
+  await assert.rejects(
+    () => harness.workflow.prepareManagedSourceTransition({
+      ...input,
+      expectedSha256: "",
+      operationId: "same_path_target_fence_003",
+      openTarget: managedOpenTarget(OLD_PATH),
+    }),
+  );
+  await assert.rejects(
+    () => harness.workflow.prepareManagedSourceTransition({
+      ...input,
+      operationId: "same_path_target_fence_002",
+      openTarget: { ...managedOpenTarget(OLD_PATH), documentId: "document_other" },
+    }),
+  );
+  assert.equal(desktopCalls.length, 0);
+  assert.deepEqual(harness.projectSession.context, beforeProject);
+  assert.deepEqual(harness.documentSession.snapshot, beforeDocument);
+  assert.deepEqual(harness.versionSession.snapshot, beforeVersion);
+  assert.deepEqual(harness.commentSession.snapshot, beforeComments);
 });
 
 test("project application requires the synchronous navigation receipt before presentation", async (t) => {
@@ -2231,6 +2352,133 @@ test("confirmed external open retries only its failed ack and never commits twic
   assert.equal(harness.workflow.getSnapshot().openConfirmation, null);
 });
 
+test("structured reclassification DTO presents the existing-project confirmation", async (t) => {
+  const reclassifiedConfirmation = {
+    openKind: "confirmation",
+    requestId: "external_reclassified_known",
+    classification: "known-external",
+    sourceFileName: "known.html",
+    projectName: "Known project",
+    sourcePath: "/private/should-not-be-used.html",
+    nested: { secret: "should-not-be-used" },
+  };
+  const harness = createHarness({
+    initialProject: false,
+    projectOpen: {
+      async acceptExternal(requestId) {
+        return {
+          openKind: "confirmation",
+          requestId,
+          classification: "new-external",
+          sourceFileName: "incoming.html",
+          visibleV1FileName: "incoming-V1.html",
+          projectsRootLabel: "文稿 › PageRoot › 项目",
+        };
+      },
+      async commitPrepared() {
+        throw {
+          code: "OPEN_INTENT_RECLASSIFIED",
+          message: "这个文件之前已经导入过了，请确认后打开之前的项目。",
+          details: {
+            confirmation: reclassifiedConfirmation,
+            unknownNested: { channel: "html-projects:open" },
+          },
+        };
+      },
+    },
+  });
+  t.after(() => harness.workflow.dispose());
+
+  harness.workflow.acceptExternalProject({
+    requestId: "external_reclassify_source",
+    sourcePath: A_PATH,
+  });
+  await waitFor(() => (
+    harness.workflow.getSnapshot().openConfirmation?.requestId
+      === "external_reclassify_source"
+  ));
+
+  const result = await harness.workflow.confirmExternalOpen({
+    requestId: "external_reclassify_source",
+    action: "import-new",
+  });
+  assert.deepEqual(result, {
+    status: "rejected",
+    code: "OPEN_INTENT_RECLASSIFIED",
+    reason: "这个文件之前已经导入过了，请确认后打开之前的项目。",
+  });
+  assert.deepEqual(harness.workflow.getSnapshot().openConfirmation, {
+    requestId: "external_reclassified_known",
+    classification: "known-external",
+    sourceFileName: "known.html",
+    visibleV1FileName: "",
+    projectsRootLabel: "文稿 › PageRoot › 项目",
+    projectName: "Known project",
+    currentBasedOnVersionId: null,
+    currentBasedOnOrdinal: 0,
+    latestOfficialVersionId: null,
+    latestOfficialOrdinal: 0,
+    currentDiffersFromBase: false,
+    sourceRelation: "unchanged",
+    deleteOriginal: false,
+    busy: false,
+  });
+});
+
+test("structured reclassification DTO with invalid identity leaves the original confirmation", async (t) => {
+  const harness = createHarness({
+    initialProject: false,
+    projectOpen: {
+      async acceptExternal(requestId) {
+        return {
+          openKind: "confirmation",
+          requestId,
+          classification: "new-external",
+          sourceFileName: "incoming.html",
+          visibleV1FileName: "incoming-V1.html",
+          projectsRootLabel: "文稿 › PageRoot › 项目",
+        };
+      },
+      async commitPrepared() {
+        throw {
+          code: "OPEN_INTENT_RECLASSIFIED",
+          message: "reclassification",
+          details: {
+            confirmation: {
+              requestId: "",
+              classification: "known-external",
+              projectName: "invalid",
+            },
+          },
+        };
+      },
+    },
+  });
+  t.after(() => harness.workflow.dispose());
+
+  harness.workflow.acceptExternalProject({
+    requestId: "external_reclassify_invalid",
+    sourcePath: A_PATH,
+  });
+  await waitFor(() => (
+    harness.workflow.getSnapshot().openConfirmation?.requestId
+      === "external_reclassify_invalid"
+  ));
+  const result = await harness.workflow.confirmExternalOpen({
+    requestId: "external_reclassify_invalid",
+    action: "import-new",
+  });
+  assert.equal(result.code, "OPEN_INTENT_RECLASSIFIED");
+  assert.equal(
+    harness.workflow.getSnapshot().openConfirmation?.requestId,
+    "external_reclassify_invalid",
+  );
+  assert.equal(
+    harness.workflow.getSnapshot().openConfirmation?.classification,
+    "new-external",
+  );
+});
+
 test("a single external ack rejection recovers without remaining deferred", async (t) => {
   let ackCount = 0;
   const harness = createHarness({
@@ -2876,6 +3124,13 @@ test("Finder locator rebase keeps IDs, publishes the new path, and does not load
     },
   });
   t.after(() => harness.workflow.dispose());
+  const backgroundRun = {
+    projectId: "project_old", documentId: "document_old",
+    sourcePath: "/tmp/another-working-copy.html",
+    sourceWorkingCopyId: "work_ver_0002", requestId: "req_second", attemptId: "attempt_001",
+    status: "processing",
+  };
+  harness.runSession.trackRun(backgroundRun);
 
   const outcome = await harness.workflow.reconcileExternalSourceLocator({
     reason: "watch",
@@ -2894,12 +3149,354 @@ test("Finder locator rebase keeps IDs, publishes the new path, and does not load
   assert.equal(harness.documentSession.html, OLD_HTML);
   assert.equal(harness.documentSession.persistedSourceSha256, sha256(OLD_HTML));
   assert.equal(harness.runSession.snapshot.activeSourcePath, RENAMED_PATH);
+  assert.equal(harness.runSession.activeRun, null);
+  assert.equal(harness.runSession.runForSource(backgroundRun.sourcePath), backgroundRun);
   assert.equal(harness.documentWorkflow.observeCount, 1);
   assert.equal(reconcileCalls.length, 1);
   assert.equal(reconcileCalls[0].previousSourcePath, OLD_PATH);
   assert.equal(reconcileCalls[0].reason, "watch");
   assert.ok(!("nextSourcePath" in reconcileCalls[0]));
   assert.ok(harness.events.some((event) => event.type === "project-source-relocated"));
+});
+
+test("Finder locator rebase fails closed when the destination already owns a Request", async (t) => {
+  const harness = createHarness({
+    openTarget: managedOpenTarget(),
+    projectOpen: {
+      async reconcileActiveManagedSource(payload) {
+        return locatorResult(payload);
+      },
+      async listRecent() { return []; },
+      async listRegistered() { return []; },
+    },
+  });
+  t.after(() => harness.workflow.dispose());
+  const previousRun = {
+    projectId: "project_old",
+    documentId: "document_old",
+    sourcePath: OLD_PATH,
+    requestId: "request_previous_locator",
+    attemptId: "attempt_previous_locator",
+    status: "complete",
+  };
+  const destinationRun = {
+    projectId: "project_old",
+    documentId: "document_old",
+    sourcePath: RENAMED_PATH,
+    requestId: "request_destination_locator",
+    attemptId: "attempt_destination_locator",
+    status: "processing",
+  };
+  harness.runSession.trackRun(previousRun, { activate: "never" });
+  harness.runSession.trackRun(destinationRun, { activate: "never" });
+
+  const outcome = await harness.workflow.reconcileExternalSourceLocator({
+    reason: "watch",
+    watcherGeneration: 3,
+    previousSourcePath: OLD_PATH,
+  });
+
+  assert.notEqual(outcome.status, "succeeded");
+  assert.equal(harness.projectSession.context?.sourcePath, OLD_PATH);
+  assert.equal(harness.runSession.runForSource(OLD_PATH), previousRun);
+  assert.equal(harness.runSession.runForSource(RENAMED_PATH), destinationRun);
+  assert.ok(!harness.events.some((event) => event.type === "project-source-relocated"));
+});
+
+test("delayed Finder A-to-B response cannot publish after the Project context changes", async (t) => {
+  const response = deferred();
+  const reconcileCalls = [];
+  const harness = createHarness({
+    openTarget: managedOpenTarget(),
+    projectRulesWorkflow: {
+      resetCount: 0,
+      resetForProjectTransition() {
+        this.resetCount += 1;
+      },
+    },
+    projectOpen: {
+      async reconcileActiveManagedSource(payload) {
+        reconcileCalls.push(payload);
+        return response.promise;
+      },
+      async listRecent() { return []; },
+      async listRegistered() { return []; },
+    },
+  });
+  t.after(() => harness.workflow.dispose());
+
+  const reconcile = harness.workflow.reconcileExternalSourceLocator({
+    reason: "watch",
+    watcherGeneration: 3,
+    previousSourcePath: OLD_PATH,
+  });
+  await waitFor(() => reconcileCalls.length === 1, "Finder reconcile did not start");
+
+  const newerPath = "/tmp/project-workflow-newer-context.html";
+  const destinationRun = {
+    projectId: "project_old",
+    documentId: "document_old",
+    sourcePath: RENAMED_PATH,
+    requestId: "request_delayed_destination",
+    attemptId: "attempt_delayed_destination",
+    status: "processing",
+  };
+  harness.runSession.trackRun(destinationRun, { activate: "never" });
+  harness.projectSession.openLocator(newerPath);
+  harness.projectSession.register({
+    epoch: harness.projectSession.epoch,
+    sourcePath: newerPath,
+    projectId: "project_newer",
+    documentId: "document_newer",
+  });
+  harness.runSession.activate(newerPath);
+  response.resolve(locatorResult(reconcileCalls[0]));
+
+  const outcome = await reconcile;
+
+  assert.equal(outcome.status, "unknown");
+  assert.equal(harness.projectSession.sourcePath, newerPath);
+  assert.equal(harness.runSession.snapshot.activeSourcePath, newerPath);
+  assert.equal(harness.runSession.runForSource(RENAMED_PATH), destinationRun);
+  assert.equal(harness.documentWorkflow.resetCount, 0);
+  assert.equal(harness.commentWorkflow.resetCount, 0);
+  assert.equal(harness.workflow.getSnapshot().hydration.phase, "idle");
+  assert.equal(harness.projectRulesWorkflow?.resetCount ?? 0, 0);
+  assert.ok(!harness.events.some((event) => event.type === "project-source-relocated"));
+});
+
+test("managed source preparation blocks before Desktop when the Run destination is occupied", async (t) => {
+  const desktopCalls = [];
+  const harness = createHarness({
+    openTarget: managedOpenTarget(),
+    projectOpen: {
+      async activateManagedWorkingCopy(input) {
+        desktopCalls.push(input);
+        return {
+          operationId: input.operationId,
+          sourcePath: RENAMED_PATH,
+          html: OLD_HTML,
+          sha256: sha256(OLD_HTML),
+        };
+      },
+    },
+  });
+  t.after(() => harness.workflow.dispose());
+  const destinationRun = {
+    projectId: "project_old",
+    documentId: "document_old",
+    sourcePath: RENAMED_PATH,
+    requestId: "request_destination_prehost",
+    attemptId: "attempt_destination_prehost",
+    status: "processing",
+  };
+  harness.runSession.trackRun(destinationRun, { activate: "never" });
+  const beforeProject = harness.projectSession.context;
+  const beforeRun = harness.runSession.snapshot;
+  const beforeDocument = harness.documentSession.snapshot;
+  const beforeComments = harness.commentSession.snapshot;
+  const beforeVersions = harness.versionSession.snapshot;
+  const beforeRulesReset = harness.projectRulesWorkflow.resetCount;
+
+  const prepared = await harness.workflow.prepareManagedSourceTransition({
+    previousSourcePath: OLD_PATH,
+    nextSourcePath: RENAMED_PATH,
+    expectedSha256: sha256(OLD_HTML),
+    nextProjectId: "project_old",
+    nextDocumentId: "document_old",
+    versionId: "ver_0001",
+    openTarget: managedOpenTarget(RENAMED_PATH),
+    operationId: "source_transition_prehost_001",
+  });
+
+  assert.equal(prepared.activatedProject, null);
+  assert.equal(desktopCalls.length, 0);
+  assert.deepEqual(harness.projectSession.context, beforeProject);
+  assert.deepEqual(harness.runSession.snapshot, beforeRun);
+  assert.deepEqual(harness.documentSession.snapshot, beforeDocument);
+  assert.deepEqual(harness.commentSession.snapshot, beforeComments);
+  assert.deepEqual(harness.versionSession.snapshot, beforeVersions);
+  assert.equal(harness.projectRulesWorkflow.resetCount, beforeRulesReset);
+  assert.equal(harness.runSession.runForSource(RENAMED_PATH), destinationRun);
+});
+
+test("background Version transition validates the complete target and never activates or publishes", async (t) => {
+  const desktopCalls = [];
+  const backgroundTarget = {
+    ...managedOpenTarget(B_PATH),
+    projectId: "project_background",
+    documentId: "document_background",
+    workingCopyId: "work_ver_0002",
+    versionId: "ver_0002",
+    sourceSha256: sha256(B_HTML),
+  };
+  const harness = createHarness({
+    projectOpen: {
+      async activateManagedWorkingCopy(input) {
+        desktopCalls.push(input);
+        return {
+          operationId: input.operationId,
+          sourcePath: B_PATH,
+          sha256: sha256(B_HTML),
+          html: B_HTML,
+        };
+      },
+      async activateGeneratedVersion(input) {
+        desktopCalls.push({ generated: true, ...input });
+        return {
+          operationId: input.operationId,
+          sourcePath: B_PATH,
+          sha256: sha256(B_HTML),
+          html: B_HTML,
+        };
+      },
+    },
+  });
+  t.after(() => harness.workflow.dispose());
+  const currentLocator = harness.projectSession.openLocator(B_PATH);
+  harness.projectSession.register({
+    ...currentLocator,
+    projectId: "project_current",
+    documentId: "document_current",
+  });
+  harness.runSession.activate(B_PATH);
+  harness.documentSession.publishAuthority({
+    html: B_HTML,
+    persistedSourceSha256: sha256(B_HTML),
+  });
+  const beforeProject = harness.projectSession.context;
+  const beforeDocument = harness.documentSession.snapshot;
+  const beforeComments = harness.commentSession.snapshot;
+  const beforeVersion = harness.versionSession.snapshot;
+  const beforeRun = harness.runSession.snapshot;
+
+  const prepared = await harness.workflow.prepareManagedSourceTransition({
+    previousSourcePath: OLD_PATH,
+    nextSourcePath: B_PATH,
+    expectedSha256: sha256(B_HTML),
+    nextProjectId: backgroundTarget.projectId,
+    nextDocumentId: backgroundTarget.documentId,
+    versionId: backgroundTarget.versionId,
+    openTarget: backgroundTarget,
+    operationId: "background_version_0001",
+  });
+
+  assert.equal(prepared.updatesCurrentProject, false);
+  assert.equal(prepared.activatedProject, null);
+  assert.equal(desktopCalls.length, 0);
+  assert.deepEqual(harness.projectSession.context, beforeProject);
+  assert.deepEqual(harness.documentSession.snapshot, beforeDocument);
+  assert.deepEqual(harness.commentSession.snapshot, beforeComments);
+  assert.deepEqual(harness.versionSession.snapshot, beforeVersion);
+  assert.deepEqual(harness.runSession.snapshot, beforeRun);
+
+  await assert.rejects(
+    () => harness.workflow.prepareManagedSourceTransition({
+      previousSourcePath: OLD_PATH,
+      nextSourcePath: B_PATH,
+      expectedSha256: sha256(B_HTML),
+      nextProjectId: backgroundTarget.projectId,
+      nextDocumentId: backgroundTarget.documentId,
+      versionId: backgroundTarget.versionId,
+      openTarget: { ...backgroundTarget, sourceSha256: "" },
+      operationId: "background_version_0002",
+    }),
+  );
+  assert.equal(desktopCalls.length, 0);
+  assert.deepEqual(harness.projectSession.context, beforeProject);
+  assert.deepEqual(harness.documentSession.snapshot, beforeDocument);
+  assert.deepEqual(harness.versionSession.snapshot, beforeVersion);
+});
+
+test("same project with a different document stays background and cannot publish a partial tuple", async (t) => {
+  const desktopCalls = [];
+  const harness = createHarness({
+    openTarget: managedOpenTarget(),
+    projectOpen: {
+      async activateManagedWorkingCopy(input) {
+        desktopCalls.push(input);
+        return {
+          operationId: input.operationId,
+          sourcePath: B_PATH,
+          html: B_HTML,
+          sha256: sha256(B_HTML),
+        };
+      },
+      async activateGeneratedVersion(input) {
+        desktopCalls.push({ generated: true, ...input });
+        return {
+          operationId: input.operationId,
+          sourcePath: B_PATH,
+          html: B_HTML,
+          sha256: sha256(B_HTML),
+        };
+      },
+    },
+  });
+  t.after(() => harness.workflow.dispose());
+  const target = {
+    ...managedOpenTarget(B_PATH),
+    documentId: "document_other",
+    workingCopyId: "work_ver_0002",
+    versionId: "ver_0002",
+    sourceSha256: sha256(B_HTML),
+  };
+  const beforeProject = harness.projectSession.context;
+  const beforeDocument = harness.documentSession.snapshot;
+  const beforeComments = harness.commentSession.snapshot;
+  const beforeVersion = harness.versionSession.snapshot;
+  const beforeRulesReset = harness.projectRulesWorkflow.resetCount;
+
+  const prepared = await harness.workflow.prepareManagedSourceTransition({
+    previousSourcePath: OLD_PATH,
+    nextSourcePath: B_PATH,
+    expectedSha256: sha256(B_HTML),
+    nextProjectId: "project_old",
+    nextDocumentId: "document_other",
+    versionId: "ver_0002",
+    openTarget: target,
+    operationId: "same_project_other_document_001",
+  });
+
+  assert.equal(prepared.updatesCurrentProject, false);
+  assert.equal(prepared.activatedProject, null);
+  assert.equal(desktopCalls.length, 0);
+  assert.deepEqual(harness.projectSession.context, beforeProject);
+  assert.deepEqual(harness.documentSession.snapshot, beforeDocument);
+  assert.deepEqual(harness.commentSession.snapshot, beforeComments);
+  assert.deepEqual(harness.versionSession.snapshot, beforeVersion);
+  assert.equal(harness.projectRulesWorkflow.resetCount, beforeRulesReset);
+});
+
+test("managed source commit fails closed before ProjectSession publication on an occupied destination", async (t) => {
+  const harness = createHarness({ openTarget: managedOpenTarget() });
+  t.after(() => harness.workflow.dispose());
+  const destinationRun = {
+    projectId: "project_old",
+    documentId: "document_old",
+    sourcePath: RENAMED_PATH,
+    requestId: "request_destination_commit",
+    attemptId: "attempt_destination_commit",
+    status: "processing",
+  };
+  harness.runSession.trackRun(destinationRun, { activate: "never" });
+
+  const outcome = harness.workflow.commitManagedSourceTransition({
+    prepared: {
+      updatesCurrentProject: true,
+      previousSourcePath: OLD_PATH,
+      nextSourcePath: RENAMED_PATH,
+      projectId: "project_old",
+      documentId: "document_old",
+      openTarget: managedOpenTarget(RENAMED_PATH),
+    },
+    html: OLD_HTML,
+    sourceSha256: sha256(OLD_HTML),
+  });
+
+  assert.equal(outcome, null);
+  assert.equal(harness.projectSession.context?.sourcePath, OLD_PATH);
+  assert.equal(harness.runSession.runForSource(RENAMED_PATH), destinationRun);
 });
 
 test("Finder relocation is not reported settled when journal rebase cannot reconcile", async (t) => {

@@ -294,6 +294,18 @@ function sameRenameIntent(record, request) {
   );
 }
 
+function bumpActiveEffectGeneration(state) {
+  const current = Number(state.activeEffectGeneration);
+  const normalized = Number.isSafeInteger(current) && current >= 0 ? current : 0;
+  if (normalized >= Number.MAX_SAFE_INTEGER) {
+    throw new ProjectFileError(
+      "ACTIVE_EFFECT_GENERATION_EXHAUSTED",
+      "活动文件切换序列已达到上限，不能安全继续重命名。",
+    );
+  }
+  state.activeEffectGeneration = normalized + 1;
+}
+
 function renameResult(project, record, {
   renamed = true,
   replayed = false,
@@ -343,6 +355,12 @@ function applySourcePathTransition(state, record, now) {
   }
   nextEntry.lastOpenedAt = activeWasRenamed ? now : replacementLastOpenedAt;
   if (activeWasRenamed) {
+    // A rename changes the active locator without producing a new activation
+    // effect. Advance the same durable generation used by Desktop activation
+    // and clear the old effect atomically with the path/recent update, so an
+    // old pending receipt cannot resume after A→C→A ABA navigation.
+    bumpActiveEffectGeneration(state);
+    state.activeEffect = null;
     state.activePath = record.sourcePath;
     state.recent = [nextEntry, ...retained];
   } else if (replacementIndex >= 0) {

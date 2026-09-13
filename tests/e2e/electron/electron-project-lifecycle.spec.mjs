@@ -37,6 +37,7 @@ import {
   symlinkSync,
   tmpdir,
   titleStemLocator,
+  unlinkSync,
   waitForActiveSourcePath,
   waitForDesktopActivePath,
   waitForProjectReady,
@@ -202,6 +203,7 @@ test("Electron retries a managed Working Copy activation after the first respons
     const promoted = await repository.promoteCandidate({
       target: workspace.target,
       candidateId: candidate.candidate.candidateId,
+      decisionOperationId: `promote_${candidate.candidate.candidateId}`,
     });
     const expectedManagedPath = realpathSync(promoted.target.exactSourcePath);
     const payload = {
@@ -263,6 +265,520 @@ test("Electron retries a managed Working Copy activation after the first respons
   }
 });
 
+test("Electron resumes a pending activation after restart only from its exact predecessor", async () => {
+  test.setTimeout(120_000);
+  const source = createSourceFixture("managed-activation-recent-receipt.html");
+  let launched = await launchPageRoot({ activeSourcePath: source.sourcePath });
+  try {
+    await waitForProjectReady(launched.page);
+    const firstTargetPath = await managedWorkingCopyPath(launched.page, source.sourcePath);
+    const projectsRoot = path.dirname(path.dirname(firstTargetPath));
+    const repository = new ProjectFileRepository({ projectsRoot });
+    const firstWorkspace = await repository.workspace({ sourcePath: firstTargetPath });
+    const candidate = await repository.createCandidate({
+      target: firstWorkspace.target,
+      requestId: "req_e2e_recent_receipt",
+      candidateId: "candidate_e2e_recent_receipt_0001",
+      html: identityPreservingCandidateHtml(firstWorkspace.target, "Recent receipt"),
+      expectedSourceSha256: firstWorkspace.sourceSha256,
+    });
+    const promoted = await repository.promoteCandidate({
+      target: firstWorkspace.target,
+      candidateId: candidate.candidate.candidateId,
+      decisionOperationId: `promote_${candidate.candidate.candidateId}`,
+    });
+    const nextTarget = promoted.target;
+    const operationId = "e2e_recent_receipt_pending_0001";
+    const statePath = path.join(launched.isolatedUserData, "html-projects.json");
+    const seededState = JSON.parse(readFileSync(statePath, "utf8"));
+    seededState.activePath = realpathSync(firstTargetPath);
+    seededState.recent = [
+      { path: realpathSync(firstTargetPath), name: path.basename(firstTargetPath), lastOpenedAt: Date.now() },
+      { path: realpathSync(nextTarget.exactSourcePath), name: path.basename(nextTarget.exactSourcePath), lastOpenedAt: Date.now() - 1 },
+    ];
+    seededState.activationReceipts = [{
+      kind: "managed-working-copy",
+      effectKind: "active-path",
+      status: "pending",
+      operationId,
+      projectId: nextTarget.projectId,
+      documentId: nextTarget.documentId,
+      workingCopyId: nextTarget.workingCopyId,
+      versionId: nextTarget.versionId,
+      expectedSha256: nextTarget.sourceSha256,
+      previousSourcePath: realpathSync(firstTargetPath),
+      nextSourcePath: realpathSync(nextTarget.exactSourcePath),
+      projectRootPath: nextTarget.projectRootPath,
+      predecessorGeneration: Number(seededState.activeEffectGeneration || 0),
+      predecessorEffect: seededState.activeEffect || null,
+      updatedAt: Date.now(),
+    }];
+    writeFileSync(statePath, JSON.stringify(seededState, null, 2), "utf8");
+    await stopPageRoot(launched.electronApp, launched.isolatedUserData, { cleanup: false });
+    const workbenchTabsPath = path.join(launched.isolatedUserData, "workbench-tabs.json");
+    if (existsSync(workbenchTabsPath)) unlinkSync(workbenchTabsPath);
+    launched = await launchPageRoot({ isolatedUserData: launched.isolatedUserData });
+    await waitForProjectReady(launched.page);
+    await waitForActiveSourcePath(launched.page, firstTargetPath);
+
+    const payload = {
+      previousSourcePath: firstTargetPath,
+      nextSourcePath: nextTarget.exactSourcePath,
+      expectedSha256: nextTarget.sourceSha256,
+      projectId: nextTarget.projectId,
+      documentId: nextTarget.documentId,
+      workingCopyId: nextTarget.workingCopyId,
+      versionId: nextTarget.versionId,
+      projectRootPath: nextTarget.projectRootPath,
+      operationId,
+    };
+    const result = await launched.page.evaluate(async (input) => {
+      try {
+        return { ok: true, value: await window.htmlAIProjects.activateManagedWorkingCopy(input) };
+      } catch (error) {
+        return { ok: false, code: error?.code || null, message: error?.message || "" };
+      }
+    }, payload);
+    expect(result.ok).toBe(true);
+    expect(sameDesktopSourcePath(result.value.sourcePath, nextTarget.exactSourcePath)).toBe(true);
+    const after = JSON.parse(readFileSync(statePath, "utf8"));
+    expect(sameDesktopSourcePath(after.activePath, nextTarget.exactSourcePath)).toBe(true);
+    expect(after.activeEffect).toEqual(expect.objectContaining({
+      operationId,
+      kind: "managed-working-copy",
+      effectKind: "active-path",
+      nextSourcePath: realpathSync(nextTarget.exactSourcePath),
+    }));
+    expect(after.activationReceipts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ operationId, status: "completed", effectKind: "active-path" }),
+    ]));
+  } finally {
+    await stopPageRoot(launched.electronApp, launched.isolatedUserData);
+    removeSourceFixture(source.sourceDirectory);
+  }
+});
+
+test("Electron rejects a pending activation after an intermediate activation returns to the same path", async () => {
+  test.setTimeout(120_000);
+  const source = createSourceFixture("managed-activation-predecessor-aba.html");
+  let launched = await launchPageRoot({ activeSourcePath: source.sourcePath });
+  try {
+    await waitForProjectReady(launched.page);
+    const firstTargetPath = await managedWorkingCopyPath(launched.page, source.sourcePath);
+    const projectsRoot = path.dirname(path.dirname(firstTargetPath));
+    const repository = new ProjectFileRepository({ projectsRoot });
+    const firstWorkspace = await repository.workspace({ sourcePath: firstTargetPath });
+    const candidate = await repository.createCandidate({
+      target: firstWorkspace.target,
+      requestId: "req_e2e_predecessor_aba",
+      candidateId: "candidate_e2e_predecessor_aba_0001",
+      html: identityPreservingCandidateHtml(firstWorkspace.target, "Predecessor ABA"),
+      expectedSourceSha256: firstWorkspace.sourceSha256,
+    });
+    const promoted = await repository.promoteCandidate({
+      target: firstWorkspace.target,
+      candidateId: candidate.candidate.candidateId,
+      decisionOperationId: `promote_${candidate.candidate.candidateId}`,
+    });
+    const targetB = promoted.target;
+    const statePath = path.join(launched.isolatedUserData, "html-projects.json");
+    const seededState = JSON.parse(readFileSync(statePath, "utf8"));
+    const firstPath = realpathSync(firstTargetPath);
+    const targetBPath = realpathSync(targetB.exactSourcePath);
+    const predecessorGeneration = Number(seededState.activeEffectGeneration || 0);
+    const predecessorEffect = seededState.activeEffect || null;
+    const pendingOperationId = "e2e_predecessor_aba_pending_0001";
+    const intermediateOperationId = "e2e_predecessor_aba_intermediate_0001";
+    const completedOperationId = "e2e_predecessor_aba_completed_0001";
+    const intermediateEffect = {
+      operationId: intermediateOperationId,
+      kind: "managed-working-copy",
+      effectKind: "active-path",
+      projectId: targetB.projectId,
+      documentId: targetB.documentId,
+      workingCopyId: targetB.workingCopyId,
+      versionId: targetB.versionId,
+      expectedSha256: targetB.sourceSha256,
+      previousSourcePath: firstPath,
+      nextSourcePath: targetBPath,
+      projectRootPath: targetB.projectRootPath,
+      committedAt: Date.now() - 1,
+    };
+    const completedEffect = {
+      operationId: completedOperationId,
+      kind: "managed-working-copy",
+      effectKind: "active-path",
+      projectId: firstWorkspace.target.projectId,
+      documentId: firstWorkspace.target.documentId,
+      workingCopyId: firstWorkspace.target.workingCopyId,
+      versionId: firstWorkspace.target.versionId,
+      expectedSha256: firstWorkspace.sourceSha256,
+      previousSourcePath: targetBPath,
+      nextSourcePath: firstPath,
+      projectRootPath: firstWorkspace.target.projectRootPath,
+      committedAt: Date.now(),
+    };
+    seededState.activePath = firstPath;
+    seededState.activeEffectGeneration = predecessorGeneration + 2;
+    seededState.activeEffect = completedEffect;
+    seededState.recent = [
+      { path: firstPath, name: path.basename(firstPath), lastOpenedAt: Date.now() },
+      { path: targetBPath, name: path.basename(targetBPath), lastOpenedAt: Date.now() - 1 },
+    ];
+    seededState.activationReceipts = [
+      {
+        ...intermediateEffect,
+        status: "completed",
+        updatedAt: Date.now() - 1,
+      },
+      {
+        ...completedEffect,
+        status: "completed",
+        updatedAt: Date.now(),
+      },
+      {
+        kind: "managed-working-copy",
+        effectKind: "active-path",
+        status: "pending",
+        operationId: pendingOperationId,
+        projectId: targetB.projectId,
+        documentId: targetB.documentId,
+        workingCopyId: targetB.workingCopyId,
+        versionId: targetB.versionId,
+        expectedSha256: targetB.sourceSha256,
+        previousSourcePath: firstPath,
+        nextSourcePath: targetBPath,
+        projectRootPath: targetB.projectRootPath,
+        predecessorGeneration,
+        predecessorEffect,
+        updatedAt: Date.now(),
+      },
+    ];
+    // The pending operation was recorded before Y and Z. The active path is
+    // back at A, but its generation/effect proves that A is not the same
+    // predecessor anymore.
+    writeFileSync(statePath, JSON.stringify(seededState, null, 2), "utf8");
+    await stopPageRoot(launched.electronApp, launched.isolatedUserData, { cleanup: false });
+    const workbenchTabsPath = path.join(launched.isolatedUserData, "workbench-tabs.json");
+    if (existsSync(workbenchTabsPath)) unlinkSync(workbenchTabsPath);
+    launched = await launchPageRoot({ isolatedUserData: launched.isolatedUserData });
+    await waitForProjectReady(launched.page);
+    await waitForActiveSourcePath(launched.page, firstPath);
+
+    const result = await launched.page.evaluate(async (input) => {
+      try {
+        return { ok: true, value: await window.htmlAIProjects.activateManagedWorkingCopy(input) };
+      } catch (error) {
+        return { ok: false, code: error?.code || null, message: error?.message || "" };
+      }
+    }, {
+      previousSourcePath: firstTargetPath,
+      nextSourcePath: targetB.exactSourcePath,
+      expectedSha256: targetB.sourceSha256,
+      projectId: targetB.projectId,
+      documentId: targetB.documentId,
+      workingCopyId: targetB.workingCopyId,
+      versionId: targetB.versionId,
+      projectRootPath: targetB.projectRootPath,
+      operationId: pendingOperationId,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.code).toBe("ACTIVATION_OPERATION_NOT_COMMITTED");
+    const after = JSON.parse(readFileSync(statePath, "utf8"));
+    expect(sameDesktopSourcePath(after.activePath, firstPath)).toBe(true);
+    expect(after.activeEffect).toEqual(expect.objectContaining({
+      operationId: completedOperationId,
+      nextSourcePath: firstPath,
+    }));
+    expect(after.activeEffectGeneration).toBe(predecessorGeneration + 2);
+    expect(after.activationReceipts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ operationId: pendingOperationId, status: "pending" }),
+      expect.objectContaining({ operationId: intermediateOperationId, status: "completed" }),
+      expect.objectContaining({ operationId: completedOperationId, status: "completed" }),
+    ]));
+  } finally {
+    await stopPageRoot(launched.electronApp, launched.isolatedUserData);
+    removeSourceFixture(source.sourceDirectory);
+  }
+});
+
+test("Electron rejects managed and generated pending activations after production rename A-C-A", async () => {
+  test.setTimeout(120_000);
+  const source = createSourceFixture("rename-activation-aba.html");
+  let launched = await launchPageRoot({ activeSourcePath: source.sourcePath });
+  try {
+    await waitForProjectReady(launched.page);
+    const pathA = await managedWorkingCopyPath(launched.page, source.sourcePath);
+    const projectsRoot = path.dirname(path.dirname(pathA));
+    const repository = new ProjectFileRepository({ projectsRoot });
+    const workspaceA = await repository.workspace({ sourcePath: pathA });
+    const candidate = await repository.createCandidate({
+      target: workspaceA.target,
+      requestId: "req_e2e_rename_activation_aba",
+      candidateId: "candidate_e2e_rename_activation_aba_0001",
+      html: identityPreservingCandidateHtml(workspaceA.target, "Rename ABA target"),
+      expectedSourceSha256: workspaceA.sourceSha256,
+    });
+    const targetB = (await repository.promoteCandidate({
+      target: workspaceA.target,
+      candidateId: candidate.candidate.candidateId,
+      decisionOperationId: `promote_${candidate.candidate.candidateId}`,
+    })).target;
+    const statePath = path.join(launched.isolatedUserData, "html-projects.json");
+    const beforeRename = JSON.parse(readFileSync(statePath, "utf8"));
+    const predecessorGeneration = Number(beforeRename.activeEffectGeneration || 0);
+    const predecessorEffect = beforeRename.activeEffect || null;
+    const pathB = realpathSync(targetB.exactSourcePath);
+    const managedOperationId = "e2e_rename_managed_pending_0001";
+    const generatedOperationId = "e2e_rename_generated_pending_0001";
+    const managedReceipt = {
+      kind: "managed-working-copy",
+      effectKind: "active-path",
+      status: "pending",
+      operationId: managedOperationId,
+      projectId: targetB.projectId,
+      documentId: targetB.documentId,
+      workingCopyId: targetB.workingCopyId,
+      versionId: targetB.versionId,
+      expectedSha256: targetB.sourceSha256,
+      previousSourcePath: realpathSync(pathA),
+      nextSourcePath: pathB,
+      projectRootPath: targetB.projectRootPath,
+      predecessorGeneration,
+      predecessorEffect,
+      predecessorProofValid: true,
+      updatedAt: Date.now(),
+    };
+    const generatedReceipt = {
+      kind: "generated-version",
+      effectKind: "active-path",
+      status: "pending",
+      operationId: generatedOperationId,
+      projectId: targetB.projectId,
+      documentId: null,
+      workingCopyId: null,
+      versionId: targetB.versionId,
+      expectedSha256: targetB.sourceSha256,
+      previousSourcePath: realpathSync(pathA),
+      nextSourcePath: pathB,
+      projectRootPath: null,
+      predecessorGeneration,
+      predecessorEffect,
+      predecessorProofValid: true,
+      updatedAt: Date.now(),
+    };
+    const seededState = {
+      ...beforeRename,
+      activePath: realpathSync(pathA),
+      activeEffect: predecessorEffect,
+      activationReceipts: [managedReceipt, generatedReceipt],
+    };
+    writeFileSync(statePath, JSON.stringify(seededState, null, 2), "utf8");
+    await stopPageRoot(launched.electronApp, launched.isolatedUserData, { cleanup: false });
+    const workbenchTabsPath = path.join(launched.isolatedUserData, "workbench-tabs.json");
+    if (existsSync(workbenchTabsPath)) unlinkSync(workbenchTabsPath);
+    launched = await launchPageRoot({ isolatedUserData: launched.isolatedUserData });
+    await waitForProjectReady(launched.page);
+    await waitForActiveSourcePath(launched.page, pathA);
+
+    const renamedC = await launched.page.evaluate(async ({ sourcePath, expectedSha256 }) => (
+      window.htmlAIProjects.renameHtml({
+        operationId: "e2e_rename_activation_a_to_c_0001",
+        sourcePath,
+        stem: "rename-activation-aba-C",
+        expectedSha256,
+      })
+    ), { sourcePath: pathA, expectedSha256: workspaceA.sourceSha256 });
+    const renamedA = await launched.page.evaluate(async ({ sourcePath, expectedSha256 }) => (
+      window.htmlAIProjects.renameHtml({
+        operationId: "e2e_rename_activation_c_to_a_0001",
+        sourcePath,
+        stem: "rename-activation-aba-V1",
+        expectedSha256,
+      })
+    ), { sourcePath: renamedC.sourcePath, expectedSha256: workspaceA.sourceSha256 });
+    expect(sameDesktopSourcePath(renamedA.sourcePath, pathA)).toBe(true);
+
+    await stopPageRoot(launched.electronApp, launched.isolatedUserData, { cleanup: false });
+    if (existsSync(workbenchTabsPath)) unlinkSync(workbenchTabsPath);
+    launched = await launchPageRoot({ isolatedUserData: launched.isolatedUserData });
+    await waitForProjectReady(launched.page);
+    await waitForActiveSourcePath(launched.page, pathA);
+    const retry = await launched.page.evaluate(async ({ managed, generated }) => {
+      const attempt = async (run) => {
+        try {
+          await run();
+          return { ok: true, code: null };
+        } catch (error) {
+          return { ok: false, code: error?.code || null };
+        }
+      };
+      return {
+        managed: await attempt(() => window.htmlAIProjects.activateManagedWorkingCopy(managed)),
+        generated: await attempt(() => window.htmlAIProjects.activateGeneratedVersion(generated)),
+      };
+    }, {
+      managed: {
+        previousSourcePath: pathA,
+        nextSourcePath: pathB,
+        expectedSha256: targetB.sourceSha256,
+        projectId: targetB.projectId,
+        documentId: targetB.documentId,
+        workingCopyId: targetB.workingCopyId,
+        versionId: targetB.versionId,
+        projectRootPath: targetB.projectRootPath,
+        operationId: managedOperationId,
+      },
+      generated: {
+        previousSourcePath: pathA,
+        nextSourcePath: pathB,
+        expectedSha256: targetB.sourceSha256,
+        projectId: targetB.projectId,
+        versionId: targetB.versionId,
+        operationId: generatedOperationId,
+      },
+    });
+    expect(retry.managed).toEqual({ ok: false, code: "ACTIVATION_OPERATION_NOT_COMMITTED" });
+    expect(retry.generated).toEqual({ ok: false, code: "ACTIVATION_OPERATION_NOT_COMMITTED" });
+    const after = JSON.parse(readFileSync(statePath, "utf8"));
+    expect(sameDesktopSourcePath(after.activePath, pathA)).toBe(true);
+    expect(after.activeEffect).toBeNull();
+    expect(after.activeEffectGeneration).toBe(predecessorGeneration + 2);
+    expect(after.activationReceipts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ operationId: managedOperationId, status: "pending" }),
+      expect.objectContaining({ operationId: generatedOperationId, status: "pending" }),
+    ]));
+  } finally {
+    await stopPageRoot(launched.electronApp, launched.isolatedUserData);
+    removeSourceFixture(source.sourceDirectory);
+  }
+});
+
+test("Electron replays a completed activation only while its exact destination remains active", async () => {
+  test.setTimeout(120_000);
+  const source = createSourceFixture("managed-activation-active-receipt.html");
+  let launched = await launchPageRoot({ activeSourcePath: source.sourcePath });
+  try {
+    await waitForProjectReady(launched.page);
+    const firstTargetPath = await managedWorkingCopyPath(launched.page, source.sourcePath);
+    const projectsRoot = path.dirname(path.dirname(firstTargetPath));
+    const repository = new ProjectFileRepository({ projectsRoot });
+    const firstWorkspace = await repository.workspace({ sourcePath: firstTargetPath });
+    const candidateB = await repository.createCandidate({
+      target: firstWorkspace.target,
+      requestId: "req_e2e_active_receipt_b",
+      candidateId: "candidate_e2e_active_receipt_b_0001",
+      html: identityPreservingCandidateHtml(firstWorkspace.target, "Active receipt B"),
+      expectedSourceSha256: firstWorkspace.sourceSha256,
+    });
+    const targetB = (await repository.promoteCandidate({
+      target: firstWorkspace.target,
+      candidateId: candidateB.candidate.candidateId,
+      decisionOperationId: `promote_${candidateB.candidate.candidateId}`,
+    })).target;
+    const candidateC = await repository.createCandidate({
+      target: targetB,
+      requestId: "req_e2e_active_receipt_c",
+      candidateId: "candidate_e2e_active_receipt_c_0001",
+      html: identityPreservingCandidateHtml(targetB, "Active receipt C"),
+      expectedSourceSha256: targetB.sourceSha256,
+    });
+    const targetC = (await repository.promoteCandidate({
+      target: targetB,
+      candidateId: candidateC.candidate.candidateId,
+      decisionOperationId: `promote_${candidateC.candidate.candidateId}`,
+    })).target;
+    const payloadFor = (previousTarget, nextTarget, operationId) => ({
+      previousSourcePath: previousTarget.exactSourcePath,
+      nextSourcePath: nextTarget.exactSourcePath,
+      expectedSha256: nextTarget.sourceSha256,
+      projectId: nextTarget.projectId,
+      documentId: nextTarget.documentId,
+      workingCopyId: nextTarget.workingCopyId,
+      versionId: nextTarget.versionId,
+      projectRootPath: nextTarget.projectRootPath,
+      operationId,
+    });
+    const x = payloadFor(firstWorkspace.target, targetB, "e2e_active_receipt_x_0001");
+    const y = payloadFor(targetB, targetC, "e2e_active_receipt_y_0001");
+    const first = await launched.page.evaluate((input) => (
+      window.htmlAIProjects.activateManagedWorkingCopy(input)
+    ), x);
+    expect(sameDesktopSourcePath(first.sourcePath, targetB.exactSourcePath)).toBe(true);
+    await launched.page.evaluate((input) => (
+      window.htmlAIProjects.activateManagedWorkingCopy(input)
+    ), y);
+    const replay = await launched.page.evaluate(async (input) => {
+      try {
+        return { ok: true, value: await window.htmlAIProjects.activateManagedWorkingCopy(input) };
+      } catch (error) {
+        return {
+          ok: false,
+          code: error?.code || null,
+          message: error?.message || "",
+          details: error?.details || null,
+          hasStack: "stack" in Object(error),
+          hasChannel: "channel" in Object(error),
+          hasInternalClass: "ProjectFileError" in Object(error),
+        };
+      }
+    }, x);
+    expect(replay.ok).toBe(false);
+    expect(replay.code).toBe("ACTIVATION_OPERATION_NOT_COMMITTED");
+    expect(replay.message).toBe("这次桌面切换的持久回执与当前活动 effect 不一致，不能伪造重放结果。");
+    expect(replay.details).toEqual({ operationId: x.operationId });
+    expect(replay.hasStack).toBe(false);
+    expect(replay.hasChannel).toBe(false);
+    expect(replay.hasInternalClass).toBe(false);
+    const beforeRestart = JSON.parse(readFileSync(
+      path.join(launched.isolatedUserData, "html-projects.json"),
+      "utf8",
+    ));
+    expect(sameDesktopSourcePath(beforeRestart.activePath, targetC.exactSourcePath)).toBe(true);
+    expect(beforeRestart.activationReceipts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ operationId: x.operationId, status: "completed", effectKind: "active-path" }),
+    ]));
+
+    await stopPageRoot(launched.electronApp, launched.isolatedUserData, { cleanup: false });
+    launched = await launchPageRoot({ isolatedUserData: launched.isolatedUserData });
+    await waitForProjectReady(launched.page);
+    await waitForActiveSourcePath(launched.page, targetC.exactSourcePath);
+    const replayAfterRestart = await launched.page.evaluate(async (input) => {
+      try {
+        return { ok: true, value: await window.htmlAIProjects.activateManagedWorkingCopy(input) };
+      } catch (error) {
+        return {
+          ok: false,
+          code: error?.code || null,
+          message: error?.message || "",
+          details: error?.details || null,
+          hasStack: "stack" in Object(error),
+          hasChannel: "channel" in Object(error),
+          hasInternalClass: "ProjectFileError" in Object(error),
+        };
+      }
+    }, x);
+    expect(replayAfterRestart.ok).toBe(false);
+    expect(replayAfterRestart.code).toBe("ACTIVATION_OPERATION_NOT_COMMITTED");
+    expect(replayAfterRestart.message).toBe("这次桌面切换的持久回执与当前活动 effect 不一致，不能伪造重放结果。");
+    expect(replayAfterRestart.details).toEqual({ operationId: x.operationId });
+    expect(replayAfterRestart.hasStack).toBe(false);
+    expect(replayAfterRestart.hasChannel).toBe(false);
+    expect(replayAfterRestart.hasInternalClass).toBe(false);
+    const afterRestart = JSON.parse(readFileSync(
+      path.join(launched.isolatedUserData, "html-projects.json"),
+      "utf8",
+    ));
+    expect(sameDesktopSourcePath(afterRestart.activePath, targetC.exactSourcePath)).toBe(true);
+    expect(afterRestart.activationReceipts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ operationId: x.operationId, status: "completed", effectKind: "active-path" }),
+    ]));
+  } finally {
+    await stopPageRoot(launched.electronApp, launched.isolatedUserData);
+    removeSourceFixture(source.sourceDirectory);
+  }
+});
+
 test("Electron Finder reveals verified project, visible Version Working Copy and derived AI task", async () => {
   test.setTimeout(120_000);
   const source = createSourceFixture("finder-derived-projections.html");
@@ -288,6 +804,7 @@ test("Electron Finder reveals verified project, visible Version Working Copy and
       active = (await repository.promoteCandidate({
         target: active,
         candidateId: candidate.candidate.candidateId,
+        decisionOperationId: `promote_${candidate.candidate.candidateId}`,
       })).target;
       if (ordinal === 2) v2Target = active;
     }
@@ -396,6 +913,7 @@ test("Electron Finder reveals verified project, visible Version Working Copy and
     const promoted = await repository.promoteCandidate({
       target: continued.target,
       candidateId: request.candidateId,
+      decisionOperationId: `promote_${request.candidateId}`,
     });
     expect(promoted.version).toMatchObject({
       versionId: "ver_0007",
@@ -561,6 +1079,7 @@ test("Electron v4 registry recovers Finder rename and isolates duplicate project
     const promoted = await repository.promoteCandidate({
       target: workspace.target,
       candidateId: candidate.candidate.candidateId,
+      decisionOperationId: `promote_${candidate.candidate.candidateId}`,
     });
     expect(path.basename(promoted.target.exactSourcePath)).toBe("Finder-B-V2-V2-V2-V2.html");
     expect(readFileSync(userFile, "utf8")).toBe("user file must not be overwritten");

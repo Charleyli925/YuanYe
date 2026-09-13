@@ -339,6 +339,7 @@ test("Bridge continues a historical Version through one durable Working Copy rec
     active = (await repository.promoteCandidate({
       target: active,
       candidateId: candidate.candidate.candidateId,
+      decisionOperationId: `promote_${candidate.candidate.candidateId}`,
     })).target;
     if (ordinal === 2) v2WorkingCopyPath = active.exactSourcePath;
   }
@@ -546,6 +547,7 @@ test("project-file Request becomes a Candidate on finalization and a Version onl
   });
   assert.equal(request.response.status, 201, JSON.stringify(request.body));
   assert.equal(request.body.activeRun.status, "processing");
+  assert.equal(request.body.activeRun.sourceWorkingCopyId, ensured.body.openTarget.workingCopyId);
   const changedAfterFreeze = "# 下一次任务的长期规则\n";
   const changedRules = await postJson(bridge, "/project-file", {
     sourcePath: ensured.body.sourcePath,
@@ -628,6 +630,7 @@ test("project-file Request becomes a Candidate on finalization and a Version onl
   );
   assert.equal(ready.response.status, 200, JSON.stringify(ready.body));
   assert.equal(ready.body.status, "ready-to-open");
+  assert.equal(ready.body.activeRun.sourceWorkingCopyId, ensured.body.openTarget.workingCopyId);
   assert.equal(ready.body.versionId, "ver_0002");
   assert.ok(["ready", "attention"].includes(ready.body.candidateAssessment.status));
   const readyAiTask = await bridge.requestJson(
@@ -675,6 +678,42 @@ test("project-file Request becomes a Candidate on finalization and a Version onl
   assert.equal(review.body.content, candidateHtml);
   assert.equal(review.body.candidate.status, "pending-review");
 
+  const adoptionIdentity = {
+    projectId: ensured.body.projectId,
+    documentId: ensured.body.documentId,
+    sourcePath: ensured.body.sourcePath,
+    requestId: request.body.requestId,
+    attemptId: request.body.attemptId,
+    versionId: "ver_0002",
+  };
+  const missingCandidate = await postJson(bridge, "/ready-version/activate", {
+    ...adoptionIdentity,
+    decisionOperationId: `promote_${ready.body.candidateId}`,
+  });
+  assert.equal(missingCandidate.response.status, 422, JSON.stringify(missingCandidate.body));
+  assert.equal(missingCandidate.body.error.code, "INVALID_CANDIDATE_ID");
+  const missingDecision = await postJson(bridge, "/ready-version/activate", {
+    ...adoptionIdentity,
+    candidateId: ready.body.candidateId,
+  });
+  assert.equal(missingDecision.response.status, 409, JSON.stringify(missingDecision.body));
+  assert.equal(missingDecision.body.error.code, "DECISION_IDENTITY_MISMATCH");
+  const wrongDecision = await postJson(bridge, "/ready-version/activate", {
+    ...adoptionIdentity,
+    candidateId: ready.body.candidateId,
+    decisionOperationId: "promote_candidate_wrong_identity_0001",
+  });
+  assert.equal(wrongDecision.response.status, 409, JSON.stringify(wrongDecision.body));
+  assert.equal(wrongDecision.body.error.code, "DECISION_IDENTITY_MISMATCH");
+  const afterRejectedAdoptions = JSON.parse(await readFile(
+    join(ensured.body.projectRoot, ".pageroot", "manifest.json"),
+    "utf8",
+  ));
+  assert.deepEqual(
+    afterRejectedAdoptions.versions.map((version) => version.versionId),
+    ["ver_0001"],
+  );
+
   const adopted = await postJson(bridge, "/ready-version/activate", {
     projectId: ensured.body.projectId,
     documentId: ensured.body.documentId,
@@ -682,9 +721,16 @@ test("project-file Request becomes a Candidate on finalization and a Version onl
     requestId: request.body.requestId,
     attemptId: request.body.attemptId,
     versionId: "ver_0002",
+    candidateId: ready.body.candidateId,
+    decisionOperationId: `promote_${ready.body.candidateId}`,
   });
   assert.equal(adopted.response.status, 200, JSON.stringify(adopted.body));
   assert.equal(adopted.body.versionId, "ver_0002");
+  assert.equal(adopted.body.openTarget.workingCopyId, "work_ver_0002");
+  const adoptedRequest = JSON.parse(await readFile(
+    join(controlRoot, "requests", request.body.requestId, "request.json"), "utf8",
+  ));
+  assert.equal(adoptedRequest.sourceWorkingCopyId, "work_ver_0001");
   assert.match(adopted.body.sourcePath, /candidate-V2\.html$/u);
   const afterAdoption = JSON.parse(await readFile(
     join(ensured.body.projectRoot, ".pageroot", "manifest.json"),

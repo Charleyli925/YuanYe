@@ -83,7 +83,17 @@ The renderer's main workspace facts are partitioned as follows:
 - `RunSession`: current/background run projections, per-Request Agent delivery
   status, background outcomes, the one preparing/frozen/uncertain submission
   lock, and operation locks. ACP events remain bounded presentation facts and
-  never become completion authority;
+  never become completion authority. Request origin includes project/document
+  and the known source Working Copy; pending projection identity includes the
+  existing submission token. Locator-scoped run, result, handoff,
+  copied/recovered and outcome facts share one internal aggregate entry; active
+  presentation retains locator keys only and projects from that entry. A newer
+  Request/Attempt replaces the locator's attempt facts atomically and rejects
+  late old-attempt writers. Locator rebind never selects a whole project's runs,
+  changes the Request origin when Promotion creates a new Working Copy, or
+  adds fact fields to the frozen public snapshot. The narrow locator revision
+  and prepare/commit seams are coordination-only; they publish no additional
+  Session facts and preserve the ordinary method semantics;
 - `RunWorkflow`: ticketless Agent diagnosis for Settings, pre-Request Agent use-time check, Request freeze/persisted-boundary
   verification, final-saved-HTML text-locator preflight, safely fenced same-Request
   Agent start/retry, unknown-POST authority reconciliation, tracked-run polling,

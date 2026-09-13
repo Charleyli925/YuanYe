@@ -904,14 +904,18 @@
       "id": "run-session",
       "patterns": [
         "^app/application/run-session\\.(?:js|d\\.ts)$",
-        "^app/domain/run-lifecycle\\.(?:js|d\\.ts)$"
+        "^app/domain/run-lifecycle\\.(?:js|d\\.ts)$",
+        "^tests/(?:run-session|run-lifecycle)\\.test\\.mjs$"
       ],
       "suites": [
         "typecheck"
       ],
       "nodeTests": [
         "tests/run-lifecycle.test.mjs",
-        "tests/run-session.test.mjs"
+        "tests/run-session.test.mjs",
+        "tests/run-workflow.test.mjs",
+        "tests/project-workflow.test.mjs",
+        "tests/version-workflow.test.mjs"
       ]
     },
     {
@@ -1956,7 +1960,8 @@
         "tests/agent-input-policy.test.mjs",
         "tests/run-workflow.test.mjs",
         "tests/agent-provider-catalog.test.mjs",
-        "tests/agent-protocol-acceptance.test.mjs"
+        "tests/agent-protocol-acceptance.test.mjs",
+        "tests/desktop-package.test.mjs"
       ]
     },
     {

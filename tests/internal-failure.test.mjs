@@ -52,3 +52,28 @@ test("internal failure telemetry sink cannot interrupt reporting", () => {
     console.warn = originalWarn;
   }
 });
+
+test("structured-clone internal failures log a bounded safe message", () => {
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (...args) => {
+    warnings.push(args);
+  };
+  try {
+    reportInternalFailure({
+      area: "project-open",
+      operation: "reclassify",
+      code: "reclassify-failed",
+      cause: {
+        code: "UNKNOWN_INTERNAL_CODE",
+        message: `${"内部失败 ".repeat(120)} /Users/private/secret.html`,
+      },
+    });
+    const detail = warnings.at(-1).at(-1);
+    assert.equal(detail, "内部错误");
+    assert.ok(detail.length <= 280);
+    assert.doesNotMatch(warnings.at(-1).join(" "), /\[object Object\]|\/Users\/private\/secret\.html/u);
+  } finally {
+    console.warn = originalWarn;
+  }
+});

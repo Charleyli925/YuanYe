@@ -1,5 +1,8 @@
 import { decodeWorkspaceResponse } from "./workspace-controller-codecs.js";
 import { isBridgeRequestError } from "./bridge-client.js";
+import { PROJECT_SESSION_COORDINATION } from "./project-session.js";
+import { RUN_SESSION_COORDINATION } from "./run-session.js";
+import { verifyOpenTarget } from "./verified-project-context.js";
 import { planProjectCloseAbort, planProjectCloseHydration, planProjectCloseIdentity } from "./project/close-plan.js";
 import { planProjectOpen } from "./project/open-intent.js";
 import {
@@ -46,6 +49,14 @@ function unknown(operationId, reason) {
     operationId: String(operationId),
     reason: String(reason),
   });
+}
+
+function sourceLocatorUnknown(reason, operationId = null) {
+  const error = new Error(String(reason || "文件位置恢复结果待核对。"));
+  error.code = "SOURCE_LOCATOR_RECONCILE_UNKNOWN";
+  error.projectOutcome = "unknown";
+  if (operationId) error.operationId = String(operationId);
+  return error;
 }
 
 function stale(identity) {
@@ -302,6 +313,7 @@ export class ProjectWorkflow {
   #viewStatePort;
   #recentRunsPort;
   #navigationPort;
+  #publication;
   #externalNavigationTransactions = new Map();
   #policies;
   #scheduler;
@@ -494,6 +506,7 @@ export class ProjectWorkflow {
     this.#viewStatePort = ports.viewState;
     this.#recentRunsPort = ports.recentRuns;
     this.#navigationPort = ports.navigation || null;
+    this.#publication = ports.publication || null;
     this.#policies = policies;
     this.#scheduler = scheduler;
     this.#clock = clock;
@@ -1769,20 +1782,58 @@ export class ProjectWorkflow {
   #managedOpenTarget() {
     const openTarget = this.#projectSession.openTarget;
     const context = this.#projectSession.context;
+    return verifyOpenTarget(openTarget, {
+      projectId: context?.projectId,
+      documentId: context?.documentId,
+      sourcePath: context?.sourcePath,
+      sourceSha256: this.#documentSession.persistedSourceSha256,
+      sameSourcePath: this.#codecs.sameSourcePath,
+      targetKind: "working-copy",
+    });
+  }
+
+  #captureLocatorFence(context) {
+    const runCoordination = this.#runSession[RUN_SESSION_COORDINATION] || null;
+    return Object.freeze({
+      context,
+      epoch: Number(context?.epoch),
+      projectId: String(context?.projectId || ""),
+      documentId: String(context?.documentId || ""),
+      sourcePath: String(context?.sourcePath || ""),
+      sourceSha256: String(this.#documentSession.persistedSourceSha256 || ""),
+      runRevision: typeof runCoordination?.locatorRevision === "function"
+        ? runCoordination.locatorRevision(context?.sourcePath)
+        : null,
+    });
+  }
+
+  #isCurrentLocatorFence(fence) {
+    if (!fence || this.#disposed) return false;
     if (
-      !openTarget
-      || !context
-      || openTarget.targetKind !== "working-copy"
-      || !String(openTarget.workingCopyId || "")
-      || !String(openTarget.versionId || "")
-      || String(openTarget.projectId || "") !== String(context.projectId || "")
-      || String(openTarget.documentId || "") !== String(context.documentId || "")
-    ) return null;
-    return openTarget;
+      !this.#projectSession.matches(fence.context)
+      || this.#projectSession.epoch !== fence.epoch
+      || this.#projectSession.projectId !== fence.projectId
+      || this.#projectSession.documentId !== fence.documentId
+      || !this.#codecs.sameSourcePath(
+        this.#projectSession.sourcePath,
+        fence.sourcePath,
+      )
+      || this.#documentSession.persistedSourceSha256 !== fence.sourceSha256
+      || typeof this.#runSession[RUN_SESSION_COORDINATION]?.locatorRevision !== "function"
+      || fence.runRevision === null
+    ) return false;
+    return this.#runSession[RUN_SESSION_COORDINATION]
+      .locatorRevision(fence.sourcePath) === fence.runRevision;
   }
 
   #now() {
     return Number(this.#clock?.now?.() || Date.now());
+  }
+
+  #beginPublicationBatch() {
+    return typeof this.#publication?.begin === "function"
+      ? this.#publication.begin()
+      : null;
   }
 
   #scheduleLocatorRetry(input) {
@@ -1803,46 +1854,100 @@ export class ProjectWorkflow {
     context,
     expectedSha256,
     openTarget = null,
+    reservations = null,
   }) {
-    const canonicalSourcePath = String(nextSourcePath || "");
-    const documentAuthority = this.#documentWorkflow.captureProjectTransitionAuthority?.();
-    const pendingWrite = this.#documentSession.pendingWrite;
-    const nextOpenTarget = rebasedManagedOpenTarget(
-      openTarget,
-      canonicalSourcePath,
-      expectedSha256,
-    );
-    this.#runSession.rebaseSource({
-      previousSourcePath,
-      sourcePath: canonicalSourcePath,
-      projectId: context.projectId,
-    });
-    const transitioned = this.#projectSession.transitionSource({
-      previousSourcePath,
-      sourcePath: canonicalSourcePath,
-      projectId: context.projectId,
-      documentId: context.documentId,
-      ...(nextOpenTarget ? { openTarget: nextOpenTarget } : {}),
-    });
-    if (pendingWrite && transitioned) {
-      this.#documentSession.setPendingWrite({
-        ...pendingWrite,
-        ...transitioned,
+    const endPublication = this.#beginPublicationBatch();
+    try {
+      const canonicalSourcePath = String(nextSourcePath || "");
+      const documentAuthority = this.#documentWorkflow.captureProjectTransitionAuthority?.();
+      const pendingWrite = this.#documentSession.pendingWrite;
+      const nextOpenTarget = rebasedManagedOpenTarget(
+        openTarget,
+        canonicalSourcePath,
+        expectedSha256,
+      );
+      const runCoordination = this.#runSession[RUN_SESSION_COORDINATION] || null;
+      const projectCoordination = this.#projectSession[PROJECT_SESSION_COORDINATION] || null;
+      if (
+        reservations
+        && (
+          (this.#runSession && !runCoordination?.rebaseReservationCurrent?.(reservations.run))
+          || !projectCoordination?.transitionReservationCurrent?.(reservations.project)
+        )
+      ) return null;
+      const runReservation = runCoordination?.prepareRebaseSource?.({
+        previousSourcePath,
         sourcePath: canonicalSourcePath,
-        expectedSourceSha256: expectedSha256,
+        projectId: context.projectId,
+        documentId: context.documentId,
       });
-    }
-    this.#documentWorkflow.resetForProjectTransition();
-    if (documentAuthority && transitioned) {
-      this.#documentWorkflow.restoreProjectTransitionAuthority?.({
-        authority: documentAuthority,
-        context: transitioned,
-        sourceSha256: expectedSha256,
+      const projectReservation = projectCoordination?.prepareTransitionSource?.({
+        previousSourcePath,
+        sourcePath: canonicalSourcePath,
+        projectId: context.projectId,
+        documentId: context.documentId,
+        ...(nextOpenTarget ? { openTarget: nextOpenTarget } : {}),
       });
+      if ((this.#runSession && !runReservation) || !projectReservation) return null;
+
+      // Both reservations are read-only. Commit the aggregate without
+      // notifying observers; a failed ProjectSession CAS rolls the RunSession
+      // reservation back, so no caller can publish a split locator.
+      let runCommitted = false;
+      if (this.#runSession) {
+        if (!runCoordination?.commitRebaseSource?.(runReservation, { publish: false })) {
+          return null;
+        }
+        runCommitted = true;
+      }
+      let transitioned = null;
+      try {
+        transitioned = projectCoordination?.commitTransitionSource?.(
+          projectReservation,
+          { publish: false },
+        );
+      } catch {
+        if (runCommitted) {
+          runCoordination?.rollbackRebaseSource?.(
+            runReservation,
+            { publish: false },
+          );
+        }
+        return null;
+      }
+      if (!transitioned) {
+        if (runCommitted) {
+          runCoordination?.rollbackRebaseSource?.(
+            runReservation,
+            { publish: false },
+          );
+        }
+        return null;
+      }
+      projectCoordination?.publish?.();
+      runCoordination?.publish?.();
+      if (pendingWrite && transitioned) {
+        this.#documentSession.setPendingWrite({
+          ...pendingWrite,
+          ...transitioned,
+          sourcePath: canonicalSourcePath,
+          expectedSourceSha256: expectedSha256,
+        });
+      }
+      this.#documentWorkflow.resetForProjectTransition();
+      if (documentAuthority && transitioned) {
+        this.#documentWorkflow.restoreProjectTransitionAuthority?.({
+          authority: documentAuthority,
+          context: transitioned,
+          sourceSha256: expectedSha256,
+        });
+      }
+      this.#commentWorkflow.resetForProjectTransition();
+      this.#projectRulesWorkflow.resetForProjectTransition();
+      return transitioned;
+    } finally {
+      endPublication?.();
     }
-    this.#commentWorkflow.resetForProjectTransition();
-    this.#projectRulesWorkflow.resetForProjectTransition();
-    return transitioned;
   }
 
   async #runLocatorReconcile({
@@ -1857,6 +1962,7 @@ export class ProjectWorkflow {
     if (!context) {
       return blocked("SOURCE_LOCATOR_CONTEXT_REQUIRED", "当前项目身份尚未完成初始化。");
     }
+    const initialFence = this.#captureLocatorFence(context);
     const currentPath = context.sourcePath;
     if (
       previousSourcePath
@@ -1877,6 +1983,9 @@ export class ProjectWorkflow {
         observed = await this.#documentWorkflow.observeExternalSourceChange({
           sourcePath: currentPath,
         });
+      }
+      if (!this.#isCurrentLocatorFence(initialFence)) {
+        return succeeded({ ignored: true, reason: "stale-session" });
       }
       return succeeded({
         context: this.#projectSession.context,
@@ -1955,6 +2064,9 @@ export class ProjectWorkflow {
     const drained = await this.#drainCoordinator.drain("switch", {
       deadlineAt: this.#now() + SWITCH_DEADLINE_MS,
     });
+    if (!this.#isCurrentLocatorFence(initialFence)) {
+      return succeeded({ ignored: true, reason: "stale-session" });
+    }
     if (!drained.ok) {
       return defer(
         "SOURCE_LOCATOR_DRAIN_INCOMPLETE",
@@ -1966,24 +2078,19 @@ export class ProjectWorkflow {
     }
 
     const liveContext = this.#projectSession.context;
-    if (
-      !liveContext
-      || !this.#projectSession.matches(liveContext)
-      || (
-        previousSourcePath
-        && !this.#codecs.sameSourcePath(previousSourcePath, liveContext.sourcePath)
-        && !this.#codecs.sameSourcePath(liveContext.sourcePath, currentPath)
-      )
-    ) {
+    if (!liveContext || !this.#isCurrentLocatorFence(initialFence)) {
       return succeeded({ ignored: true, reason: "stale-session" });
     }
     if (
       this.#documentSession.persistState === "conflict"
       && typeof this.#documentWorkflow.observeExternalSourceChange === "function"
     ) {
-      return this.#documentWorkflow.observeExternalSourceChange({
+      const observedConflict = await this.#documentWorkflow.observeExternalSourceChange({
         sourcePath: liveContext.sourcePath,
       });
+      return this.#isCurrentLocatorFence(initialFence)
+        ? observedConflict
+        : succeeded({ ignored: true, reason: "stale-session" });
     }
 
     const openTarget = this.#managedOpenTarget();
@@ -1993,9 +2100,41 @@ export class ProjectWorkflow {
       && SHA256.test(this.#documentSession.persistedSourceSha256 || "")
     );
     const operationId = this.#nextOperationId("source-locator");
+    const runCoordination = this.#runSession[RUN_SESSION_COORDINATION] || null;
+    const projectCoordination = this.#projectSession[PROJECT_SESSION_COORDINATION] || null;
+    const transitionReservations = canReconcileManaged
+      ? Object.freeze({
+          run: runCoordination?.prepareRebaseSource?.({
+            previousSourcePath: liveContext.sourcePath,
+            sourcePath: liveContext.sourcePath,
+            projectId: liveContext.projectId,
+            documentId: liveContext.documentId,
+          }),
+          project: projectCoordination?.prepareTransitionSource?.({
+            previousSourcePath: liveContext.sourcePath,
+            sourcePath: liveContext.sourcePath,
+            projectId: liveContext.projectId,
+            documentId: liveContext.documentId,
+            openTarget,
+          }),
+        })
+      : null;
+    if (
+      canReconcileManaged
+      && (
+        (this.#runSession && !transitionReservations.run)
+        || !transitionReservations.project
+      )
+    ) return succeeded({ ignored: true, reason: "stale-session" });
+    let hostCommitted = false;
+    let settledFence = initialFence;
     try {
       let result = null;
       if (canReconcileManaged) {
+        if (!this.#isCurrentLocatorFence(initialFence)) {
+          return succeeded({ ignored: true, reason: "stale-session" });
+        }
+        hostCommitted = true;
         result = await this.#projectOpenPort.reconcileActiveManagedSource({
           operationId,
           previousSourcePath: liveContext.sourcePath,
@@ -2008,17 +2147,35 @@ export class ProjectWorkflow {
           ...(watcherGeneration > 0 ? { watcherGeneration } : {}),
         });
         if (
+          !this.#isCurrentLocatorFence(initialFence)
+          || (this.#runSession && !runCoordination?.rebaseReservationCurrent?.(transitionReservations.run))
+          || !projectCoordination?.transitionReservationCurrent?.(transitionReservations.project)
+        ) {
+          throw sourceLocatorUnknown(
+            "文件位置恢复已经返回，但当前项目身份或源 Hash 已经变化。",
+            operationId,
+          );
+        }
+        const reconciledTarget = result?.openTarget
+          ? verifyOpenTarget(result.openTarget, {
+            projectId: liveContext.projectId,
+            documentId: liveContext.documentId,
+            sourceSha256: result.sourceSha256,
+            sameSourcePath: this.#codecs.sameSourcePath,
+            targetKind: "working-copy",
+          })
+          : null;
+        if (
           !result
           || String(result.operationId || "") !== operationId
-          || !result.openTarget
-          || result.openTarget.targetKind !== "working-copy"
-          || String(result.openTarget.projectId || "") !== liveContext.projectId
-          || String(result.openTarget.documentId || "") !== liveContext.documentId
-          || String(result.openTarget.workingCopyId || "") !== String(openTarget.workingCopyId)
-          || String(result.openTarget.versionId || "") !== String(openTarget.versionId)
-          || !String(result.sourcePath || "")
+          || !reconciledTarget
+          || String(reconciledTarget.workingCopyId || "") !== String(openTarget.workingCopyId)
+          || String(reconciledTarget.versionId || "") !== String(openTarget.versionId)
         ) {
-          throw new Error("当前工作文件身份无法核对，PageRoot 没有切换路径。");
+          throw sourceLocatorUnknown(
+            "当前工作文件身份无法核对，PageRoot 没有切换路径。",
+            operationId,
+          );
         }
         const nextGeneration = Number(result.watcherGeneration || 0);
         if (nextGeneration > 0) {
@@ -2028,40 +2185,63 @@ export class ProjectWorkflow {
           );
         }
         const nextSourcePath = String(
-          result.openTarget?.exactSourcePath || result.sourcePath || "",
+          reconciledTarget.exactSourcePath || result.sourcePath || "",
         );
         const pathChanged = !this.#codecs.sameSourcePath(
           nextSourcePath,
           liveContext.sourcePath,
         );
         if (pathChanged) {
-          const expectedSha256 = this.#documentSession.persistedSourceSha256;
+          if (!this.#isCurrentLocatorFence(initialFence)) {
+            throw sourceLocatorUnknown(
+              "文件位置恢复已经返回，但当前项目身份或源 Hash 已经变化。",
+              operationId,
+            );
+          }
           const transitioned = this.#publishSourceLocatorChange({
             previousSourcePath: liveContext.sourcePath,
             nextSourcePath,
             context: liveContext,
-            expectedSha256,
-            openTarget: result.openTarget,
+            expectedSha256: String(result.sourceSha256),
+            openTarget: reconciledTarget,
+            reservations: transitionReservations,
           });
           if (!transitioned || !this.#projectSession.context) {
-            throw new Error("文件位置已恢复，但当前项目身份已经变化。");
+            throw sourceLocatorUnknown("文件位置已恢复，但本地 Locator 事务未能提交。", operationId);
           }
+          settledFence = this.#captureLocatorFence(transitioned);
           const journalRebase = await this.#documentWorkflow.rebaseRecoveryJournal?.({
             previousContext: liveContext,
             context: transitioned,
           });
+          if (!this.#isCurrentLocatorFence(settledFence)) {
+            throw sourceLocatorUnknown(
+              "文件位置已恢复，但恢复日志返回时当前项目身份或源 Hash 已经变化。",
+              operationId,
+            );
+          }
           if (journalRebase && journalRebase.status !== "succeeded") {
-            throw new Error(String(
-              journalRebase.reason || "文件位置已恢复，但恢复日志没有完成路径更新。",
-            ));
+            throw sourceLocatorUnknown(
+              String(journalRebase.reason || "文件位置已恢复，但恢复日志没有完成路径更新。"),
+              operationId,
+            );
           }
           const recents = await this.refreshRecents();
           if (recents.status !== "succeeded") {
             return unknown(operationId, "文件位置已经恢复，但项目状态还没有完成刷新。");
           }
+          if (!this.#isCurrentLocatorFence(settledFence)) {
+            throw sourceLocatorUnknown(
+              "文件位置已恢复，但最近项目刷新返回时当前项目身份已经变化。",
+              operationId,
+            );
+          }
           const nextContext = this.#projectSession.context;
           if (!nextContext) {
-            throw new Error("文件位置已恢复，但当前项目身份已经变化。");
+            throw sourceLocatorUnknown(
+              "文件位置已恢复，但当前项目身份已经变化。",
+              operationId,
+            );
           }
           this.scheduleProjectListRefreshAfterSettlement(nextContext);
           this.#emit({
@@ -2083,6 +2263,15 @@ export class ProjectWorkflow {
         observed = await this.#documentWorkflow.observeExternalSourceChange({
           sourcePath: observedPath,
         });
+      }
+      if (!this.#isCurrentLocatorFence(settledFence)) {
+        if (hostCommitted) {
+          throw sourceLocatorUnknown(
+            "文件位置核对已返回，但当前项目身份或源 Hash 已经变化。",
+            operationId,
+          );
+        }
+        return succeeded({ ignored: true, reason: "stale-session" });
       }
       const nextContext = this.#projectSession.context;
       return succeeded({
@@ -2114,6 +2303,9 @@ export class ProjectWorkflow {
         code: projectErrorCode(cause, "SOURCE_LOCATOR_REJECTED"),
         reason,
       });
+      if (hostCommitted && cause?.projectOutcome !== "unknown") {
+        return unknown(operationId, reason);
+      }
       return this.#outcomeFromCause(
         operationId,
         cause,
@@ -3365,6 +3557,7 @@ export class ProjectWorkflow {
           nextDocumentId,
           versionId,
           openTarget,
+          operationId,
         });
         if (!preparedTransition.updatesCurrentProject) return stale({
           operationId,
@@ -3977,67 +4170,243 @@ export class ProjectWorkflow {
     openTarget = null,
     operationId = null,
   }) {
-    const updatesCurrentProject = Boolean(
-      (
-        nextProjectId
-        && this.#projectSession.projectId
-        && this.#projectSession.projectId === nextProjectId
-      )
-      || this.#codecs.sameSourcePath(this.#projectSession.sourcePath, previousSourcePath)
-      || this.#codecs.sameSourcePath(this.#projectSession.sourcePath, nextSourcePath)
+    if (!SHA256.test(String(expectedSha256 || ""))) {
+      throw sourceLocatorUnknown(
+        "托管工作文件切换缺少可核对的源 Hash，当前项目没有切换。",
+        operationId,
+      );
+    }
+    const currentPathMatchesNext = this.#codecs.sameSourcePath(
+      this.#projectSession.sourcePath,
+      nextSourcePath,
     );
+    const currentPathMatchesPrevious = this.#codecs.sameSourcePath(
+      this.#projectSession.sourcePath,
+      previousSourcePath,
+    );
+    // A Desktop activation is allowed to publish the local aggregate only
+    // when the complete current tuple and the locator agree. In particular,
+    // projectId alone is not authority: a different document in the same
+    // project is a background target and must remain publication-free.
+    const currentIdentityMatchesNext = Boolean(
+      this.#projectSession.projectId
+      && this.#projectSession.documentId
+      && nextProjectId
+      && nextDocumentId
+      && this.#projectSession.projectId === nextProjectId
+      && this.#projectSession.documentId === nextDocumentId,
+    );
+    const updatesCurrentProject = Boolean(
+      currentIdentityMatchesNext
+      && (currentPathMatchesPrevious || currentPathMatchesNext)
+    );
+    const managedTarget = verifyOpenTarget(openTarget, {
+      projectId: nextProjectId,
+      documentId: nextDocumentId,
+      sourcePath: nextSourcePath,
+      sourceSha256: expectedSha256,
+      sameSourcePath: this.#codecs.sameSourcePath,
+    });
+    const targetKind = String(managedTarget?.targetKind || "");
+    const targetVersionMatches = Boolean(
+      managedTarget
+      && String(managedTarget.versionId || "") === String(versionId || ""),
+    );
+    const completeTargetMatches = Boolean(
+      managedTarget
+      && targetVersionMatches
+      && ["working-copy", "version"].includes(targetKind),
+    );
+
+    // A matching path is not authority. Validate the complete target, Version
+    // identity, and target kind before either a same-path fast path or a
+    // transition reservation can return or publish local state.
+    if (!completeTargetMatches) {
+      throw sourceLocatorUnknown(
+        "托管工作文件的完整 OpenTarget 与目标路径或版本身份不一致，请重新核对。",
+        operationId,
+      );
+    }
+
+    // A background Version may refresh the catalog, but it must never ask
+    // Desktop to activate a file or publish local Session authority. Its
+    // complete target is still required so a malformed response cannot be
+    // silently downgraded to the generated-version compatibility route.
+    if (!updatesCurrentProject) {
+      return Object.freeze({
+        previousSourcePath,
+        nextSourcePath,
+        projectId: nextProjectId,
+        documentId: nextDocumentId,
+        openTarget: managedTarget,
+        updatesCurrentProject,
+        activatedProject: null,
+      });
+    }
     if (!nextSourcePath || this.#codecs.sameSourcePath(nextSourcePath, previousSourcePath)) {
       return Object.freeze({
         previousSourcePath,
         nextSourcePath,
         projectId: nextProjectId,
         documentId: nextDocumentId,
-        openTarget,
+        openTarget: managedTarget,
         updatesCurrentProject,
         activatedProject: null,
       });
     }
-    const isManagedWorkingCopy = Boolean(
-      openTarget
-      && openTarget.targetKind === "working-copy"
-      && String(openTarget.projectId || "") === String(nextProjectId || "")
-      && String(openTarget.documentId || "") === String(nextDocumentId || "")
-      && String(openTarget.workingCopyId || "")
-      && String(openTarget.versionId || "") === String(versionId || "")
-      && String(openTarget.projectRootPath || "")
+    if (!/^[A-Za-z0-9_-]{8,160}$/u.test(String(operationId || ""))) {
+      throw sourceLocatorUnknown(
+        "桌面工作文件切换缺少可核对的操作身份，当前项目没有切换。",
+        operationId,
+      );
+    }
+    const changesSourcePath = !this.#codecs.sameSourcePath(
+      this.#projectSession.sourcePath,
+      nextSourcePath,
     );
-    const activatedProject = isManagedWorkingCopy
-      ? await this.#activateManagedWorkingCopy({
+    const transitionFence = updatesCurrentProject && changesSourcePath
+      ? this.#captureLocatorFence(this.#projectSession.context)
+      : null;
+    const runCoordination = this.#runSession[RUN_SESSION_COORDINATION] || null;
+    const projectCoordination = this.#projectSession[PROJECT_SESSION_COORDINATION] || null;
+    const runReservation = transitionFence
+      ? runCoordination?.prepareRebaseSource?.({
           previousSourcePath,
-          nextSourcePath,
-          expectedSha256,
+          sourcePath: nextSourcePath,
           projectId: nextProjectId,
           documentId: nextDocumentId,
-          workingCopyId: String(openTarget.workingCopyId),
-          versionId,
-          projectRootPath: String(openTarget.projectRootPath),
-          ...(operationId ? { operationId: String(operationId) } : {}),
         })
-      : await this.#activateGeneratedVersion({
+      : null;
+    const projectReservation = transitionFence
+      ? projectCoordination?.prepareTransitionSource?.({
           previousSourcePath,
-          nextSourcePath,
-          expectedSha256,
+          sourcePath: nextSourcePath,
           projectId: nextProjectId,
-          versionId,
-        });
+          documentId: nextDocumentId,
+          openTarget: managedTarget,
+        })
+      : null;
+    const coordination = transitionFence
+      ? Object.freeze({
+          fence: transitionFence,
+          runReservation,
+          projectReservation,
+          operationId: operationId ? String(operationId) : null,
+        })
+      : null;
+    if (transitionFence && ((this.#runSession && !runReservation) || !projectReservation)) {
+      return Object.freeze({
+        previousSourcePath,
+        nextSourcePath,
+        projectId: nextProjectId,
+        documentId: nextDocumentId,
+        openTarget: managedTarget,
+        updatesCurrentProject,
+        activatedProject: null,
+        coordination,
+      });
+    }
+    const isManagedWorkingCopy = targetKind === "working-copy";
+    // `completeTargetMatches` above fences both routes before the Desktop
+    // call; these booleans now only select the already-verified route.
+    let activatedProject;
+    try {
+      activatedProject = isManagedWorkingCopy
+        ? await this.#activateManagedWorkingCopy({
+            previousSourcePath,
+            nextSourcePath,
+            expectedSha256,
+            projectId: nextProjectId,
+            documentId: nextDocumentId,
+            workingCopyId: String(managedTarget.workingCopyId),
+            versionId,
+            projectRootPath: String(managedTarget.projectRootPath),
+            operationId: String(operationId),
+          })
+        : await this.#activateGeneratedVersion({
+            previousSourcePath,
+            nextSourcePath,
+            expectedSha256,
+            projectId: nextProjectId,
+            versionId,
+            operationId: String(operationId),
+          });
+    } catch (cause) {
+      if (transitionFence) {
+        throw sourceLocatorUnknown(
+          "桌面工作文件切换结果待同一操作核对，请勿重复切换。",
+          operationId,
+        );
+      }
+      throw cause;
+    }
+    if (
+      transitionFence
+      && (
+        !this.#isCurrentLocatorFence(transitionFence)
+        || (this.#runSession && !runCoordination?.rebaseReservationCurrent?.(runReservation))
+        || !projectCoordination?.transitionReservationCurrent?.(projectReservation)
+      )
+    ) {
+      throw sourceLocatorUnknown(
+        "托管工作文件已返回，但本地项目身份或 Locator reservation 已变化，请重新核对。",
+        operationId,
+      );
+    }
+    if (
+      !activatedProject
+      || typeof activatedProject !== "object"
+      || String(activatedProject.operationId || "") !== String(operationId)
+      || typeof activatedProject.html !== "string"
+      || typeof activatedProject.sourcePath !== "string"
+      || typeof activatedProject.sha256 !== "string"
+    ) {
+      throw sourceLocatorUnknown(
+        "桌面工作文件返回的完整身份或内容无法核对，请重新打开。",
+        operationId,
+      );
+    }
+    let activatedHash;
+    try {
+      activatedHash = await this.#hashPort.sha256(activatedProject.html);
+    } catch {
+      throw sourceLocatorUnknown(
+        "桌面工作文件 Hash 无法完成核对，请重新打开。",
+        operationId,
+      );
+    }
+    if (
+      transitionFence
+      && (
+        !this.#isCurrentLocatorFence(transitionFence)
+        || (this.#runSession && !runCoordination?.rebaseReservationCurrent?.(runReservation))
+        || !projectCoordination?.transitionReservationCurrent?.(projectReservation)
+      )
+    ) {
+      throw sourceLocatorUnknown(
+        "托管工作文件 Hash 返回时本地项目身份或 Locator reservation 已变化，请重新核对。",
+        operationId,
+      );
+    }
     if (
       !this.#codecs.sameSourcePath(activatedProject.sourcePath, nextSourcePath)
       || activatedProject.sha256 !== expectedSha256
-      || await this.#hashPort.sha256(activatedProject.html) !== expectedSha256
-    ) throw new Error("生成版本的路径、HTML 与 Hash 没有形成完整一致的候选。");
+      || activatedHash !== expectedSha256
+    ) {
+      throw sourceLocatorUnknown(
+        "生成版本的路径、HTML 与 Hash 没有形成完整一致的候选，请重新打开。",
+        operationId,
+      );
+    }
     return Object.freeze({
       previousSourcePath,
       nextSourcePath,
       projectId: nextProjectId,
       documentId: nextDocumentId,
-      openTarget,
+      openTarget: managedTarget,
       updatesCurrentProject,
       activatedProject,
+      coordination,
     });
   }
 
@@ -4067,51 +4436,104 @@ export class ProjectWorkflow {
       this.#projectSession.sourcePath,
       prepared.nextSourcePath,
     );
+    const runCoordination = this.#runSession[RUN_SESSION_COORDINATION] || null;
+    const projectCoordination = this.#projectSession[PROJECT_SESSION_COORDINATION] || null;
+    let runReservation = null;
+    let projectReservation = null;
     if (changesSourcePath) {
-      this.#runSession.rebaseSource({
-        previousSourcePath: prepared.previousSourcePath,
-        sourcePath: prepared.nextSourcePath,
-        projectId: prepared.projectId,
-      });
-    }
-    const transition = changesSourcePath
-      ? this.#projectSession.transitionSource({
+      runReservation = prepared.coordination?.runReservation
+        || runCoordination?.prepareRebaseSource?.({
+          previousSourcePath: prepared.previousSourcePath,
+          sourcePath: prepared.nextSourcePath,
+          projectId: prepared.projectId,
+          documentId: prepared.documentId,
+        });
+      projectReservation = prepared.coordination?.projectReservation
+        || projectCoordination?.prepareTransitionSource?.({
           previousSourcePath: prepared.previousSourcePath,
           sourcePath: prepared.nextSourcePath,
           projectId: prepared.projectId,
           documentId: prepared.documentId,
           openTarget: prepared.openTarget,
-        })
-      : this.#projectSession.context || this.#projectSession.register({
-          epoch: this.#projectSession.epoch,
-          projectId: prepared.projectId,
-          documentId: prepared.documentId,
-          sourcePath: prepared.nextSourcePath,
-          ...(prepared.openTarget ? { openTarget: prepared.openTarget } : {}),
         });
-    if (!transition || !this.#projectSession.context) return null;
+      if ((this.#runSession && !runReservation) || !projectReservation) return null;
+      if (
+        prepared.coordination
+        && (
+          !this.#isCurrentLocatorFence(prepared.coordination.fence)
+          || (this.#runSession && !runCoordination?.rebaseReservationCurrent?.(runReservation))
+          || !projectCoordination?.transitionReservationCurrent?.(projectReservation)
+        )
+      ) return null;
+      if (this.#runSession && !runCoordination?.commitRebaseSource?.(runReservation, { publish: false })) {
+        return null;
+      }
+    }
+    let transition = null;
+    try {
+      transition = changesSourcePath
+        ? projectCoordination?.commitTransitionSource?.(
+            projectReservation,
+            { publish: false },
+          )
+        : this.#projectSession.context || this.#projectSession.register({
+            epoch: this.#projectSession.epoch,
+            projectId: prepared.projectId,
+            documentId: prepared.documentId,
+            sourcePath: prepared.nextSourcePath,
+            ...(prepared.openTarget ? { openTarget: prepared.openTarget } : {}),
+          });
+    } catch {
+      if (runReservation) {
+        runCoordination?.rollbackRebaseSource?.(
+          runReservation,
+          { publish: false },
+        );
+      }
+      return null;
+    }
+    if (!transition || !this.#projectSession.context) {
+      if (runReservation) {
+        runCoordination?.rollbackRebaseSource?.(
+          runReservation,
+          { publish: false },
+        );
+      }
+      return null;
+    }
+    const endPublication = this.#beginPublicationBatch();
+    try {
+      if (changesSourcePath) {
+        projectCoordination?.publish?.();
+        runCoordination?.publish?.();
+      }
 
-    // Publication is deliberately synchronous: no consumer can observe a new
-    // Project without the complete Document tuple, Version/Draft/Comment
-    // authority and new Canvas generation.
-    if (changesSourcePath) {
-      this.#documentWorkflow.resetForProjectTransition();
-      this.#commentWorkflow.resetForProjectTransition();
-      this.#projectRulesWorkflow.resetForProjectTransition();
+      // Publication is deliberately synchronous: no consumer can observe a new
+      // Project without the complete Document tuple, Version/Draft/Comment
+      // authority and new Canvas generation.
+      if (changesSourcePath) {
+        this.#documentWorkflow.resetForProjectTransition();
+        this.#commentWorkflow.resetForProjectTransition();
+        this.#projectRulesWorkflow.resetForProjectTransition();
+      }
+      this.#documentSession.publishAuthority({
+        html,
+        persistedSourceSha256: sourceSha256,
+        pendingWrite: null,
+      });
+      if (typeof publishSessions === "function") {
+        publishSessions(this.#projectSession.context);
+      } else {
+        publishVersion();
+        if (changesSourcePath) this.#draftSession.deactivate();
+      }
+      this.#canvasPort.invalidateRenderAcks?.();
+      return this.#projectSession.context;
+    } catch {
+      return null;
+    } finally {
+      endPublication?.();
     }
-    this.#documentSession.publishAuthority({
-      html,
-      persistedSourceSha256: sourceSha256,
-      pendingWrite: null,
-    });
-    if (typeof publishSessions === "function") {
-      publishSessions(this.#projectSession.context);
-    } else {
-      publishVersion();
-      if (changesSourcePath) this.#draftSession.deactivate();
-    }
-    this.#canvasPort.invalidateRenderAcks?.();
-    return this.#projectSession.context;
   }
 
   // Kept as a compatibility seam for the already-published Candidate route.
@@ -4350,7 +4772,10 @@ export class ProjectWorkflow {
   }
 
   #outcomeFromCause(operationId, cause, fallbackCode, fallbackMessage) {
-    if (isBridgeRequestError(cause) && cause.outcome === "unknown") {
+    if (
+      (isBridgeRequestError(cause) && cause.outcome === "unknown")
+      || cause?.projectOutcome === "unknown"
+    ) {
       return unknown(operationId, fallbackMessage);
     }
     return rejected(projectErrorCode(cause, fallbackCode), fallbackMessage);

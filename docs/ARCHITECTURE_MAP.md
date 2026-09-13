@@ -230,6 +230,24 @@ iframe. The repository may continue to persist the rules in its internal
 
 ## Run and navigation render boundaries
 
+RunSession keeps locator-scoped run, result, handoff, copied/recovered and
+outcome facts in one aggregate entry. Active presentation retains locator keys
+only and projects from that same entry; it is not a second fact store. A new
+Request/Attempt on one locator replaces its attempt facts atomically, while late
+writers must still match the current attempt. Repository `sourceWorkingCopyId`
+reaches both Bridge active-Run projections and the domain decoder; missing legacy
+origin stays unknown. Pending submissions use the existing token, and
+rename/managed-source transition rebind only the exact old locator. See
+`STATE_OWNERSHIP.md` for the distinction between Request origin and the
+post-Promotion display target.
+
+Locator revisions/tombstones are coordination metadata, not a second public
+fact store. Hydration carries a locator revision, per-query sequence and
+ProjectSession epoch across its Bridge await. Source rebinds reserve both
+ProjectSession and RunSession, then publish observers only after both CAS
+commits succeed; host activation that cannot be locally proven is surfaced as
+unknown/recovery-required.
+
 ```text
 RunSession + RunWorkflow
   -> WorkspaceController.runs { getSnapshot, subscribe, commands }

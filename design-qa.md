@@ -1,5 +1,98 @@
 # Design QA
 
+## 2026-09-12 — Run identity and aggregate (historical pre-P1 review evidence)
+
+- Internal identity/coordination repair; no layout, control, copy, chat or execution-purpose change. One locator-keyed RunSession entry now owns run/result/handoff/recovery/outcome facts, while active presentation keeps only locator keys. Request origin and the current display locator remain distinct; pending submissions reuse their in-memory token, and the public methods/snapshot remain unchanged.
+- Two new regressions first reproduced production failures: rebinding A removed B's run in the same project/document, and reconciling unknown A removed B's pending run. The original failing log is retained locally. Both passed after narrowing locator selection and run/submission matching.
+- The first expanded ProjectWorkflow fixture put a processing Run on the current page; the existing locator lock correctly blocked that operation. The fixture now exercises the permitted state: editable A, processing B in the same project. No production lock was relaxed.
+- Scoped evidence: 259 Node checks passed across RunSession/RunWorkflow/decoder and Project/Version/WorkspaceController consumers, including the expanded aggregate, legacy, late-writer and alias cases. A real synthetic Bridge Request → Candidate → Promotion check passed and preserved the source Working Copy identity. Its first launch was blocked by sandbox loopback `EPERM`; the authorized rerun passed. No UI, full task gate, real-vendor, private-corpus, packaged-app or performance acceptance is claimed.
+- Typecheck/architecture and 48 selection/context checks passed. Targeted aggregate lint reported no errors or warnings; the earlier identity-preparation pass reported only its two existing ProjectWorkflow/Bridge warnings.
+
+This section records the pre-review M6 evidence and is not final acceptance; the
+current post-review checks are recorded below.
+
+## 2026-09-13 — M6 identity and managed-source repair (post-review focused evidence)
+
+- Scope is internal Run/Project/Workspace identity coordination. There is no
+  layout, control, copy, chat or execution-purpose change. The strict recent-run
+  authority requires complete top-level workspace identity plus a matching
+  OpenTarget; Request origin remains independent from the current Working Copy.
+  Managed Finder/Version/registration transitions reserve both Sessions before
+  Desktop awaits and publish one complete aggregate tuple, with an explicit
+  same-operation `unknown` outcome when host/local state cannot be proven.
+- Current evidence is tied to the frozen base `e1ebe3dfc306286e37c774d31c4bddfc11914449`;
+  the exact dirty tracked-diff SHA is reported with this handoff rather than
+  self-embedded in the evidence file. The current focused Node combination
+  passed 218/218, the Session/Controller batch passed 71/71, and the preload
+  batch passed 41/41. Coverage includes Recent hydration ABA/authority and
+  Candidate identity negatives, Finder reservation fences, managed activation
+  receipt replay, background Version no-publication,
+  same-project/different-document no-publication, legacy-history receipt
+  retention and aggregate publication. The Bridge HTTP suite was attempted
+  separately: 0/14 passed because every case
+  stopped at sandbox `listen EPERM 127.0.0.1`, with no assertion failure.
+  `npm run typecheck`, `npm run desktop:renderer`, syntax checks and diff checks
+  passed; Electron receipt execution was not rerun in this short pass (the
+  prior attempt stopped at sandbox `kill EPERM`/`SIGABRT`).
+  No UI, full task gate, real-vendor, private-corpus, packaged-app or
+  performance acceptance is claimed.
+
+- Sixth-round receipt fence evidence: the focused Node set passed 339/339,
+  including the existing managed activation and identity regressions. The
+  renderer build passed with only the existing large-chunk warning. The three
+  focused Electron receipt cases (clean pending restart, pending A→B followed
+  by persisted Y/Z returning to A, and completed-receipt replay) were attempted
+  but all stopped before app launch at sandbox `kill EPERM`/Electron `SIGABRT`;
+  therefore no Electron pass is claimed. The new persisted
+  `activeEffectGeneration` plus predecessor-effect fence is asserted by the
+  Node source contract and exercised by the deterministic persistence fixture;
+  the runtime result remains awaiting an authorized Electron environment.
+
+## 2026-09-13 — Current P1 boundary follow-up
+
+- Candidate mutation authority: the real Bridge suite passed 14/14 after an
+  authorized loopback run. The focused Candidate promotion test passed 22/22;
+  the broader 91-test repository batch passed 90/91, with its only failure the
+  unrelated sandbox `listen EPERM 127.0.0.1` startup case (the same test passed
+  in the authorized Bridge run). Missing/wrong Candidate decision identity and
+  lost-response same-operation replay both assert no duplicate manifest Version.
+- Source rename and Version identity: `source-rename.test.mjs` passed 13/13,
+  including managed/generated A→C→A predecessor invalidation;
+  `project-workflow.test.mjs` passed 75/75 and `version-workflow.test.mjs`
+  passed 42/42, including complete target/hash/document fences, no-publication
+  same-project/different-document paths, and preseeded legacy receipt X
+  retention while renderer request Y fails later validation.
+- Final local checks for this follow-up: syntax checks, `git diff --check`,
+  architecture/typecheck and renderer build passed; lint reported 0 errors and
+  26 existing warnings. The new focused production rename Electron case was
+  attempted and stopped before app launch at sandbox `kill EPERM` / `SIGABRT`,
+  matching the prior focused Electron limitation; no Electron pass is claimed.
+
+## 2026-09-13 — M6 final acceptance
+
+- Final production/test-source gate `2026-09-12T23-44-39-699Z-task` passed all
+  10 selected steps: architecture/typecheck, lint with 0 errors and 26 existing
+  warnings, dependency audit, Node targeted 1340/1340, contract 16/16, Web and
+  Desktop builds, Browser 26/26, Electron 73/73, and AI 25/25. Every Playwright
+  selection reconciled with 0 failed, skipped, or unexecuted cases.
+- The Electron set includes structured contextBridge error redaction, lost
+  activation reply recovery, exact-predecessor restart, intermediate activation
+  ABA rejection, production rename A-C-A rejection, and completed-receipt replay.
+  The focused structured-error/ProjectWorkflow Node set separately passed
+  141/141, and the real synthetic Bridge boundary passed 14/14.
+- The first full gate exposed a deterministic M1 package-closure defect: the
+  native HTTP provider imported `shared/agent-input-policy.mjs`, but the shared
+  resource was absent from the packaged Bridge allowlist. The final source adds
+  that exact resource to the manifest, package oracle, artifact verifier and
+  synthetic artifact fixture; the impact map now selects the package-closure
+  owner for future native HTTP provider/policy changes. Focused package,
+  artifact and selection checks passed 73/73 before the final full gate.
+- Independent final review reported no P0, P1 or P2. Remaining P3 debt is limited
+  to a narrower TypeScript description for the one nested reclassification DTO
+  and more granular mutant-catching assertions for invalid confirmation shape
+  and the HTTP runtime impact-map path. No layout, copy, control, real-vendor,
+  installed-app, private-corpus or packaged-artifact execution claim is added.
+
 ## 2026-09-12 — Shared HTTP Agent input policy
 
 - Mode: DESIGN CHANGE + AI EXPERIENCE LENS; base `353fb6c3`. Scope is admission/attachment policy, with the existing Agent controls and rejection copy. No layout, new mode, chat purpose or additional notification is introduced.

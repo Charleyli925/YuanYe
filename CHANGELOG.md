@@ -4,6 +4,8 @@ Notable user-visible changes are documented here. This project follows Semantic 
 
 ## [Unreleased]
 
+- 修复同项目另一份工作文件仍在运行时，路径重绑误清除后台运行，以及旧提交结果核对误清除另一文档正在准备的运行；任务保留最初来源工作文件身份，同一路径开始新轮后旧轮也不再覆盖新轮。最近运行恢复现在只接受完整且自证的工作区身份，并保留经核对 Candidate 的稳定采用标识；托管桌面以 activePath 与 operation-specific active effect 原子记录切换结果，Recent 排名不再冒充已提交 effect，pending 回执还持久化前序 active effect 与单调 generation，因而同一路径 ABA 不能伪装成精确前序崩溃恢复；托管桌面已提交但本地无法证明的切换会保留同一回执并标记为待核对，不再伪装成普通拒绝或发布半个项目状态。
+
 - 统一内置 HTTP Agent 的附件与输入/输出预算检查；文本附件只计入输入，完整输出按冻结 HTML 估计。执行使用预检时的模型能力，并在发送前重新核对所有冻结文件；未知模型能力不伪装成已验证额度。
 
 - 修复中文组词、内部文字恢复与历史操作后格式化节点失去编辑能力的问题，保留对页面脚本伪造节点的保护。

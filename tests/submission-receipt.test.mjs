@@ -167,7 +167,7 @@ test("adoption consumes only unchanged submitted comments and replays its decisi
   const ready = await value.repository.completeRequest({ target: value.target, requestId: receipt.requestId, attemptId: receipt.attemptId, html });
   const candidateId = ready.candidate.candidateId;
   await assert.rejects(value.repository.promoteCandidate({ target: value.target, candidateId, decisionOperationId: "promote_other" }), { code: "DECISION_IDENTITY_MISMATCH" });
-  await assert.rejects(value.repository.promoteCandidate({ target: value.target, candidateId, expectedSourceSha256: "0".repeat(64) }), { code: "SOURCE_HASH_CONFLICT" });
+  await assert.rejects(value.repository.promoteCandidate({ target: value.target, candidateId, decisionOperationId: `promote_${candidateId}`, expectedSourceSha256: "0".repeat(64) }), { code: "SOURCE_HASH_CONFLICT" });
   const input = { target: value.target, candidateId, decisionOperationId: `promote_${candidateId}`, expectedSourceSha256: value.target.sourceSha256 };
   const result = await value.repository.promoteCandidate(input);
   const replayed = await value.repository.promoteCandidate(input);
@@ -254,7 +254,8 @@ for (const boundary of ["messages", "contexts", "bytes"]) {
       requestId: receipt.requestId, attemptId: receipt.attemptId, html: fixtureHtml("V2") });
     assert.equal(candidate.status, "candidate-ready");
     const adopted = await value.repository.promoteCandidate({ target: value.target,
-      candidateId: candidate.candidate.candidateId });
+      candidateId: candidate.candidate.candidateId,
+      decisionOperationId: `promote_${candidate.candidate.candidateId}` });
     assert.equal(adopted.promoted, true);
     const restarted = new ProjectFileRepository({ projectsRoot: value.projects });
     await restarted.initialize();

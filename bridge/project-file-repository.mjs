@@ -472,11 +472,28 @@ export class ProjectFileRepository {
   }
 
   async rejectCandidate({ target, candidateId } = {}) {
-    return this.#serial(() => this.#rejectCandidate({ target, candidateId }));
+    const requestedCandidateId = assertCandidateId(candidateId);
+    return this.#serial(() => this.#rejectCandidate({
+      target,
+      candidateId: requestedCandidateId,
+    }));
   }
 
   async promoteCandidate({ target, candidateId, expectedSourceSha256, decisionOperationId } = {}) {
-    return this.#serial(() => this.#promoteCandidate({ target, candidateId, expectedSourceSha256, decisionOperationId }));
+    const requestedCandidateId = assertCandidateId(candidateId);
+    const expectedDecisionOperationId = `promote_${requestedCandidateId}`;
+    if (decisionOperationId !== expectedDecisionOperationId) {
+      throw new ProjectFileRepositoryError(
+        "DECISION_IDENTITY_MISMATCH",
+        "Adoption identity does not match this Candidate.",
+      );
+    }
+    return this.#serial(() => this.#promoteCandidate({
+      target,
+      candidateId: requestedCandidateId,
+      expectedSourceSha256,
+      decisionOperationId,
+    }));
   }
 
   async recoverProject({ projectRootPath } = {}) {
@@ -5767,8 +5784,10 @@ export class ProjectFileRepository {
     return await this.#readCandidateForLoaded(loaded, id);
   }
 
-  async #readCandidateForLoaded(loaded, candidateId) {
-    const requested = candidateId || loaded.runtime.activeCandidateId;
+  async #readCandidateForLoaded(loaded, candidateId, { requireExplicitCandidateId = false } = {}) {
+    const requested = requireExplicitCandidateId
+      ? candidateId
+      : candidateId || loaded.runtime.activeCandidateId;
     if (!requested || !/^candidate_[A-Za-z0-9_-]{8,160}$/u.test(requested)) {
       throw new ProjectFileRepositoryError("CANDIDATE_NOT_FOUND", "No Candidate is awaiting review.");
     }
@@ -5890,7 +5909,9 @@ export class ProjectFileRepository {
 
   async #rejectCandidate({ target, candidateId }) {
     const loaded = await this.#resolveMutationTarget(target);
-    const current = await this.#readCandidateForLoaded(loaded, candidateId);
+    const current = await this.#readCandidateForLoaded(loaded, candidateId, {
+      requireExplicitCandidateId: true,
+    });
     if (current.candidate.status === "promoted") {
       throw new ProjectFileRepositoryError("CANDIDATE_ALREADY_PROMOTED", "The Candidate is already a formal Version.");
     }
@@ -6348,11 +6369,21 @@ export class ProjectFileRepository {
   }
 
   async #promoteCandidate({ target, candidateId, expectedSourceSha256, decisionOperationId }) {
+    const requestedCandidateId = assertCandidateId(candidateId);
+    const expectedDecisionOperationId = `promote_${requestedCandidateId}`;
+    if (decisionOperationId !== expectedDecisionOperationId) {
+      throw new ProjectFileRepositoryError(
+        "DECISION_IDENTITY_MISMATCH",
+        "Adoption identity does not match this Candidate.",
+      );
+    }
     const loaded = await this.#resolveMutationTarget(target);
-    const candidateState = await this.#readCandidateForLoaded(loaded, candidateId);
+    const candidateState = await this.#readCandidateForLoaded(loaded, requestedCandidateId, {
+      requireExplicitCandidateId: true,
+    });
     await this.#assertCandidateSourceCurrent(loaded, candidateState.candidate);
     const transactionId = "promote_" + candidateState.candidate.candidateId;
-    if (decisionOperationId !== undefined && decisionOperationId !== transactionId) {
+    if (decisionOperationId !== transactionId) {
       throw new ProjectFileRepositoryError("DECISION_IDENTITY_MISMATCH", "Adoption identity does not match this Candidate.");
     }
     if (expectedSourceSha256 !== undefined && expectedSourceSha256 !== candidateState.candidate.expectedSourceSha256) {
