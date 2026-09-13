@@ -4693,7 +4693,7 @@ export class ProjectWorkflow {
             operationId: String(operationId),
           });
     } catch (cause) {
-      if (transitionFence) {
+      if (transitionFence && preparedCommitOutcomeUnknown(cause)) {
         throw sourceLocatorUnknown(
           "桌面工作文件切换结果待同一操作核对，请勿重复切换。",
           operationId,

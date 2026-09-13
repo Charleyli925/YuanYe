@@ -1972,6 +1972,76 @@ test("a v4 Working Copy transition uses the exact managed desktop activation", a
   }]);
 });
 
+test("managed desktop activation preserves a definite rejection", async (t) => {
+  const rejection = Object.freeze({
+    code: "MANAGED_WORKING_COPY_OPEN_FAILED",
+    message: "新版本文件暂时无法打开。",
+  });
+  const harness = createHarness({
+    projectOpen: {
+      async activateManagedWorkingCopy() {
+        throw rejection;
+      },
+    },
+  });
+  t.after(() => harness.workflow.dispose());
+
+  await assert.rejects(
+    () => harness.workflow.prepareManagedSourceTransition({
+      previousSourcePath: OLD_PATH,
+      nextSourcePath: B_PATH,
+      expectedSha256: sha256(B_HTML),
+      nextProjectId: "project_old",
+      nextDocumentId: "document_old",
+      versionId: "ver_0002",
+      openTarget: {
+        ...managedOpenTarget(B_PATH),
+        workingCopyId: "work_ver_0002",
+        versionId: "ver_0002",
+        sourceSha256: sha256(B_HTML),
+      },
+      operationId: "generated_transition_rejected_001",
+    }),
+    (cause) => cause === rejection,
+  );
+});
+
+test("managed desktop activation classifies a lost transport result as unknown", async (t) => {
+  const harness = createHarness({
+    projectOpen: {
+      async activateManagedWorkingCopy() {
+        throw Object.assign(new Error("response lost"), {
+          code: "PROJECT_SERVICE_UNAVAILABLE",
+        });
+      },
+    },
+  });
+  t.after(() => harness.workflow.dispose());
+
+  await assert.rejects(
+    () => harness.workflow.prepareManagedSourceTransition({
+      previousSourcePath: OLD_PATH,
+      nextSourcePath: B_PATH,
+      expectedSha256: sha256(B_HTML),
+      nextProjectId: "project_old",
+      nextDocumentId: "document_old",
+      versionId: "ver_0002",
+      openTarget: {
+        ...managedOpenTarget(B_PATH),
+        workingCopyId: "work_ver_0002",
+        versionId: "ver_0002",
+        sourceSha256: sha256(B_HTML),
+      },
+      operationId: "generated_transition_unknown_001",
+    }),
+    (cause) => (
+      cause?.code === "SOURCE_LOCATOR_RECONCILE_UNKNOWN"
+      && cause?.projectOutcome === "unknown"
+      && cause?.operationId === "generated_transition_unknown_001"
+    ),
+  );
+});
+
 test("v4 exposes no relocation workflow that can retarget a moved project", (t) => {
   const harness = createHarness();
   t.after(() => harness.workflow.dispose());
