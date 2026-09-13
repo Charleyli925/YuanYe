@@ -72,6 +72,55 @@ export function summarizeRuntimeObserverRecords(records) {
 
 export const classifyRuntimeObserverRecords = summarizeRuntimeObserverRecords;
 
+export function attributeRuntimeObserverRequests(records) {
+  const all = Array.isArray(records) ? records : [];
+  const requests = all.filter(record => record?.kind === RUNTIME_OBSERVER_RECORD_KINDS.REQUEST);
+  return requests.map(request => {
+    const related = all.filter(record => record !== request
+      && record?.requestOrdinal === request.requestOrdinal);
+    const candidateIds = [...new Set(related
+      .filter(record => record.kind === RUNTIME_OBSERVER_RECORD_KINDS.CANDIDATE)
+      .map(record => nonEmpty(record.candidateId)).filter(Boolean))];
+    return {
+      requestOrdinal: request.requestOrdinal,
+      execution: request.execution || null,
+      reason: request.reason || null,
+      sourceRevision: request.sourceRevision || null,
+      candidateIds,
+      candidateTerminals: related
+        .filter(record => record.kind === RUNTIME_OBSERVER_RECORD_KINDS.CANDIDATE_TERMINAL)
+        .map(record => ({ candidateId: record.candidateId || null, terminal: record.terminal || null })),
+      generations: related
+        .filter(record => record.kind === RUNTIME_OBSERVER_RECORD_KINDS.GENERATION)
+        .map(record => ({ before: record.beforeGeneration || null, after: record.afterGeneration || null,
+          candidateId: record.candidateId || null })),
+      activeIdentities: related
+        .filter(record => record.kind === RUNTIME_OBSERVER_RECORD_KINDS.ACTIVE_IDENTITY)
+        .map(record => ({ candidateId: record.candidateId || null, generation: record.generation || null,
+          documentId: record.documentId || null })),
+      runtimeTerminals: related
+        .filter(record => record.kind === RUNTIME_OBSERVER_RECORD_KINDS.RUNTIME_TERMINAL)
+        .map(record => ({ phase: record.phase || null, outcome: record.outcome || null,
+          candidateId: record.candidateId || null, generation: record.generation || null })),
+    };
+  });
+}
+
+export function setRuntimeLifecycleObservationContext(_element, context) {
+  const key = "__PAGEROOT_REAL_HTML_RUNTIME_OBSERVER__";
+  const state = globalThis[key];
+  if (!state) throw new Error("Runtime lifecycle observer is not active.");
+  const valid = context && /^H\d{2}$/u.test(context.fileId)
+    && Number.isInteger(context.round) && context.round > 0
+    && Number.isInteger(context.targetIndex) && context.targetIndex >= 0
+    && /^pr1_[a-f0-9]{32}$/u.test(context.targetId)
+    && typeof context.behavior === "string" && context.behavior.length > 0
+    && typeof context.operation === "string" && context.operation.length > 0;
+  if (!valid) throw new Error("Runtime lifecycle execution context is invalid.");
+  state.execution = { ...context };
+  return state.execution;
+}
+
 export function startRuntimeCandidateObservation(element, options = {}) {
   const key = "__PAGEROOT_REAL_HTML_RUNTIME_OBSERVER__";
   globalThis[key]?.observer?.disconnect();
@@ -93,6 +142,7 @@ export function startRuntimeCandidateObservation(element, options = {}) {
   const recorded = new Set();
   const frameCandidates = new WeakMap();
   let requestOrdinal = 0;
+  let observationOrdinal = 0;
   const observer = new MutationObserver((mutations) => {
     if (mutations.some(m => m.type === "attributes" && m.target === element
       && m.attributeName === "data-runtime-refresh-pending" && m.oldValue === null)) requestOrdinal++;
@@ -131,28 +181,38 @@ export function startRuntimeCandidateObservation(element, options = {}) {
             && entry.oldValue.trim() !== ""
           ))?.oldValue
           || null,
+        requestOrdinal,
+        observationOrdinal: ++observationOrdinal,
+        execution: globalThis[key]?.execution ? { ...globalThis[key].execution } : null,
       });
     };
     const recordLifecycle = (record) => {
       if (!includeLifecycle) return;
+      const enriched = {
+        ...record,
+        requestOrdinal: record.requestOrdinal ?? requestOrdinal,
+        observationOrdinal: ++observationOrdinal,
+        execution: globalThis[key]?.execution ? { ...globalThis[key].execution } : null,
+      };
       const recordKey = [
-        record.kind,
-        record.evidence,
-        record.candidateId || "unknown",
-        record.generation || "unknown",
-        record.beforeGeneration || "unknown",
-        record.afterGeneration || "unknown",
-        record.terminal || "unknown",
-        record.documentId || "unknown",
-        record.sourceRevision || "unknown",
-        record.reason || "unknown",
-        record.phase || "unknown",
-        record.outcome || "unknown",
-        record.requestOrdinal || "unknown",
+        enriched.kind,
+        enriched.evidence,
+        enriched.candidateId || "unknown",
+        enriched.generation || "unknown",
+        enriched.beforeGeneration || "unknown",
+        enriched.afterGeneration || "unknown",
+        enriched.terminal || "unknown",
+        enriched.documentId || "unknown",
+        enriched.sourceRevision || "unknown",
+        enriched.reason || "unknown",
+        enriched.phase || "unknown",
+        enriched.outcome || "unknown",
+        enriched.requestOrdinal || "unknown",
+        JSON.stringify(enriched.execution),
       ].join(":");
       if (recorded.has(`lifecycle:${recordKey}`)) return;
       recorded.add(`lifecycle:${recordKey}`);
-      lifecycleRecords.push(record);
+      lifecycleRecords.push(enriched);
     };
     for (const [index, mutation] of mutations.entries()) {
       if (
@@ -388,7 +448,7 @@ export function startRuntimeCandidateObservation(element, options = {}) {
       attributeFilter: ["data-edit-runtime-phase", "data-edit-runtime-outcome"],
     });
   }
-  globalThis[key] = { observer, records, lifecycleRecords, includeLifecycle };
+  globalThis[key] = { observer, records, lifecycleRecords, includeLifecycle, execution: null };
 }
 
 // Alias the same self-contained callback so Playwright can serialize either

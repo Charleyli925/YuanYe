@@ -3,6 +3,8 @@ import { expect, test } from "@playwright/test";
 import { REAL_HTML_OPERATION_IDS } from "../electron/real-html/plan.mjs";
 import { runtimeOperationOutcomes } from "../electron/real-html/runtime-lifecycle.mjs";
 import {
+  attributeRuntimeObserverRequests,
+  setRuntimeLifecycleObservationContext,
   startRuntimeLifecycleObservation,
   startRuntimeCandidateObservation,
   stopRuntimeLifecycleObservation,
@@ -16,6 +18,11 @@ test("repeated same-source rebuild requests remain separate without inventing mi
   await page.setContent('<main data-runtime-root></main>');
   const root = page.locator('[data-runtime-root]');
   await root.evaluate(startRuntimeLifecycleObservation);
+  await root.evaluate(setRuntimeLifecycleObservationContext, {
+    fileId: "H01", round: 2, targetIndex: 3,
+    targetId: "pr1_11111111111111111111111111111111",
+    behavior: "structure-rebuild", operation: "copy-edit-delete-element",
+  });
   for (let cycle = 1; cycle <= 2; cycle++) {
     await root.evaluate(e => {
       e.setAttribute('data-runtime-refresh-pending', '');
@@ -122,6 +129,11 @@ test("lifecycle observer proves Candidate, generation, promotion and Runtime ter
   </section>`);
   const root = page.locator("[data-runtime-root]");
   await root.evaluate(startRuntimeLifecycleObservation);
+  await root.evaluate(setRuntimeLifecycleObservationContext, {
+    fileId: "H01", round: 2, targetIndex: 3,
+    targetId: "pr1_11111111111111111111111111111111",
+    behavior: "structure-rebuild", operation: "copy-edit-delete-element",
+  });
 
   await root.evaluate((element) => {
     const oldActive = element.querySelector('iframe[data-runtime-slot-role="active"]');
@@ -188,6 +200,19 @@ test("lifecycle observer proves Candidate, generation, promotion and Runtime ter
     candidateId: "candidate-2",
     generation: "2",
   });
+  const attributions = attributeRuntimeObserverRequests(stopped.records);
+  expect(attributions).toHaveLength(1);
+  expect(attributions[0]).toMatchObject({
+    requestOrdinal: 1,
+    execution: { fileId: "H01", round: 2, targetIndex: 3,
+      targetId: "pr1_11111111111111111111111111111111",
+      behavior: "structure-rebuild", operation: "copy-edit-delete-element" },
+    reason: "structure-edit",
+    sourceRevision: "source-2",
+    candidateIds: ["candidate-2"],
+  });
+  expect(attributions[0].generations.some(result => result.after === "2")).toBe(true);
+  expect(attributions[0].candidateTerminals).toContainEqual({ candidateId: "candidate-2", terminal: "ready" });
 });
 
 test("promotion is bound to its iframe, not delayed last-known-good metadata", async ({ page }) => {

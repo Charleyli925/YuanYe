@@ -18,7 +18,8 @@ import { createExtendedLedger, markRemainingExtendedLedger, readFrozenExtendedMa
   clipboardSourceExpectation, verifyAdjacentMove, verifyClipboardTransfer, verifyExtendedFailureStop, verifyExtendedLedger,
   verifyRebuildContinuation }
   from "./real-html/frozen-extended-stress.mjs";
-import { startRuntimeLifecycleObservation, stopRuntimeLifecycleObservation } from "./real-html/runtime-observer.mjs";
+import { attributeRuntimeObserverRequests, setRuntimeLifecycleObservationContext,
+  startRuntimeLifecycleObservation, stopRuntimeLifecycleObservation } from "./real-html/runtime-observer.mjs";
 import { workspaceSourceFingerprint } from "./real-html/workspace-provenance.mjs";
 import { EDIT_AUTHOR_RUNTIME_VERIFICATION_DEADLINE_MS } from "../../../app/domain/edit-runtime-contract.js";
 
@@ -328,30 +329,47 @@ async function runTarget({ electronApp, page, editor, target, targetIndex, round
   const actual = [];
   const marker = `PRX_${fileId}_R${round}_T${targetIndex}`;
   const has = behavior => target.behaviors.includes(behavior);
-  if (has("clipboard-short")) actual.push({ behavior: "clipboard-short", result: await clipboardMutation(
-    { electronApp, page, editor, target, calls, readSource, marker, large: false }) });
-  if (has("space-enter")) actual.push({ behavior: "space-enter", result: await textMutation(
-    { page, editor, target, calls, readSource, marker, newline: true }) });
-  if (has("clipboard-large")) actual.push({ behavior: "clipboard-large", result: await clipboardMutation(
-    { electronApp, page, editor, target, calls, readSource, marker, large: true }) });
-  if (has("format")) actual.push({ behavior: "format", result: await formatMutation({ page, editor, target, calls, readSource }) });
-  if (has("move")) actual.push({ behavior: "move", result: await moveMutation({ page, editor, target, calls, readSource }) });
-  if (has("comment-delete")) actual.push({ behavior: "comment-delete", result: await commentMutation(
-    { page, editor, target, calls, readSource, readComments, marker: `PRCOMMENT_${marker}` }) });
-  if (has("reactivate")) actual.push({ behavior: "reactivate", result: await reactivation({ page, editor, target, calls }) });
-  if (has("text-edit")) actual.push({ behavior: "text-edit", result: await textMutation(
-    { page, editor, target, calls, readSource, marker, newline: false }) });
+  const execute = async (behavior, operation, action) => {
+    await editor.evaluate(setRuntimeLifecycleObservationContext, {
+      fileId, round, targetIndex, targetId: target.selectedId, behavior, operation,
+    });
+    return action();
+  };
+  if (has("clipboard-short")) actual.push({ behavior: "clipboard-short", result: await execute(
+    "clipboard-short", "copy-paste-short-text", () => clipboardMutation(
+      { electronApp, page, editor, target, calls, readSource, marker, large: false })) });
+  if (has("space-enter")) actual.push({ behavior: "space-enter", result: await execute(
+    "space-enter", "insert-space-and-enter", () => textMutation(
+      { page, editor, target, calls, readSource, marker, newline: true })) });
+  if (has("clipboard-large")) actual.push({ behavior: "clipboard-large", result: await execute(
+    "clipboard-large", "copy-paste-large-text", () => clipboardMutation(
+      { electronApp, page, editor, target, calls, readSource, marker, large: true })) });
+  if (has("format")) actual.push({ behavior: "format", result: await execute(
+    "format", "toggle-bold", () => formatMutation({ page, editor, target, calls, readSource })) });
+  if (has("move")) actual.push({ behavior: "move", result: await execute(
+    "move", "move-and-restore-element", () => moveMutation({ page, editor, target, calls, readSource })) });
+  if (has("comment-delete")) actual.push({ behavior: "comment-delete", result: await execute(
+    "comment-delete", "create-and-delete-comment", () => commentMutation(
+      { page, editor, target, calls, readSource, readComments, marker: `PRCOMMENT_${marker}` })) });
+  if (has("reactivate")) actual.push({ behavior: "reactivate", result: await execute(
+    "reactivate", "reactivate-twice", () => reactivation({ page, editor, target, calls })) });
+  if (has("text-edit")) actual.push({ behavior: "text-edit", result: await execute(
+    "text-edit", "edit-and-restore-text", () => textMutation(
+      { page, editor, target, calls, readSource, marker, newline: false })) });
   if (has("structure-rebuild")) {
-    await selectExact(page, editor, target, calls);
-    const rows = target.operations.map(operation => ({ operation, targetId: target.selectedId,
-      state: "NOT_EXECUTED", reason: "DEPENDENCY_NOT_COMPLETED", durationMs: null }));
-    const result = await executeFrozenStructure({ frame: await activeFrame(editor), target, page, editor,
-      fileId: `${fileId}_R${round}`, readSource, rows, calls });
-    actual.push({ behavior: "structure-rebuild", result, operations: rows });
+    const result = await execute("structure-rebuild", "copy-edit-delete-element", async () => {
+      await selectExact(page, editor, target, calls);
+      const rows = target.operations.map(operation => ({ operation, targetId: target.selectedId,
+        state: "NOT_EXECUTED", reason: "DEPENDENCY_NOT_COMPLETED", durationMs: null }));
+      const value = await executeFrozenStructure({ frame: await activeFrame(editor), target, page, editor,
+        fileId: `${fileId}_R${round}`, readSource, rows, calls });
+      return { value, rows };
+    });
+    actual.push({ behavior: "structure-rebuild", result: result.value, operations: result.rows });
   }
   if (has("reactivate-rebuild")) actual.push({ behavior: "reactivate-rebuild",
-    result: await rebuildContinuationMutation({ page, editor, target: target.continuationTarget, calls, readSource,
-      marker: `PRCONT_${marker}` }) });
+    result: await execute("reactivate-rebuild", "continue-edit-after-rebuild", () => rebuildContinuationMutation(
+      { page, editor, target: target.continuationTarget, calls, readSource, marker: `PRCONT_${marker}` })) });
   requireFact(actual.length === target.behaviors.length, "EXTENDED_BEHAVIOR_LEDGER_MISMATCH",
     { expected: target.behaviors, actual: actual.map(item => item.behavior) });
   return actual;
@@ -418,6 +436,7 @@ try {
     }
   }
   report.lifecycle = await editor.evaluate(stopRuntimeLifecycleObservation); observerStarted = false;
+  report.lifecycle.requestAttributions = attributeRuntimeObserverRequests(report.lifecycle.records);
   await closePageRootGracefully(session.electronApp, page); session.electronApp = null;
   session = await launchPageRoot({ isolatedUserData: session.isolatedUserData });
   await waitForProjectReady(session.page);
@@ -438,7 +457,8 @@ try {
   try { report.failureStop = verifyExtendedFailureStop(report.rows, file.targets.length, plan.rounds); }
   catch (ledgerError) { report.failureStopError = { code: ledgerError.code, details: ledgerError.details }; }
   if (editor && observerStarted) {
-    try { report.lifecycle = await editor.evaluate(stopRuntimeLifecycleObservation); observerStarted = false; }
+    try { report.lifecycle = await editor.evaluate(stopRuntimeLifecycleObservation); observerStarted = false;
+      report.lifecycle.requestAttributions = attributeRuntimeObserverRequests(report.lifecycle.records); }
     catch (captureError) { report.lifecycleCaptureError = captureError.message; }
   }
   if (session?.page) await session.page.screenshot({ path: path.join(output, "failure.png") }).catch(() => {});
